@@ -9,9 +9,8 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 use tauri::{
     menu::{Menu, MenuItem},
-    tray::TrayIconBuilder,
-    Manager,
-    WindowEvent,
+    tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
+    AppHandle, Manager, RunEvent,
 };
 use tauri_plugin_store::StoreExt;
 
@@ -59,15 +58,22 @@ pub fn run() {
             TrayIconBuilder::with_id("main")
                 .icon(app.default_window_icon().unwrap().clone())
                 .menu(&menu)
-                .tooltip("xapi - LLM API Gateway")
+                .tooltip("xapi - Local LLM API Gateway")
+                .show_menu_on_left_click(false)
+                .on_tray_icon_event(|tray, event| {
+                    if let TrayIconEvent::Click {
+                        button: MouseButton::Left,
+                        button_state: MouseButtonState::Up,
+                        ..
+                    } = event
+                    {
+                        let _ = restore_main_window(tray.app_handle());
+                    }
+                })
                 .on_menu_event(|app, event| match event.id.as_ref() {
                     "quit" => app.exit(0),
                     "show" => {
-                        if let Some(window) = app.get_webview_window("main") {
-                            let _ = window.show();
-                            let _ = window.unminimize();
-                            let _ = window.set_focus();
-                        }
+                        let _ = restore_main_window(app);
                     }
                     _ => {}
                 })
@@ -76,16 +82,9 @@ pub fn run() {
             if let Some(window) = app.get_webview_window("main") {
                 let app_handle = app.handle().clone();
                 window.on_window_event(move |event| match event {
-                    WindowEvent::CloseRequested { api, .. } => {
+                    tauri::WindowEvent::CloseRequested { api, .. } => {
                         if should_close_to_tray(&app_handle) {
                             api.prevent_close();
-                            if let Some(main_window) = app_handle.get_webview_window("main") {
-                                let _ = main_window.hide();
-                            }
-                        }
-                    }
-                    WindowEvent::Focused(false) => {
-                        if should_minimize_to_tray(&app_handle) {
                             if let Some(main_window) = app_handle.get_webview_window("main") {
                                 let _ = main_window.hide();
                             }
@@ -135,8 +134,23 @@ pub fn run() {
             commands::server::get_server_status,
             commands::server::restart_server,
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running xapi");
+        .build(tauri::generate_context!())
+        .expect("error while building xapi")
+        .run(|app, event| {
+            if let RunEvent::Reopen { .. } = event {
+                let _ = restore_main_window(app);
+            }
+        });
+}
+
+fn restore_main_window(app: &AppHandle) -> tauri::Result<()> {
+    if let Some(window) = app.get_webview_window("main") {
+        let _ = app.show();
+        let _ = window.unminimize();
+        let _ = window.show();
+        let _ = window.set_focus();
+    }
+    Ok(())
 }
 
 fn should_close_to_tray(app: &tauri::AppHandle) -> bool {
@@ -144,11 +158,4 @@ fn should_close_to_tray(app: &tauri::AppHandle) -> bool {
         .ok()
         .and_then(|store| store.get("general.close_to_tray").and_then(|v| v.as_bool()))
         .unwrap_or(true)
-}
-
-fn should_minimize_to_tray(app: &tauri::AppHandle) -> bool {
-    app.store("settings.json")
-        .ok()
-        .and_then(|store| store.get("general.minimize_to_tray").and_then(|v| v.as_bool()))
-        .unwrap_or(false)
 }

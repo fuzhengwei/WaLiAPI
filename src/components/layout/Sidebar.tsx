@@ -44,7 +44,7 @@ export function Sidebar() {
           </div>
           <div className="min-w-0 flex-1">
             <div className="text-[10px] font-semibold uppercase tracking-[0.24em] text-slate-500">AI网关，统一模型配置和负载</div>
-            <div className="mt-1 text-[24px] font-semibold tracking-[-0.03em] text-slate-900">xapi</div>
+            <div className="mt-1 text-[24px] font-semibold tracking-[-0.03em] text-slate-900">XAPI</div>
           </div>
         </div>
       </div>
