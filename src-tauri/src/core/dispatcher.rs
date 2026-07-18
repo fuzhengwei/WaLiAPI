@@ -14,7 +14,15 @@ impl Dispatcher {
                     return false;
                 }
                 let models: Vec<String> = serde_json::from_str(&c.models).unwrap_or_default();
-                models.is_empty() || models.iter().any(|m| m == requested_model)
+                if models.iter().any(|m| m == requested_model) {
+                    return true;
+                }
+                // Also check model mapping aliases
+                let mapping: serde_json::Value = serde_json::from_str(&c.model_mapping).unwrap_or(serde_json::Value::Null);
+                if let Some(obj) = mapping.as_object() {
+                    return obj.contains_key(requested_model);
+                }
+                false
             })
             .collect();
 

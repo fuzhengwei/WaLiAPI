@@ -172,6 +172,21 @@ pub async fn handle_list_models(State(shared): State<SharedState>) -> Response {
                         }));
                     }
                 }
+                // Also include model mapping aliases
+                let mapping: serde_json::Value = serde_json::from_str(&ch.model_mapping).unwrap_or(serde_json::Value::Null);
+                if let Some(obj) = mapping.as_object() {
+                    for (alias, upstream) in obj {
+                        if let Some(upstream_str) = upstream.as_str() {
+                            if seen.insert(alias.clone()) {
+                                models.push(serde_json::json!({
+                                    "id": alias, "object": "model",
+                                    "created": chrono::Utc::now().timestamp(),
+                                    "owned_by": ch.channel_type,
+                                }));
+                            }
+                        }
+                    }
+                }
             }
             Json(serde_json::json!({ "object": "list", "data": models })).into_response()
         }
