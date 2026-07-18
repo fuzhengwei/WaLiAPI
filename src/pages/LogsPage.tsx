@@ -231,12 +231,7 @@ function LogRow({
 
               {/* Request body */}
               {log.request_body ? (
-                <div>
-                  <div className="text-xs text-muted-foreground mb-1">请求内容:</div>
-                  <pre className="max-h-60 overflow-auto rounded-lg bg-black/5 p-3 text-xs font-mono whitespace-pre-wrap break-all">
-                    {log.request_body}
-                  </pre>
-                </div>
+                <RequestBodyView body={log.request_body} />
               ) : (
                 <div className="text-xs text-muted-foreground/50">无请求内容记录</div>
               )}
@@ -284,6 +279,105 @@ function CleanLogsModal({
           取消
         </button>
       </div>
+    </div>
+  );
+}
+
+function RequestBodyView({ body }: { body: string }) {
+  const [expanded, setExpanded] = useState(false);
+
+  // Try to parse and pretty-print
+  let parsed: unknown = null;
+  let pretty = body;
+  let parseError = false;
+  try {
+    parsed = JSON.parse(body);
+    pretty = JSON.stringify(parsed, null, 2);
+  } catch {
+    parseError = true;
+  }
+
+  const byteSize = new Blob([body]).size;
+  const sizeLabel = byteSize > 1024 ? `${(byteSize / 1024).toFixed(1)} KB` : `${byteSize} B`;
+
+  // Extract key fields for summary
+  const summary = (() => {
+    if (!parsed || typeof parsed !== "object") return null;
+    const obj = parsed as Record<string, unknown>;
+    const parts: string[] = [];
+    if (obj.model) parts.push(`model: ${obj.model}`);
+    if (obj.stream) parts.push("stream: true");
+    if (obj.temperature !== undefined) parts.push(`temperature: ${obj.temperature}`);
+    if (obj.max_tokens !== undefined) parts.push(`max_tokens: ${obj.max_tokens}`);
+    if (Array.isArray(obj.messages)) parts.push(`messages: ${obj.messages.length} 条`);
+    return parts;
+  })();
+
+  // Extract messages preview if available
+  const messages = (() => {
+    if (!parsed || typeof parsed !== "object") return null;
+    const obj = parsed as Record<string, unknown>;
+    if (!Array.isArray(obj.messages)) return null;
+    return obj.messages as Array<Record<string, unknown>>;
+  })();
+
+  return (
+    <div>
+      <div className="flex items-center justify-between mb-1">
+        <span className="text-xs text-muted-foreground">请求内容 ({sizeLabel})</span>
+        <button
+          onClick={() => setExpanded(!expanded)}
+          className="text-xs text-blue-400 hover:text-blue-300 transition-colors"
+        >
+          {expanded ? "收起" : "展开全部"}
+        </button>
+      </div>
+
+      {/* Summary — always visible */}
+      {summary && (
+        <div className="flex flex-wrap gap-2 mb-2">
+          {summary.map((s, i) => (
+            <span key={i} className="rounded-md bg-blue-500/10 px-2 py-0.5 text-[11px] text-blue-300 font-mono">
+              {s}
+            </span>
+          ))}
+        </div>
+      )}
+
+      {/* Messages preview — always visible, shows role + truncated content */}
+      {messages && !expanded && (
+        <div className="space-y-1 mb-2">
+          {messages.slice(0, 3).map((msg, i) => {
+            const role = msg.role as string || "unknown";
+            const content = typeof msg.content === "string"
+              ? msg.content
+              : JSON.stringify(msg.content);
+            const truncated = content.length > 200 ? content.slice(0, 200) + "..." : content;
+            return (
+              <div key={i} className="flex gap-2 rounded-md bg-black/5 px-3 py-1.5 text-xs">
+                <span className="shrink-0 font-semibold text-muted-foreground w-16">{role}</span>
+                <span className="font-mono text-muted-foreground truncate">{truncated}</span>
+              </div>
+            );
+          })}
+          {messages.length > 3 && (
+            <div className="text-xs text-muted-foreground/60 pl-2">
+              ...还有 {messages.length - 3} 条消息，点击「展开全部」查看
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* Full JSON — only when expanded */}
+      {expanded && (
+        <pre className="max-h-96 overflow-auto rounded-lg bg-black/5 p-3 text-xs font-mono whitespace-pre-wrap break-all">
+          {pretty}
+        </pre>
+      )}
+
+      {parseError && (
+        <div className="text-xs text-amber-400 mt-1">⚠ JSON 解析失败，显示原始内容</div>
+      )}
     </div>
   );
 }

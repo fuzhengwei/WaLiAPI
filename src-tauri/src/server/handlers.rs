@@ -41,15 +41,8 @@ pub async fn handle_chat_completions(
         return (StatusCode::TOO_MANY_REQUESTS, "Quota exceeded").into_response();
     }
 
-    // Store request body for logging (truncate to avoid huge logs)
-    let request_body_str = {
-        let compact = serde_json::to_string(&json).unwrap_or_default();
-        if compact.len() > 8000 {
-            format!("{{...truncated...({} bytes)}}", compact.len())
-        } else {
-            compact
-        }
-    };
+    // Store full request body for logging (no truncation — let frontend handle display)
+    let request_body_str = serde_json::to_string(&json).unwrap_or_default();
 
     if is_stream {
         handle_stream(shared, json, key_record.id, key_record.name, request_body_str).await
