@@ -44,24 +44,23 @@ export function Sidebar() {
   return (
     <aside className="w-72 h-screen flex-col border-r border-slate-200 bg-[#eef3f8] px-3 py-3 hidden md:flex">
       <div className="surface rounded-[22px] p-5">
-        <div className="flex items-center justify-between gap-3">
-          <div className="text-[26px] font-bold tracking-[-0.04em] text-slate-900 leading-none">WaLiAPI</div>
-          <span className="rounded-full border border-blue-100 bg-blue-50 px-2 py-0.5 text-[11px] font-semibold text-blue-600">
-            v{appVersion}
-          </span>
-        </div>
-        <div className="mt-2 text-[11px] font-medium text-slate-500">AI 网关 · 统一模型配置和负载</div>
-        <div className="mt-4 flex items-center gap-3">
-          <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-2xl bg-white shadow-[0_10px_20px_rgba(47,111,237,0.18)] overflow-hidden">
+        <div className="flex items-center gap-3">
+          <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-white shadow-[0_8px_16px_rgba(47,111,237,0.18)] overflow-hidden">
             <img src="/logo.png" alt="WaLiAPI" className="h-full w-full object-cover" />
           </div>
-          <div className="min-w-0 text-[11px] leading-relaxed text-slate-500">
-            统一接入多供应商 LLM 渠道、密钥、统计与故障切换，让本地模型服务更易用。
+          <div className="min-w-0 flex-1">
+            <div className="flex items-center justify-between gap-2">
+              <div className="text-[20px] font-bold tracking-[-0.04em] text-slate-900 leading-none">WaLiAPI</div>
+              <span className="rounded-full border border-blue-100 bg-blue-50 px-2 py-0.5 text-[10px] font-semibold text-blue-600">
+                v{appVersion}
+              </span>
+            </div>
+            <div className="mt-1.5 text-[11px] font-medium text-slate-500">AI 网关 · 统一模型配置和负载</div>
           </div>
         </div>
       </div>
 
-      <nav className="mt-4 flex-1 space-y-1.5">
+      <nav className="mt-4 flex-1 min-h-0 space-y-1.5 overflow-y-auto">
         {navItems.map(({ to, icon: Icon, label }) => (
           <NavLink
             key={to}
