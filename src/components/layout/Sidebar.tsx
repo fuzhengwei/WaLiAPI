@@ -36,15 +36,15 @@ export function Sidebar() {
   }, []);
 
   return (
-    <aside className="w-72 h-screen flex-col border-r border-white/6 bg-[#11141a] px-3 py-3 hidden md:flex">
+    <aside className="w-72 h-screen flex-col border-r border-slate-200 bg-[#eef3f8] px-3 py-3 hidden md:flex">
       <div className="surface rounded-[22px] p-5">
         <div className="flex items-start gap-4">
-          <div className="flex h-11 w-11 items-center justify-center rounded-2xl border border-white/8 bg-[#1c212a] text-[#cbd5e1]">
+          <div className="flex h-11 w-11 items-center justify-center rounded-2xl bg-[linear-gradient(180deg,#3c82f6,#2f6fed)] text-white shadow-[0_10px_20px_rgba(47,111,237,0.18)]">
             <Sparkles size={17} />
           </div>
           <div className="min-w-0 flex-1">
-            <div className="text-[10px] font-semibold uppercase tracking-[0.24em] text-muted-foreground">Local Gateway</div>
-            <div className="mt-1 text-[24px] font-semibold tracking-[-0.03em] text-white">xapi</div>
+            <div className="text-[10px] font-semibold uppercase tracking-[0.24em] text-slate-500">AI网关，统一模型配置和负载</div>
+            <div className="mt-1 text-[24px] font-semibold tracking-[-0.03em] text-slate-900">xapi</div>
           </div>
         </div>
       </div>
@@ -57,12 +57,12 @@ export function Sidebar() {
             className={({ isActive }) =>
               `group flex items-center gap-3 rounded-2xl px-4 py-3 text-sm transition-all ${
                 isActive || (to === "/" && location.pathname === "/")
-                  ? "border border-white/6 bg-[#1b2028] text-white"
-                  : "text-muted-foreground hover:bg-white/4 hover:text-foreground"
+                  ? "border border-blue-100 bg-white text-slate-900 shadow-[0_8px_18px_rgba(15,23,42,0.05)]"
+                  : "text-slate-600 hover:bg-white/70 hover:text-slate-900"
               }`
             }
           >
-            <span className="flex h-9 w-9 items-center justify-center rounded-xl border border-white/6 bg-white/[0.03] group-hover:bg-white/[0.05]">
+            <span className="flex h-9 w-9 items-center justify-center rounded-xl border border-slate-200 bg-white group-hover:bg-slate-50">
               <Icon size={17} />
             </span>
             <span className="font-medium">{label}</span>
@@ -74,18 +74,18 @@ export function Sidebar() {
       <div className="surface-soft rounded-[20px] p-4">
         <div className="mb-3 flex items-center justify-between">
           <div>
-            <div className="text-xs text-muted-foreground">服务状态</div>
-            <div className="mt-1 text-sm font-medium text-foreground">
+            <div className="text-xs text-slate-500">服务状态</div>
+            <div className="mt-1 text-sm font-medium text-slate-900">
               {serverStatus?.running ? "运行中" : "未启动"}
             </div>
           </div>
-          <span className={`h-2.5 w-2.5 rounded-full ${serverStatus?.running ? "bg-emerald-400" : "bg-red-400"}`} />
+          <span className={`h-2.5 w-2.5 rounded-full ${serverStatus?.running ? "bg-emerald-500" : "bg-rose-500"}`} />
         </div>
-        <div className="flex items-start gap-3 rounded-2xl border border-white/5 bg-black/12 px-3 py-3 text-xs text-muted-foreground">
-          <Server size={14} className={serverStatus?.running ? "text-emerald-400" : "text-red-400"} />
+        <div className="flex items-start gap-3 rounded-2xl border border-slate-200 bg-white px-3 py-3 text-xs text-slate-500">
+          <Server size={14} className={serverStatus?.running ? "text-emerald-500" : "text-rose-500"} />
           <div className="min-w-0 flex-1">
             <div className="mb-1">访问地址</div>
-            <div className="truncate font-mono text-[12px] text-foreground/88">
+            <div className="truncate font-mono text-[12px] text-slate-700">
               {serverStatus?.running ? serverStatus.url : "等待服务启动"}
             </div>
           </div>
