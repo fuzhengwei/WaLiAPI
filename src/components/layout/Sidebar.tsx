@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { NavLink, useLocation } from "react-router-dom";
 import {
   LayoutDashboard,
+  BookOpen,
   Radio,
   Key,
   ScrollText,
@@ -13,6 +14,7 @@ import type { ServerStatus } from "../../types";
 
 const navItems = [
   { to: "/", icon: LayoutDashboard, label: "仪表盘" },
+  { to: "/usage", icon: BookOpen, label: "使用" },
   { to: "/channels", icon: Radio, label: "渠道" },
   { to: "/api-keys", icon: Key, label: "密钥" },
   { to: "/logs", icon: ScrollText, label: "日志" },
