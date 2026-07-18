@@ -37,8 +37,8 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GH_PAT }}
         with:
-          tagName: xapi-v__VERSION__
-          releaseName: 'xapi v__VERSION__'
+          tagName: waliapi-v__VERSION__
+          releaseName: 'WaLiAPI v__VERSION__'
           releaseBody: 'See the assets to download this version and install.'
           releaseDraft: true
           prerelease: false
