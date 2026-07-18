@@ -94,7 +94,7 @@ export function DashboardPage() {
             <div className="inline-flex items-center gap-2 rounded-full border border-blue-100 bg-blue-50 px-3 py-1 text-xs font-medium text-blue-700">
               <Sparkle className="h-3.5 w-3.5" /> 控制台首页
             </div>
-            <h1 className="mt-4 text-4xl font-semibold tracking-[-0.04em] text-slate-900">欢迎使用 xapi</h1>
+            <h1 className="mt-4 text-4xl font-semibold tracking-[-0.04em] text-slate-900">欢迎使用 WaLiAPI</h1>
             <p className="mt-3 text-sm leading-6 text-slate-500 md:text-[15px]">
               在一个统一入口中管理上游模型渠道、下游密钥、请求统计与故障切换，让本地 LLM 网关更稳定、更清晰、更易运维。
             </p>

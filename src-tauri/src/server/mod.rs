@@ -28,7 +28,7 @@ pub async fn start_server(app: AppHandle, state: std::sync::Arc<AppState>) -> Re
     )
     .ok();
 
-    tracing::info!("xapi server listening on http://{}:{}", host, actual_port);
+    tracing::info!("WaLiAPI server listening on http://{}:{}", host, actual_port);
 
     axum::serve(listener, router).await?;
 

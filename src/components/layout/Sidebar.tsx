@@ -16,6 +16,7 @@ import {
 } from "lucide-react";
 import { serverApi } from "../../lib/api";
 import type { ServerStatus } from "../../types";
+import packageJson from "../../../package.json";
 
 const navItems = [
   { to: "/", icon: LayoutDashboard, label: "仪表盘" },
@@ -26,7 +27,8 @@ const navItems = [
   { to: "/settings", icon: Settings, label: "设置" },
 ];
 
-const githubUrl = "https://github.com/fuzhengwei/xapi";
+const githubUrl = "https://github.com/fuzhengwei/WaLiAPI";
+const appVersion = packageJson.version;
 
 export function Sidebar() {
   const [serverStatus, setServerStatus] = useState<ServerStatus | null>(null);
@@ -48,8 +50,13 @@ export function Sidebar() {
             <Sparkles size={17} />
           </div>
           <div className="min-w-0 flex-1">
-            <div className="text-[10px] font-semibold uppercase tracking-[0.24em] text-slate-500">AI网关，统一模型配置和负载</div>
-            <div className="mt-1 text-[24px] font-semibold tracking-[-0.03em] text-slate-900">XAPI</div>
+            <div className="flex items-start justify-between gap-3">
+              <div className="text-[10px] font-semibold uppercase tracking-[0.24em] text-slate-500">AI网关，统一模型配置和负载</div>
+              <span className="rounded-full border border-blue-100 bg-blue-50 px-2 py-0.5 text-[11px] font-semibold text-blue-600">
+                v{appVersion}
+              </span>
+            </div>
+            <div className="mt-1 text-[24px] font-semibold tracking-[-0.03em] text-slate-900">WaLiAPI</div>
           </div>
         </div>
       </div>
@@ -107,7 +114,7 @@ export function Sidebar() {
           </span>
           <span className="min-w-0 flex-1">
             <span className="block font-medium">GitHub 开源仓库</span>
-            <span className="block truncate text-xs text-slate-500">github.com/fuzhengwei/xapi</span>
+            <span className="block truncate text-xs text-slate-500">github.com/fuzhengwei/WaLiAPI</span>
           </span>
           <ExternalLink size={14} className="text-slate-400" />
         </button>

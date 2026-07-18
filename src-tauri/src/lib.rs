@@ -33,7 +33,7 @@ pub fn run() {
         .plugin(
             tauri_plugin_sql::Builder::default()
                 .add_migrations(
-                    "sqlite:xapi.db",
+                    "sqlite:waliapi.db",
                     vec![tauri_plugin_sql::Migration {
                         version: 1,
                         description: "init database",
@@ -58,7 +58,7 @@ pub fn run() {
             TrayIconBuilder::with_id("main")
                 .icon(app.default_window_icon().unwrap().clone())
                 .menu(&menu)
-                .tooltip("xapi - Local LLM API Gateway")
+                .tooltip("WaLiAPI - Local LLM API Gateway")
                 .show_menu_on_left_click(false)
                 .on_tray_icon_event(|tray, event| {
                     if let TrayIconEvent::Click {
@@ -135,7 +135,7 @@ pub fn run() {
             commands::server::restart_server,
         ])
         .build(tauri::generate_context!())
-        .expect("error while building xapi")
+        .expect("error while building WaLiAPI")
         .run(|app, event| {
             if let RunEvent::Reopen { .. } = event {
                 let _ = restore_main_window(app);

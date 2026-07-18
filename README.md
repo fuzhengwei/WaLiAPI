@@ -1,4 +1,4 @@
-# xapi
+# WaLiAPI
 
 > 本地运行的 LLM API 网关桌面软件，统一转换各供应商 API 为 OpenAI 兼容协议。
 
@@ -11,7 +11,7 @@
 ## 功能
 
 - 🔌 **多渠道管理** — 支持 OpenAI、DeepSeek、Claude、Gemini、智谱、通义、Moonshot、豆包、Ollama、自定义
-- 🔑 **密钥管理** — 为下游应用生成 `sk-xapi-*` 格式的访问密钥，支持配额限制
+- 🔑 **密钥管理** — 为下游应用生成 `sk-waliapi-*` 格式的访问密钥，支持配额限制
 - 📊 **仪表盘** — 请求统计、Token 消耗、渠道状态
 - 📝 **请求日志** — 完整的 API 调用记录
 - 🔄 **负载均衡** — 优先级 + 权重的渠道选择
@@ -36,15 +36,15 @@ pnpm tauri build
 ### 使用方法
 
 1. **配置渠道** — 在"渠道"页面添加上游 API 供应商
-2. **创建密钥** — 在"密钥"页面生成 `sk-xapi-*` 格式的本地密钥
+2. **创建密钥** — 在"密钥"页面生成 `sk-waliapi-*` 格式的本地密钥
 3. **下游接入** — 在 ChatBox / NextChat / OpenAI SDK 中配置：
    - Base URL: `http://127.0.0.1:{port}/v1`
-   - API Key: 创建的 `sk-xapi-...` 密钥
+   - API Key: 创建的 `sk-waliapi-...` 密钥
 
 ## 项目结构
 
 ```
-xapi/
+WaLiAPI/
 ├── src/                    # React 前端
 │   ├── components/         # 通用组件
 │   ├── pages/              # 页面（Dashboard/Channels/ApiKeys/Logs/Settings）

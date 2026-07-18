@@ -148,7 +148,7 @@ impl Repository {
     pub async fn create_api_key(&self, input: &CreateApiKeyInput) -> Result<ApiKey, sqlx::Error> {
         let id = uuid::Uuid::new_v4().to_string();
         let now = now_iso();
-        let key = format!("sk-xapi-{}", uuid::Uuid::new_v4().simple());
+        let key = format!("sk-waliapi-{}", uuid::Uuid::new_v4().simple());
         let allowed_models = serde_json::to_string(&input.allowed_models.clone().unwrap_or_default()).unwrap_or_else(|_| "[]".to_string());
         let allowed_channels = serde_json::to_string(&input.allowed_channels.clone().unwrap_or_default()).unwrap_or_else(|_| "[]".to_string());
 

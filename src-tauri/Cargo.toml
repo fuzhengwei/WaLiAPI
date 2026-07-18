@@ -1,12 +1,12 @@
 [package]
-name = "xapi"
+name = "waliapi"
 version = "0.1.0"
-description = "xapi - Local LLM API Gateway"
+description = "WaLiAPI - Local LLM API Gateway"
 authors = ["xiaofuge"]
 edition = "2021"
 
 [lib]
-name = "xapi_lib"
+name = "waliapi_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
 [build-dependencies]

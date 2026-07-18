@@ -46,7 +46,7 @@ export function ApiKeysPage() {
         <div className="surface empty-state">
           <Key className="h-12 w-12 text-muted-foreground/70" />
           <p className="text-base font-medium">还没有创建任何密钥</p>
-          <p className="text-sm text-muted-foreground">创建后即可让客户端通过 OpenAI 兼容协议接入 xapi</p>
+          <p className="text-sm text-muted-foreground">创建后即可让客户端通过 OpenAI 兼容协议接入 WaLiAPI</p>
         </div>
       ) : (
         <div className="grid grid-cols-1 gap-4 xl:grid-cols-2">
