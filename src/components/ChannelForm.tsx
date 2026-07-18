@@ -13,11 +13,15 @@ function ModelMappingInput({ models, existingMapping, onAdd }: {
   const [alias, setAlias] = useState("");
   const [showCustom, setShowCustom] = useState(false);
 
+  // All aliases already used (keys of mapping)
   const usedAliases = Object.keys(existingMapping);
-  const availableUpstream = models.filter(m => !Object.values(existingMapping).includes(m));
+  // All upstream models already mapped (values of mapping)
+  const usedUpstream = Object.values(existingMapping);
 
   const handleAdd = () => {
     if (!upstream || !alias) return;
+    // Don't add duplicate aliases
+    if (usedAliases.includes(alias)) return;
     onAdd(upstream, alias);
     setUpstream("");
     setAlias("");
@@ -26,26 +30,33 @@ function ModelMappingInput({ models, existingMapping, onAdd }: {
 
   return (
     <div className="flex items-center gap-2">
+      {/* Left: upstream model — allow reusing models that are already mapped */}
       <select
         value={upstream}
         onChange={e => setUpstream(e.target.value)}
         className="flex-1 px-2 py-1.5 rounded-lg border border-border bg-background text-xs font-mono"
       >
         <option value="">选择上游模型</option>
-        {availableUpstream.map(m => (
-          <option key={m} value={m}>{m}</option>
+        {models.map(m => (
+          <option key={m} value={m}>{m}{usedUpstream.includes(m) ? " (已映射)" : ""}</option>
         ))}
       </select>
       <ArrowRight size={14} className="text-muted-foreground shrink-0" />
+      {/* Right: alias name */}
       {showCustom ? (
-        <input
-          value={alias}
-          onChange={e => setAlias(e.target.value)}
-          onKeyDown={e => { if (e.key === "Enter") { e.preventDefault(); handleAdd(); } }}
-          className="flex-1 px-2 py-1.5 rounded-lg border border-border bg-background text-xs font-mono"
-          placeholder="输入自定义名称"
-          autoFocus
-        />
+        <div className="flex-1 flex gap-1">
+          <input
+            value={alias}
+            onChange={e => setAlias(e.target.value)}
+            onKeyDown={e => { if (e.key === "Enter") { e.preventDefault(); handleAdd(); } }}
+            className="flex-1 px-2 py-1.5 rounded-lg border border-border bg-background text-xs font-mono"
+            placeholder="输入自定义名称"
+            autoFocus
+          />
+          <button type="button" onClick={() => { setShowCustom(false); setAlias(""); }} className="p-1 hover:bg-muted rounded">
+            <X size={14} />
+          </button>
+        </div>
       ) : (
         <select
           value={alias}
@@ -60,8 +71,11 @@ function ModelMappingInput({ models, existingMapping, onAdd }: {
           className="flex-1 px-2 py-1.5 rounded-lg border border-border bg-background text-xs font-mono"
         >
           <option value="">映射为（对外名称）</option>
-          {models.filter(m => !usedAliases.includes(m)).map(m => (
-            <option key={m} value={m}>{m}</option>
+          {/* Show all models as alias options, even if already mapped */}
+          {models.map(m => (
+            <option key={m} value={m} disabled={usedAliases.includes(m)}>
+              {m}{usedAliases.includes(m) ? " (已使用)" : ""}
+            </option>
           ))}
           <option value="__custom__">+ 自定义名称...</option>
         </select>
@@ -69,7 +83,7 @@ function ModelMappingInput({ models, existingMapping, onAdd }: {
       <button
         type="button"
         onClick={handleAdd}
-        disabled={!upstream || !alias}
+        disabled={!upstream || !alias || usedAliases.includes(alias)}
         className="p-1.5 rounded-lg border border-border hover:bg-muted disabled:opacity-50"
       >
         <Plus size={14} />
@@ -94,8 +108,14 @@ export function ChannelForm({ editing, onClose, onSaved }: {
     model_mapping: editing?.model_mapping || {},
   });
   const [modelInput, setModelInput] = useState("");
-  // model_mapping is Record<string, string> — key=对外名称, value=上游实际模型
-  const mappingEntries = Object.entries(form.model_mapping || {});
+  // model_mapping: key=对外名称(alias), value=上游实际模型(upstream)
+  // Normalize: ensure values are strings (backend may return serde_json::Value)
+  const rawMapping = form.model_mapping || {};
+  const normalizedMapping: Record<string, string> = {};
+  for (const [k, v] of Object.entries(rawMapping)) {
+    normalizedMapping[k] = typeof v === "string" ? v : String(v);
+  }
+  const mappingEntries = Object.entries(normalizedMapping);
 
   const addMapping = (upstream: string, alias: string) => {
     if (!upstream || !alias) return;
@@ -107,8 +127,10 @@ export function ChannelForm({ editing, onClose, onSaved }: {
 
   const removeMapping = (alias: string) => {
     setForm(prev => {
-      const m = { ...(prev.model_mapping || {}) };
-      delete m[alias];
+      const m: Record<string, string> = {};
+      for (const [k, v] of Object.entries(prev.model_mapping || {})) {
+        if (k !== alias) m[k] = typeof v === "string" ? v : String(v);
+      }
       return { ...prev, model_mapping: m };
     });
   };
@@ -259,7 +281,7 @@ export function ChannelForm({ editing, onClose, onSaved }: {
               </div>
             )}
             {/* Add new mapping */}
-            <ModelMappingInput models={form.models} existingMapping={form.model_mapping || {}} onAdd={addMapping} />
+            <ModelMappingInput models={form.models} existingMapping={normalizedMapping} onAdd={addMapping} />
           </div>
 
           <div className="grid grid-cols-2 gap-4">
