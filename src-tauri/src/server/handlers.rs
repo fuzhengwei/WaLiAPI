@@ -41,10 +41,20 @@ pub async fn handle_chat_completions(
         return (StatusCode::TOO_MANY_REQUESTS, "Quota exceeded").into_response();
     }
 
+    // Store request body for logging (truncate to avoid huge logs)
+    let request_body_str = {
+        let compact = serde_json::to_string(&json).unwrap_or_default();
+        if compact.len() > 8000 {
+            format!("{{...truncated...({} bytes)}}", compact.len())
+        } else {
+            compact
+        }
+    };
+
     if is_stream {
-        handle_stream(shared, json, key_record.id, key_record.name).await
+        handle_stream(shared, json, key_record.id, key_record.name, request_body_str).await
     } else {
-        match proxy::handle_request(&repo, &shared.app, &key_record.id, &key_record.name, json, false).await {
+        match proxy::handle_request(&repo, &shared.app, &key_record.id, &key_record.name, json, false, Some(request_body_str)).await {
             Ok(result) => (StatusCode::OK, Json(result.body)).into_response(),
             Err((code, msg)) => {
                 let err_body = serde_json::json!({
@@ -56,11 +66,38 @@ pub async fn handle_chat_completions(
     }
 }
 
+/// Parse token usage from an SSE chunk's data line.
+/// Looks for `usage` field in the JSON payload of `data: {...}` lines.
+fn parse_usage_from_chunk(text: &str) -> Option<(i64, i64, i64)> {
+    for line in text.lines() {
+        let trimmed = line.trim();
+        if !trimmed.starts_with("data:") {
+            continue;
+        }
+        let data_str = trimmed.trim_start_matches("data:").trim();
+        if data_str == "[DONE]" || data_str.is_empty() {
+            continue;
+        }
+        if let Ok(json) = serde_json::from_str::<serde_json::Value>(data_str) {
+            if let Some(usage) = json.get("usage") {
+                let prompt = usage.get("prompt_tokens").and_then(|v| v.as_i64()).unwrap_or(0);
+                let completion = usage.get("completion_tokens").and_then(|v| v.as_i64()).unwrap_or(0);
+                let total = usage.get("total_tokens").and_then(|v| v.as_i64()).unwrap_or(0);
+                if total > 0 || prompt > 0 || completion > 0 {
+                    return Some((prompt, completion, total));
+                }
+            }
+        }
+    }
+    None
+}
+
 async fn handle_stream(
     shared: SharedState,
     json: serde_json::Value,
     api_key_id: String,
     api_key_name: String,
+    request_body: String,
 ) -> Response {
     let model = json.get("model").and_then(|m| m.as_str()).unwrap_or("").to_string();
 
@@ -110,26 +147,39 @@ async fn handle_stream(
                 let api_key_id_clone = api_key_id.clone();
                 let api_key_name_clone = api_key_name.clone();
                 let model_clone = model.clone();
+                let request_body_clone = request_body.clone();
                 let is_retry = if attempt > 0 { 1 } else { 0 };
 
-                // ── Raw byte passthrough ──────────────────────────────────
+                // ── Raw byte passthrough with usage parsing ───────────────
                 // Forward upstream SSE bytes directly as the response body.
-                // Do NOT re-wrap with axum's Sse/SseEvent — that would double-encode
-                // the "data:" prefix and break AI IDEs' finish_reason detection.
+                // While passing through, scan data lines for `usage` to record
+                // token consumption in the log.
                 let upstream_stream = resp.bytes_stream();
 
                 let passthrough_stream = async_stream::stream! {
                     tokio::pin!(upstream_stream);
 
+                    // Accumulate token usage from SSE chunks
+                    let mut usage_prompt: i64 = 0;
+                    let mut usage_completion: i64 = 0;
+                    let mut usage_total: i64 = 0;
+                    let mut had_error = false;
+
                     while let Some(chunk_result) = upstream_stream.next().await {
                         match chunk_result {
                             Ok(bytes) => {
+                                // Try to parse usage from this chunk
+                                if let Ok(text) = std::str::from_utf8(&bytes) {
+                                    if let Some((p, c, t)) = parse_usage_from_chunk(text) {
+                                        usage_prompt = p;
+                                        usage_completion = c;
+                                        usage_total = t;
+                                    }
+                                }
                                 yield Ok::<_, std::io::Error>(bytes);
                             }
                             Err(e) => {
-                                // Connection interrupted mid-stream.
-                                // Send a synthetic finish chunk so the client
-                                // receives a valid finish_reason instead of hanging.
+                                had_error = true;
                                 let err_chunk = format!(
                                     "data: {{\"error\":{{\"message\":\"Stream connection interrupted: {}\",\"type\":\"server_error\"}}}}\n\n",
                                     e
@@ -142,6 +192,8 @@ async fn handle_stream(
                     }
 
                     // Log after stream completes
+                    let quota_to_add = usage_total;
+                    let key_id_for_quota = api_key_id_clone.clone();
                     let _ = repo_clone.create_log(&crate::db::models::RequestLog {
                         id: crate::utils::id::new_id(),
                         api_key_id: Some(api_key_id_clone),
@@ -151,19 +203,24 @@ async fn handle_stream(
                         model: model_clone.clone(),
                         upstream_model: Some(model_clone),
                         mode: "chat".to_string(),
-                        status_code: 200,
-                        prompt_tokens: 0,
-                        completion_tokens: 0,
-                        total_tokens: 0,
+                        status_code: if had_error { 502 } else { 200 },
+                        prompt_tokens: usage_prompt,
+                        completion_tokens: usage_completion,
+                        total_tokens: usage_total,
                         duration_ms: start.elapsed().as_millis() as i64,
-                        error_message: None,
+                        error_message: if had_error { Some("Stream interrupted".to_string()) } else { None },
                         is_stream: 1,
                         is_retry,
                         created_at: crate::utils::time::now_iso(),
+                        request_body: Some(request_body_clone),
                     }).await;
+
+                    // Increment quota if we got token counts
+                    if quota_to_add > 0 {
+                        let _ = repo_clone.increment_quota(&key_id_for_quota, quota_to_add).await;
+                    }
                 };
 
-                // Build raw streaming response — no SSE re-encoding
                 return Response::builder()
                     .status(StatusCode::OK)
                     .header(header::CONTENT_TYPE, "text/event-stream")
@@ -192,6 +249,7 @@ async fn handle_stream(
                     is_stream: 1,
                     is_retry: if attempt > 0 { 1 } else { 0 },
                     created_at: crate::utils::time::now_iso(),
+                    request_body: Some(request_body.clone()),
                 }).await;
                 last_error = Some(format!("{}: {}", channel.name, error_message));
             }

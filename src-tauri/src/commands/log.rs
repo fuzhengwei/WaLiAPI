@@ -20,6 +20,7 @@ pub struct LogDto {
     pub is_stream: bool,
     pub is_retry: bool,
     pub created_at: String,
+    pub request_body: Option<String>,
 }
 
 impl From<RequestLog> for LogDto {
@@ -40,6 +41,7 @@ impl From<RequestLog> for LogDto {
             is_stream: l.is_stream == 1,
             is_retry: l.is_retry == 1,
             created_at: l.created_at,
+            request_body: l.request_body,
         }
     }
 }
@@ -54,6 +56,41 @@ pub async fn get_logs(
     let limit = limit.unwrap_or(50);
     let offset = offset.unwrap_or(0);
     repo.get_logs(limit, offset).await.map_err(|e| e.to_string()).map(|ls| ls.into_iter().map(Into::into).collect())
+}
+
+#[tauri::command]
+pub async fn get_log(
+    id: String,
+    state: tauri::State<'_, std::sync::Arc<AppState>>,
+) -> Result<LogDto, String> {
+    let repo = Repository::new(state.db.pool.clone());
+    repo.get_log(&id).await.map_err(|e| e.to_string()).map(Into::into)
+}
+
+#[tauri::command]
+pub async fn delete_log(
+    id: String,
+    state: tauri::State<'_, std::sync::Arc<AppState>>,
+) -> Result<(), String> {
+    let repo = Repository::new(state.db.pool.clone());
+    repo.delete_log(&id).await.map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn delete_logs_before(
+    before_date: String,
+    state: tauri::State<'_, std::sync::Arc<AppState>>,
+) -> Result<u64, String> {
+    let repo = Repository::new(state.db.pool.clone());
+    repo.delete_logs_before(&before_date).await.map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn delete_all_logs(
+    state: tauri::State<'_, std::sync::Arc<AppState>>,
+) -> Result<u64, String> {
+    let repo = Repository::new(state.db.pool.clone());
+    repo.delete_all_logs().await.map_err(|e| e.to_string())
 }
 
 #[derive(Debug, Serialize, Deserialize)]

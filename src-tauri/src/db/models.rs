@@ -95,6 +95,7 @@ pub struct RequestLog {
     pub is_stream: i64,
     pub is_retry: i64,
     pub created_at: String,
+    pub request_body: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

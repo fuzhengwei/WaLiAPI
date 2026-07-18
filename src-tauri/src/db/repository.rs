@@ -205,8 +205,8 @@ impl Repository {
 
     pub async fn create_log(&self, log: &RequestLog) -> Result<(), sqlx::Error> {
         sqlx::query(
-            "INSERT INTO request_logs (id, api_key_id, api_key_name, channel_id, channel_name, model, upstream_model, mode, status_code, prompt_tokens, completion_tokens, total_tokens, duration_ms, error_message, is_stream, is_retry, created_at)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+            "INSERT INTO request_logs (id, api_key_id, api_key_name, channel_id, channel_name, model, upstream_model, mode, status_code, prompt_tokens, completion_tokens, total_tokens, duration_ms, error_message, is_stream, is_retry, created_at, request_body)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
         )
         .bind(&log.id)
         .bind(&log.api_key_id)
@@ -225,8 +225,39 @@ impl Repository {
         .bind(log.is_stream)
         .bind(log.is_retry)
         .bind(&log.created_at)
+        .bind(&log.request_body)
         .execute(&self.pool)
         .await?;
+        Ok(())
+    }
+
+    pub async fn get_log(&self, id: &str) -> Result<RequestLog, sqlx::Error> {
+        sqlx::query_as::<_, RequestLog>("SELECT * FROM request_logs WHERE id = ?")
+            .bind(id)
+            .fetch_one(&self.pool)
+            .await
+    }
+
+    pub async fn delete_logs_before(&self, before_date: &str) -> Result<u64, sqlx::Error> {
+        let result = sqlx::query("DELETE FROM request_logs WHERE created_at < ?")
+            .bind(before_date)
+            .execute(&self.pool)
+            .await?;
+        Ok(result.rows_affected())
+    }
+
+    pub async fn delete_all_logs(&self) -> Result<u64, sqlx::Error> {
+        let result = sqlx::query("DELETE FROM request_logs")
+            .execute(&self.pool)
+            .await?;
+        Ok(result.rows_affected())
+    }
+
+    pub async fn delete_log(&self, id: &str) -> Result<(), sqlx::Error> {
+        sqlx::query("DELETE FROM request_logs WHERE id = ?")
+            .bind(id)
+            .execute(&self.pool)
+            .await?;
         Ok(())
     }
 

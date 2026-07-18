@@ -89,6 +89,7 @@ export interface RequestLog {
   is_stream: boolean;
   is_retry: boolean;
   created_at: string;
+  request_body: string | null;
 }
 
 export interface LogStats {

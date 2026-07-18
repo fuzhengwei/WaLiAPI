@@ -23,6 +23,7 @@ pub async fn handle_request(
     api_key_name: &str,
     body: serde_json::Value,
     is_stream: bool,
+    request_body: Option<String>,
 ) -> Result<ProxyResult, (u16, String)> {
     let start = Instant::now();
     let model = body.get("model").and_then(|m| m.as_str()).unwrap_or("").to_string();
@@ -80,6 +81,7 @@ pub async fn handle_request(
                     is_stream: if is_stream { 1 } else { 0 },
                     is_retry,
                     created_at: utils::time::now_iso(),
+                    request_body: request_body.clone(),
                 };
                 let _ = repo.create_log(&log).await;
 
@@ -115,6 +117,7 @@ pub async fn handle_request(
                     is_stream: if is_stream { 1 } else { 0 },
                     is_retry,
                     created_at: utils::time::now_iso(),
+                    request_body: request_body.clone(),
                 };
                 let _ = repo.create_log(&log).await;
                 last_error = Some(error_message);

@@ -29,7 +29,11 @@ export const apiKeyApi = {
 // Log commands
 export const logApi = {
   getAll: (limit?: number, offset?: number) => invoke<RequestLog[]>("get_logs", { limit, offset }),
+  get: (id: string) => invoke<RequestLog>("get_log", { id }),
   getStats: (days?: number) => invoke<LogStats[]>("get_log_stats", { days }),
+  delete: (id: string) => invoke<void>("delete_log", { id }),
+  deleteBefore: (beforeDate: string) => invoke<number>("delete_logs_before", { beforeDate }),
+  deleteAll: () => invoke<number>("delete_all_logs"),
 };
 
 // Stats commands
