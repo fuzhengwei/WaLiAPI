@@ -6,7 +6,7 @@ pub struct OpenAIAdaptor;
 #[async_trait]
 impl Adaptor for OpenAIAdaptor {
     fn channel_type(&self) -> &'static str { "openai" }
-    fn default_models(&self) -> Vec<&'static str> { vec!["gpt-4o", "gpt-4o-mini", "gpt-4-turbo", "gpt-3.5-turbo"] }
+    fn default_models(&self) -> Vec<&'static str> { vec!["gpt-5.4", "gpt-5.5", "gpt-4o", "gpt-4o-mini", "gpt-4-turbo", "gpt-3.5-turbo"] }
     fn default_base_url(&self) -> &str { "https://api.openai.com/v1" }
 
     async fn test(&self, config: &ChannelConfig) -> Result<TestResult, anyhow::Error> {

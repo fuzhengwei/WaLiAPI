@@ -1,7 +1,7 @@
-import { useState } from "react";
+import { useState, useMemo } from "react";
 import { channelApi } from "../lib/api";
 import type { Channel, CreateChannelInput } from "../types";
-import { CHANNEL_TYPES } from "../lib/constants";
+import { CHANNEL_TYPES, CHANNEL_CATEGORIES } from "../lib/constants";
 import { X, Plus, Check } from "lucide-react";
 
 export function ChannelForm({ editing, onClose, onSaved }: {
@@ -19,6 +19,7 @@ export function ChannelForm({ editing, onClose, onSaved }: {
     weight: editing?.weight ?? 1,
   });
   const [modelInput, setModelInput] = useState("");
+  const [showTypePicker, setShowTypePicker] = useState(false);
 
   const onTypeChange = (type: string) => {
     const info = CHANNEL_TYPES.find(t => t.value === type);
@@ -28,7 +29,20 @@ export function ChannelForm({ editing, onClose, onSaved }: {
       base_url: info?.default_base_url || prev.base_url,
       models: info?.models || [],
     }));
+    setShowTypePicker(false);
   };
+
+  // Group channel types by category
+  const groupedTypes = useMemo(() => {
+    const groups: Record<string, typeof CHANNEL_TYPES> = {};
+    for (const t of CHANNEL_TYPES) {
+      if (!groups[t.category]) groups[t.category] = [];
+      groups[t.category].push(t);
+    }
+    return groups;
+  }, []);
+
+  const selectedType = CHANNEL_TYPES.find(t => t.value === form.type);
 
   const addModel = () => {
     if (modelInput.trim()) {
@@ -80,17 +94,53 @@ export function ChannelForm({ editing, onClose, onSaved }: {
               />
             </div>
 
-            <div>
+            <div className="relative">
               <label className="mb-2 block text-sm font-medium">类型</label>
-              <select
-                value={form.type}
-                onChange={e => onTypeChange(e.target.value)}
-                className="w-full rounded-2xl border border-border bg-background/70 px-4 py-3 text-sm"
+              <button
+                type="button"
+                onClick={() => setShowTypePicker(!showTypePicker)}
+                className="flex w-full items-center justify-between rounded-2xl border border-border bg-white px-4 py-3 text-sm font-medium transition-all hover:border-primary/40 hover:shadow-sm"
               >
-                {CHANNEL_TYPES.map(t => (
-                  <option key={t.value} value={t.value}>{t.label}</option>
-                ))}
-              </select>
+                <span className="flex items-center gap-2.5">
+                  <span className="text-lg">{selectedType?.icon || "❓"}</span>
+                  <span>{selectedType?.label || "选择类型"}</span>
+                  <span className="rounded-full bg-muted px-2 py-0.5 text-xs text-muted-foreground">
+                    {CHANNEL_CATEGORIES[selectedType?.category || ""]?.label || ""}
+                  </span>
+                </span>
+                <svg className={`h-4 w-4 text-muted-foreground transition-transform ${showTypePicker ? "rotate-180" : ""}`} fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" d="M19 9l-7 7-7-7" /></svg>
+              </button>
+
+              {showTypePicker && (
+                <div className="absolute left-0 right-0 top-full z-30 mt-1.5 max-h-[320px] overflow-auto rounded-2xl border border-border bg-white p-3 shadow-xl">
+                  {Object.entries(groupedTypes).map(([catKey, types]) => (
+                    <div key={catKey} className="mb-2 last:mb-0">
+                      <div className="mb-1.5 flex items-center gap-1.5 px-1 text-xs font-semibold text-muted-foreground">
+                        <span>{CHANNEL_CATEGORIES[catKey]?.icon}</span>
+                        <span>{CHANNEL_CATEGORIES[catKey]?.label}</span>
+                      </div>
+                      <div className="grid grid-cols-2 gap-1.5">
+                        {types.map(t => (
+                          <button
+                            key={t.value}
+                            type="button"
+                            onClick={() => onTypeChange(t.value)}
+                            className={`flex items-center gap-2 rounded-xl border px-3 py-2.5 text-sm transition-all ${
+                              form.type === t.value
+                                ? "border-primary/40 bg-primary/8 text-primary font-semibold shadow-sm"
+                                : "border-border bg-white text-foreground hover:border-primary/30 hover:bg-muted/50"
+                            }`}
+                          >
+                            <span className="text-base">{t.icon}</span>
+                            <span className="truncate">{t.label}</span>
+                            {form.type === t.value && <Check size={14} className="ml-auto shrink-0" />}
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
             </div>
           </div>
 

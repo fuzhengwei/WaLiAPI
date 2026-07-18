@@ -1,10 +1,10 @@
 use axum::{
+    body::Body,
     extract::State,
-    http::{HeaderMap, StatusCode},
-    response::{Json, IntoResponse, Response, sse::{Sse, Event as SseEvent}},
+    http::{HeaderMap, StatusCode, header},
+    response::{Json, IntoResponse, Response},
 };
 use futures_util::StreamExt;
-use std::convert::Infallible;
 use super::router::SharedState;
 use crate::core::proxy;
 use crate::db::repository::Repository;
@@ -103,13 +103,6 @@ async fn handle_stream(
                     continue;
                 }
 
-                let stream = resp.bytes_stream().map(|result| {
-                    match result {
-                        Ok(bytes) => Ok::<_, Infallible>(SseEvent::default().data(String::from_utf8_lossy(&bytes))),
-                        Err(_) => Ok(SseEvent::default().data("[DONE]")),
-                    }
-                });
-
                 let start = std::time::Instant::now();
                 let channel_id = channel.id.clone();
                 let channel_name = channel.name.clone();
@@ -119,15 +112,36 @@ async fn handle_stream(
                 let model_clone = model.clone();
                 let is_retry = if attempt > 0 { 1 } else { 0 };
 
-                let log_stream = async_stream::stream! {
-                    tokio::pin!(stream);
-                    while let Some(event) = stream.next().await {
-                        let sse_event = match event {
-                            Ok(sse_event) => sse_event,
-                            Err(_) => continue,
-                        };
-                        yield Ok::<_, Infallible>(sse_event);
+                // ── Raw byte passthrough ──────────────────────────────────
+                // Forward upstream SSE bytes directly as the response body.
+                // Do NOT re-wrap with axum's Sse/SseEvent — that would double-encode
+                // the "data:" prefix and break AI IDEs' finish_reason detection.
+                let upstream_stream = resp.bytes_stream();
+
+                let passthrough_stream = async_stream::stream! {
+                    tokio::pin!(upstream_stream);
+
+                    while let Some(chunk_result) = upstream_stream.next().await {
+                        match chunk_result {
+                            Ok(bytes) => {
+                                yield Ok::<_, std::io::Error>(bytes);
+                            }
+                            Err(e) => {
+                                // Connection interrupted mid-stream.
+                                // Send a synthetic finish chunk so the client
+                                // receives a valid finish_reason instead of hanging.
+                                let err_chunk = format!(
+                                    "data: {{\"error\":{{\"message\":\"Stream connection interrupted: {}\",\"type\":\"server_error\"}}}}\n\n",
+                                    e
+                                );
+                                yield Ok::<_, std::io::Error>(err_chunk.into_bytes().into());
+                                yield Ok::<_, std::io::Error>(b"data: [DONE]\n\n".to_vec().into());
+                                break;
+                            }
+                        }
                     }
+
+                    // Log after stream completes
                     let _ = repo_clone.create_log(&crate::db::models::RequestLog {
                         id: crate::utils::id::new_id(),
                         api_key_id: Some(api_key_id_clone),
@@ -149,7 +163,14 @@ async fn handle_stream(
                     }).await;
                 };
 
-                return Sse::new(log_stream).into_response();
+                // Build raw streaming response — no SSE re-encoding
+                return Response::builder()
+                    .status(StatusCode::OK)
+                    .header(header::CONTENT_TYPE, "text/event-stream")
+                    .header(header::CACHE_CONTROL, "no-cache")
+                    .header(header::CONNECTION, "keep-alive")
+                    .body(Body::from_stream(passthrough_stream))
+                    .unwrap();
             }
             Err(e) => {
                 let error_message = e.to_string();
