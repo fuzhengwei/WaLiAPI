@@ -56,7 +56,7 @@ jobs:
       - name: build Tauri app
         uses: tauri-apps/tauri-action@v0
         env:
-          GITHUB_TOKEN: ${{ secrets.GH_PAT }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           tagName: waliapi-v__VERSION__
           releaseName: 'WaLiAPI v__VERSION__'
