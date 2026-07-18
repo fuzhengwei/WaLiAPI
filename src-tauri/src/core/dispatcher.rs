@@ -4,10 +4,9 @@ use crate::db::models::Channel;
 pub struct Dispatcher;
 
 impl Dispatcher {
-    /// Select a channel for the request based on priority, weight, and model support
-    pub fn select_channel(channels: &[Channel], requested_model: &str) -> Option<Channel> {
-        // Filter channels that support the requested model
-        let mut candidates: Vec<&Channel> = channels
+    /// Build an ordered failover queue based on priority, weight, and model support
+    pub fn select_channels(channels: &[Channel], requested_model: &str) -> Vec<Channel> {
+        let mut candidates: Vec<Channel> = channels
             .iter()
             .filter(|c| {
                 if c.status != 1 {
@@ -16,40 +15,52 @@ impl Dispatcher {
                 let models: Vec<String> = serde_json::from_str(&c.models).unwrap_or_default();
                 models.is_empty() || models.iter().any(|m| m == requested_model)
             })
+            .cloned()
             .collect();
 
         if candidates.is_empty() {
-            return None;
+            return Vec::new();
         }
 
-        // Sort by priority (desc), then by weight (desc)
-        candidates.sort_by(|a, b| {
-            b.priority.cmp(&a.priority).then(b.weight.cmp(&a.weight))
-        });
+        candidates.sort_by(|a, b| b.priority.cmp(&a.priority).then(b.weight.cmp(&a.weight)));
 
-        // Simple weighted random selection among top priority channels
-        let max_priority = candidates[0].priority;
-        let top_candidates: Vec<&Channel> = candidates
-            .iter()
-            .filter(|c| c.priority == max_priority)
-            .copied()
-            .collect();
+        let mut ordered = Vec::with_capacity(candidates.len());
+        let mut start = 0;
 
-        let total_weight: i64 = top_candidates.iter().map(|c| c.weight).sum();
-        if total_weight <= 0 {
-            return Some(top_candidates[0].clone());
-        }
-
-        let mut rng = rand::rng();
-        let mut point = rand::Rng::random_range(&mut rng, 0..total_weight);
-        for c in &top_candidates {
-            point -= c.weight;
-            if point < 0 {
-                return Some((*c).clone());
+        while start < candidates.len() {
+            let priority = candidates[start].priority;
+            let mut end = start;
+            while end < candidates.len() && candidates[end].priority == priority {
+                end += 1;
             }
+
+            let mut group = candidates[start..end].to_vec();
+            let mut rng = rand::rng();
+
+            while !group.is_empty() {
+                let total_weight: i64 = group.iter().map(|c| c.weight.max(0)).sum();
+                let index = if total_weight > 0 {
+                    let mut point = rand::Rng::random_range(&mut rng, 0..total_weight);
+                    let mut selected = 0;
+                    for (idx, channel) in group.iter().enumerate() {
+                        point -= channel.weight.max(0);
+                        if point < 0 {
+                            selected = idx;
+                            break;
+                        }
+                    }
+                    selected
+                } else {
+                    0
+                };
+
+                ordered.push(group.remove(index));
+            }
+
+            start = end;
         }
 
-        Some(top_candidates[0].clone())
+        ordered
     }
 
     pub fn channel_to_config(channel: &Channel) -> ChannelConfig {

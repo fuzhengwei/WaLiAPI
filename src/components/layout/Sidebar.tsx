@@ -8,6 +8,7 @@ import {
   ScrollText,
   Settings,
   Server,
+  Sparkles,
 } from "lucide-react";
 import { serverApi } from "../../lib/api";
 import type { ServerStatus } from "../../types";
@@ -34,46 +35,58 @@ export function Sidebar() {
   }, []);
 
   return (
-    <aside className="w-60 h-screen flex flex-col border-r border-border bg-sidebar">
-      {/* Logo */}
-      <div className="h-14 flex items-center gap-2 px-4 border-b border-border">
-        <div className="w-8 h-8 rounded-lg bg-gradient-to-br from-primary to-accent flex items-center justify-center">
-          <span className="text-white font-bold text-sm">X</span>
+    <aside className="w-68 h-screen flex-col border-r border-white/8 bg-[linear-gradient(180deg,rgba(12,13,17,0.92),rgba(10,10,12,0.98))] px-3 py-3 hidden md:flex">
+      <div className="surface rounded-[24px] p-4">
+        <div className="flex items-center gap-3">
+          <div className="flex h-11 w-11 items-center justify-center rounded-2xl bg-[linear-gradient(135deg,#7c82ff,#9b7bff)] shadow-[0_12px_30px_rgba(124,130,255,0.35)]">
+            <Sparkles size={18} className="text-white" />
+          </div>
+          <div>
+            <div className="text-[11px] uppercase tracking-[0.24em] text-muted-foreground">Local LLM Gateway</div>
+            <div className="text-xl font-semibold tracking-tight">xapi</div>
+          </div>
         </div>
-        <span className="font-bold text-lg">xapi</span>
       </div>
 
-      {/* Nav */}
-      <nav className="flex-1 py-4 px-2 space-y-1">
+      <nav className="mt-4 flex-1 space-y-1.5">
         {navItems.map(({ to, icon: Icon, label }) => (
           <NavLink
             key={to}
             to={to}
             className={({ isActive }) =>
-              `flex items-center gap-3 px-3 py-2 rounded-lg text-sm transition-colors ${
+              `group flex items-center gap-3 rounded-2xl px-4 py-3 text-sm transition-all ${
                 isActive || (to === "/" && location.pathname === "/")
-                  ? "bg-primary/10 text-primary font-medium"
-                  : "text-muted-foreground hover:bg-muted hover:text-foreground"
+                  ? "bg-[linear-gradient(135deg,rgba(124,130,255,0.2),rgba(155,123,255,0.16))] text-white shadow-[0_10px_30px_rgba(0,0,0,0.2)]"
+                  : "text-muted-foreground hover:bg-white/5 hover:text-foreground"
               }`
             }
           >
-            <Icon size={18} />
-            {label}
+            <span className="flex h-9 w-9 items-center justify-center rounded-xl border border-white/8 bg-white/4 group-hover:bg-white/8">
+              <Icon size={17} />
+            </span>
+            <span className="font-medium">{label}</span>
           </NavLink>
         ))}
       </nav>
 
-      {/* Server Status */}
-      <div className="p-3 border-t border-border">
-        <div className="flex items-center gap-2 px-3 py-2 rounded-lg bg-muted/50 text-xs">
-          <Server size={14} className={serverStatus?.running ? "text-green-500" : "text-red-500"} />
-          <div className="flex-1 min-w-0">
-            <div className="text-muted-foreground">服务状态</div>
-            <div className="font-mono truncate">
-              {serverStatus?.running ? serverStatus.url : "未运行"}
+      <div className="surface-soft rounded-[22px] p-4">
+        <div className="mb-3 flex items-center justify-between">
+          <div>
+            <div className="text-xs text-muted-foreground">服务状态</div>
+            <div className="mt-1 text-sm font-medium text-foreground">
+              {serverStatus?.running ? "运行中" : "未启动"}
             </div>
           </div>
-          <span className={`w-2 h-2 rounded-full ${serverStatus?.running ? "bg-green-500" : "bg-red-500"}`} />
+          <span className={`h-2.5 w-2.5 rounded-full ${serverStatus?.running ? "bg-emerald-400 shadow-[0_0_16px_rgba(52,211,153,0.85)]" : "bg-red-400"}`} />
+        </div>
+        <div className="flex items-start gap-3 rounded-2xl border border-white/6 bg-black/20 px-3 py-3 text-xs text-muted-foreground">
+          <Server size={14} className={serverStatus?.running ? "text-emerald-400" : "text-red-400"} />
+          <div className="min-w-0 flex-1">
+            <div className="mb-1">访问地址</div>
+            <div className="truncate font-mono text-[12px] text-foreground/88">
+              {serverStatus?.running ? serverStatus.url : "等待服务启动"}
+            </div>
+          </div>
         </div>
       </div>
     </aside>

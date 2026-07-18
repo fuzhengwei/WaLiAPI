@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import { channelApi } from "../lib/api";
 import type { Channel } from "../types";
 import { CHANNEL_TYPES, formatTime } from "../lib/constants";
-import { Plus, Radio, Trash2, Play, Power, Edit } from "lucide-react";
+import { Plus, Radio, Trash2, Play, Power, Edit, Gauge, Boxes } from "lucide-react";
 import { ChannelForm } from "../components/ChannelForm";
 
 export function ChannelsPage() {
@@ -39,78 +39,96 @@ export function ChannelsPage() {
   };
 
   return (
-    <div className="p-6 space-y-6">
-      <div className="flex items-center justify-between">
+    <div className="page-shell space-y-6">
+      <div className="page-header">
         <div>
-          <h1 className="text-2xl font-bold">渠道管理</h1>
-          <p className="text-muted-foreground text-sm mt-1">配置上游 API 供应商渠道</p>
+          <h1 className="page-title">渠道管理</h1>
+          <p className="page-subtitle">配置上游供应商、模型能力与调度优先级</p>
         </div>
-        <button
-          onClick={() => { setEditing(null); setShowForm(true); }}
-          className="flex items-center gap-2 px-4 py-2 rounded-lg bg-primary text-white text-sm hover:opacity-90"
-        >
+        <button onClick={() => { setEditing(null); setShowForm(true); }} className="action-primary">
           <Plus size={16} /> 新建渠道
         </button>
       </div>
 
       {channels.length === 0 ? (
-        <div className="text-center py-20 text-muted-foreground">
-          <Radio className="w-12 h-12 mx-auto mb-3 opacity-50" />
-          <p>还没有配置任何渠道</p>
-          <p className="text-sm mt-1">点击右上角新建渠道开始</p>
+        <div className="surface empty-state">
+          <Radio className="h-12 w-12 text-muted-foreground/70" />
+          <p className="text-base font-medium">还没有配置任何渠道</p>
+          <p className="text-sm text-muted-foreground">先添加一个上游服务商，即可开始分发请求</p>
         </div>
       ) : (
-        <div className="space-y-3">
+        <div className="grid grid-cols-1 gap-4 xl:grid-cols-2">
           {channels.map(ch => {
             const typeInfo = CHANNEL_TYPES.find(t => t.value === ch.type);
             const result = testResult[ch.id];
             return (
-              <div key={ch.id} className="rounded-xl border border-border bg-card p-4">
-                <div className="flex items-start justify-between">
-                  <div className="flex-1 min-w-0">
-                    <div className="flex items-center gap-2 mb-1">
-                      <span className={`w-2 h-2 rounded-full ${ch.status === 1 ? "bg-green-500" : "bg-gray-400"}`} />
-                      <h3 className="font-semibold">{ch.name}</h3>
-                      <span className="text-xs px-2 py-0.5 rounded bg-muted text-muted-foreground">
+              <div key={ch.id} className="surface rounded-[24px] p-5">
+                <div className="flex items-start justify-between gap-4">
+                  <div className="min-w-0 flex-1">
+                    <div className="mb-3 flex flex-wrap items-center gap-2">
+                      <span className={`h-2.5 w-2.5 rounded-full ${ch.status === 1 ? "bg-emerald-400 shadow-[0_0_16px_rgba(52,211,153,0.8)]" : "bg-zinc-500"}`} />
+                      <h3 className="text-lg font-semibold tracking-tight">{ch.name}</h3>
+                      <span className="rounded-full border border-white/8 bg-white/5 px-2.5 py-1 text-xs text-muted-foreground">
                         {typeInfo?.label || ch.type}
                       </span>
                     </div>
-                    <div className="text-sm text-muted-foreground space-y-0.5">
-                      <div className="font-mono text-xs truncate">{ch.base_url}</div>
-                      <div className="flex flex-wrap gap-1 mt-1">
-                        {ch.models.slice(0, 5).map(m => (
-                          <span key={m} className="text-xs px-1.5 py-0.5 rounded bg-primary/10 text-primary">{m}</span>
-                        ))}
-                        {ch.models.length > 5 && <span className="text-xs text-muted-foreground">+{ch.models.length - 5}</span>}
-                      </div>
-                      {ch.last_test_at && (
-                        <div className="text-xs mt-1">
-                          最近测试: {formatTime(ch.last_test_at)}
-                          {ch.last_test_ok !== null && (
-                            <span className={ch.last_test_ok ? " text-green-500 ml-1" : " text-red-500 ml-1"}>
-                              {ch.last_test_ok ? "✓ 成功" : "✗ 失败"}
-                            </span>
-                          )}
-                        </div>
-                      )}
-                      {result && (
-                        <div className={`text-xs mt-1 ${result.success ? "text-green-500" : "text-red-500"}`}>
-                          {result.success ? "✓" : "✗"} {result.message} ({result.latency_ms}ms)
-                        </div>
-                      )}
+
+                    <div className="surface-soft rounded-2xl px-3 py-3 text-xs font-mono text-foreground/80 break-all">
+                      {ch.base_url}
                     </div>
+
+                    <div className="mt-4 flex flex-wrap gap-2">
+                      {ch.models.slice(0, 6).map(m => (
+                        <span key={m} className="rounded-full bg-primary/12 px-2.5 py-1 text-xs text-primary">
+                          {m}
+                        </span>
+                      ))}
+                      {ch.models.length > 6 && <span className="px-1 text-xs text-muted-foreground">+{ch.models.length - 6}</span>}
+                    </div>
+
+                    <div className="mt-4 grid grid-cols-2 gap-3 text-sm">
+                      <div className="surface-soft rounded-2xl px-3 py-3">
+                        <div className="mb-1 flex items-center gap-2 text-muted-foreground"><Gauge size={14} /> 调度</div>
+                        <div className="font-medium">优先级 {ch.priority} · 权重 {ch.weight}</div>
+                      </div>
+                      <div className="surface-soft rounded-2xl px-3 py-3">
+                        <div className="mb-1 flex items-center gap-2 text-muted-foreground"><Boxes size={14} /> 模型数</div>
+                        <div className="font-medium">{ch.models.length} 个</div>
+                      </div>
+                    </div>
+
+                    {(ch.last_test_at || result) && (
+                      <div className="mt-4 rounded-2xl border border-white/8 bg-black/16 px-3 py-3 text-xs">
+                        {ch.last_test_at && (
+                          <div className="text-muted-foreground">
+                            最近测试: {formatTime(ch.last_test_at)}
+                            {ch.last_test_ok !== null && (
+                              <span className={ch.last_test_ok ? " ml-2 text-emerald-300" : " ml-2 text-red-300"}>
+                                {ch.last_test_ok ? "成功" : "失败"}
+                              </span>
+                            )}
+                          </div>
+                        )}
+                        {result && (
+                          <div className={`mt-1 ${result.success ? "text-emerald-300" : "text-red-300"}`}>
+                            {result.success ? "✓" : "✗"} {result.message} ({result.latency_ms}ms)
+                          </div>
+                        )}
+                      </div>
+                    )}
                   </div>
-                  <div className="flex items-center gap-1 ml-4">
-                    <button onClick={() => handleTest(ch.id)} disabled={testing === ch.id} className="p-2 rounded-lg hover:bg-muted text-blue-500" title="测试">
+
+                  <div className="flex flex-col gap-2">
+                    <button onClick={() => handleTest(ch.id)} disabled={testing === ch.id} className="action-secondary px-3 py-2 text-blue-300" title="测试">
                       <Play size={16} />
                     </button>
-                    <button onClick={() => { setEditing(ch); setShowForm(true); }} className="p-2 rounded-lg hover:bg-muted" title="编辑">
+                    <button onClick={() => { setEditing(ch); setShowForm(true); }} className="action-secondary px-3 py-2" title="编辑">
                       <Edit size={16} />
                     </button>
-                    <button onClick={() => handleToggle(ch)} className="p-2 rounded-lg hover:bg-muted" title={ch.status === 1 ? "禁用" : "启用"}>
-                      <Power size={16} className={ch.status === 1 ? "text-green-500" : "text-gray-400"} />
+                    <button onClick={() => handleToggle(ch)} className="action-secondary px-3 py-2" title={ch.status === 1 ? "禁用" : "启用"}>
+                      <Power size={16} className={ch.status === 1 ? "text-emerald-300" : "text-zinc-400"} />
                     </button>
-                    <button onClick={() => handleDelete(ch.id)} className="p-2 rounded-lg hover:bg-muted text-red-500" title="删除">
+                    <button onClick={() => handleDelete(ch.id)} className="action-secondary px-3 py-2 text-red-300" title="删除">
                       <Trash2 size={16} />
                     </button>
                   </div>

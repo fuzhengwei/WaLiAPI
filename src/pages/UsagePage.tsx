@@ -3,17 +3,17 @@ import { Prism as SyntaxHighlighter } from "react-syntax-highlighter";
 import { oneDark } from "react-syntax-highlighter/dist/esm/styles/prism";
 import { channelApi, apiKeyApi, serverApi } from "../lib/api";
 import type { Channel, ApiKey, ServerStatus } from "../types";
-import { BookOpen, Copy, Check, Play, Loader2 } from "lucide-react";
+import { BookOpen, Copy, Check, Play, Loader2, Link2, KeyRound, Bot } from "lucide-react";
 
 type Platform = "curl-mac" | "curl-windows" | "javascript" | "typescript" | "java";
 type TestState = "idle" | "running" | "success" | "error";
 
 const tabs: { id: Platform; label: string; color: string; lang: string }[] = [
-  { id: "curl-mac", label: "cURL Mac/Linux", color: "text-green-400 border-green-400", lang: "bash" },
-  { id: "curl-windows", label: "cURL Windows", color: "text-blue-400 border-blue-400", lang: "batch" },
-  { id: "javascript", label: "JavaScript", color: "text-yellow-400 border-yellow-400", lang: "javascript" },
-  { id: "typescript", label: "TypeScript", color: "text-blue-500 border-blue-500", lang: "typescript" },
-  { id: "java", label: "Java", color: "text-orange-400 border-orange-400", lang: "java" },
+  { id: "curl-mac", label: "cURL Mac/Linux", color: "text-green-300 border-green-300", lang: "bash" },
+  { id: "curl-windows", label: "cURL Windows", color: "text-blue-300 border-blue-300", lang: "batch" },
+  { id: "javascript", label: "JavaScript", color: "text-yellow-300 border-yellow-300", lang: "javascript" },
+  { id: "typescript", label: "TypeScript", color: "text-blue-400 border-blue-400", lang: "typescript" },
+  { id: "java", label: "Java", color: "text-orange-300 border-orange-300", lang: "java" },
 ];
 
 export function UsagePage() {
@@ -120,99 +120,97 @@ public class XapiTest {
   };
 
   return (
-    <div className="p-6 space-y-6 max-w-4xl">
-      <div>
-        <h1 className="text-2xl font-bold flex items-center gap-2"><BookOpen className="w-6 h-6 text-primary" /> 使用</h1>
-        <p className="text-muted-foreground text-sm mt-1">快速接入 xapi 本地 API 网关</p>
-      </div>
-
-      {/* Base URL */}
-      <div className="rounded-xl border border-border bg-card p-5">
-        <h2 className="font-semibold mb-3">Base URL</h2>
-        <div className="flex items-center gap-2">
-          <code className="flex-1 px-3 py-2 rounded-lg bg-muted text-sm font-mono break-all">{baseUrl}</code>
-          <button onClick={() => copy(baseUrl, "baseurl")} className="p-2 rounded-lg hover:bg-muted border border-border">
-            {copied === "baseurl" ? <Check size={16} className="text-green-500" /> : <Copy size={16} />}
-          </button>
+    <div className="page-shell space-y-6 max-w-6xl">
+      <div className="page-header">
+        <div>
+          <h1 className="page-title flex items-center gap-3"><BookOpen className="h-7 w-7 text-primary" />使用</h1>
+          <p className="page-subtitle">按平台生成接入代码，并直接验证本地网关连通性</p>
         </div>
-        <p className="text-xs text-muted-foreground mt-2">在 OpenAI SDK 或兼容客户端中配置此地址为 Base URL</p>
       </div>
 
-      {/* Selectors with copy */}
-      <div className="rounded-xl border border-border bg-card p-5 space-y-4">
-        <h2 className="font-semibold">配置选择</h2>
-        <div className="grid grid-cols-2 gap-4">
-          <div>
-            <label className="text-sm font-medium block mb-1">API Key</label>
-            <div className="flex gap-2">
-              <select value={selKey} onChange={e => setSelKey(e.target.value)} className="flex-1 px-3 py-2 rounded-lg border border-border bg-background text-sm font-mono">
-                {keys.length === 0 && <option value="">请先创建密钥</option>}
-                {keys.map(k => <option key={k.id} value={k.key}>{k.name} ({k.key.slice(0, 12)}...)</option>)}
-              </select>
-              <button onClick={() => selKey && copy(selKey, "key")} disabled={!selKey} className="p-2 rounded-lg hover:bg-muted border border-border disabled:opacity-50">
-                {copied === "key" ? <Check size={16} className="text-green-500" /> : <Copy size={16} />}
-              </button>
+      <div className="grid grid-cols-1 gap-4 xl:grid-cols-[1.1fr_0.9fr]">
+        <div className="surface rounded-[24px] p-5 space-y-4">
+          <h2 className="text-lg font-semibold">接入信息</h2>
+          <div className="grid grid-cols-1 gap-4 md:grid-cols-3">
+            <div className="surface-soft rounded-2xl p-4 md:col-span-3">
+              <div className="mb-2 flex items-center gap-2 text-sm text-muted-foreground"><Link2 size={14} /> Base URL</div>
+              <div className="flex items-center gap-2">
+                <code className="flex-1 break-all rounded-2xl bg-black/16 px-3 py-3 text-sm font-mono">{baseUrl}</code>
+                <button onClick={() => copy(baseUrl, "baseurl")} className="action-secondary px-3 py-2">
+                  {copied === "baseurl" ? <Check size={16} className="text-emerald-300" /> : <Copy size={16} />}
+                </button>
+              </div>
+            </div>
+            <div className="surface-soft rounded-2xl p-4 md:col-span-2">
+              <div className="mb-2 flex items-center gap-2 text-sm text-muted-foreground"><KeyRound size={14} /> API Key</div>
+              <div className="flex gap-2">
+                <select value={selKey} onChange={e => setSelKey(e.target.value)} className="flex-1 rounded-2xl border border-border bg-background/70 px-4 py-3 text-sm font-mono">
+                  {keys.length === 0 && <option value="">请先创建密钥</option>}
+                  {keys.map(k => <option key={k.id} value={k.key}>{k.name} ({k.key.slice(0, 12)}...)</option>)}
+                </select>
+                <button onClick={() => selKey && copy(selKey, "key")} disabled={!selKey} className="action-secondary px-3 py-2 disabled:opacity-50">
+                  {copied === "key" ? <Check size={16} className="text-emerald-300" /> : <Copy size={16} />}
+                </button>
+              </div>
+            </div>
+            <div className="surface-soft rounded-2xl p-4">
+              <div className="mb-2 flex items-center gap-2 text-sm text-muted-foreground"><Bot size={14} /> Model</div>
+              <div className="flex gap-2">
+                <select value={selModel} onChange={e => setSelModel(e.target.value)} className="flex-1 rounded-2xl border border-border bg-background/70 px-4 py-3 text-sm font-mono">
+                  {models.length === 0 && <option value="">请先配置渠道</option>}
+                  {models.map(m => <option key={m} value={m}>{m}</option>)}
+                </select>
+                <button onClick={() => selModel && copy(selModel, "model")} disabled={!selModel} className="action-secondary px-3 py-2 disabled:opacity-50">
+                  {copied === "model" ? <Check size={16} className="text-emerald-300" /> : <Copy size={16} />}
+                </button>
+              </div>
             </div>
           </div>
-          <div>
-            <label className="text-sm font-medium block mb-1">Model</label>
-            <div className="flex gap-2">
-              <select value={selModel} onChange={e => setSelModel(e.target.value)} className="flex-1 px-3 py-2 rounded-lg border border-border bg-background text-sm font-mono">
-                {models.length === 0 && <option value="">请先配置渠道</option>}
-                {models.map(m => <option key={m} value={m}>{m}</option>)}
-              </select>
-              <button onClick={() => selModel && copy(selModel, "model")} disabled={!selModel} className="p-2 rounded-lg hover:bg-muted border border-border disabled:opacity-50">
-                {copied === "model" ? <Check size={16} className="text-green-500" /> : <Copy size={16} />}
-              </button>
-            </div>
+        </div>
+
+        <div className="surface rounded-[24px] p-5">
+          <div className="mb-4 flex items-center justify-between">
+            <h2 className="text-lg font-semibold">连接测试</h2>
+            <button onClick={handleTest} disabled={testState === "running" || !selKey || !selModel} className="action-primary disabled:opacity-50">
+              {testState === "running" ? <Loader2 size={16} className="animate-spin" /> : <Play size={16} />}
+              {testState === "running" ? "测试中..." : "发送测试请求"}
+            </button>
           </div>
+          <div className="surface-soft rounded-2xl p-4 text-sm text-muted-foreground">
+            将使用当前选中的 Base URL、Key 和 Model 发起一次标准 chat/completions 请求。
+          </div>
+          {testResult && (
+            <pre className={`mt-4 max-h-72 overflow-auto rounded-2xl p-4 text-sm font-mono whitespace-pre-wrap ${testState === "success" ? "bg-emerald-500/10 text-emerald-300" : testState === "error" ? "bg-red-500/10 text-red-300" : "bg-muted"}`}>{testResult}</pre>
+          )}
         </div>
       </div>
 
-      {/* Test */}
-      <div className="rounded-xl border border-border bg-card p-5">
-        <div className="flex items-center justify-between mb-4">
-          <h2 className="font-semibold">连接测试</h2>
-          <button onClick={handleTest} disabled={testState === "running" || !selKey || !selModel}
-            className="flex items-center gap-2 px-4 py-2 rounded-lg bg-primary text-white text-sm hover:opacity-90 disabled:opacity-50">
-            {testState === "running" ? <Loader2 size={16} className="animate-spin" /> : <Play size={16} />}
-            {testState === "running" ? "测试中..." : "发送测试请求"}
-          </button>
-        </div>
-        {testResult && (
-          <pre className={`p-4 rounded-lg text-sm font-mono whitespace-pre-wrap max-h-64 overflow-auto ${testState === "success" ? "bg-green-500/10 text-green-400" : testState === "error" ? "bg-red-500/10 text-red-400" : "bg-muted"}`}>{testResult}</pre>
-        )}
-      </div>
-
-      {/* Code Examples - Horizontal Tabs */}
-      <div className="rounded-xl border border-border bg-card p-5">
-        <h2 className="font-semibold mb-4">代码示例</h2>
-        {/* Tab bar */}
-        <div className="flex gap-1 mb-4 border-b border-border overflow-x-auto">
+      <div className="surface rounded-[24px] p-5">
+        <h2 className="mb-4 text-lg font-semibold">代码示例</h2>
+        <div className="mb-4 flex gap-2 overflow-x-auto border-b border-border pb-2">
           {tabs.map(t => (
-            <button key={t.id} onClick={() => setActiveTab(t.id)}
-              className={`px-3 py-2 text-sm font-medium border-b-2 whitespace-nowrap transition-colors ${activeTab === t.id ? t.color : "text-muted-foreground border-transparent hover:text-foreground"}`}>
+            <button key={t.id} onClick={() => setActiveTab(t.id)} className={`rounded-xl border-b-2 px-3 py-2 text-sm font-medium whitespace-nowrap transition-colors ${activeTab === t.id ? t.color : "border-transparent text-muted-foreground hover:text-foreground"}`}>
               {t.label}
             </button>
           ))}
         </div>
-        {/* Code content with syntax highlighting */}
-        <div className="relative">
+        <div className="relative overflow-hidden rounded-2xl border border-white/8">
           <SyntaxHighlighter
             language={tabs.find(t => t.id === activeTab)?.lang || "bash"}
             style={oneDark}
             customStyle={{
               margin: 0,
-              borderRadius: "0.5rem",
+              borderRadius: "1rem",
               fontSize: "0.875rem",
-              maxHeight: "24rem",
+              maxHeight: "28rem",
               overflow: "auto",
+              background: "rgba(5, 7, 10, 0.92)",
             }}
           >
             {scripts[activeTab]}
           </SyntaxHighlighter>
-          <button onClick={() => copy(scripts[activeTab], activeTab)} className="absolute top-2 right-2 p-2 rounded-lg hover:bg-muted border border-border bg-card">
-            {copied === activeTab ? <Check size={14} className="text-green-500" /> : <Copy size={14} />}
+          <button onClick={() => copy(scripts[activeTab], activeTab)} className="absolute right-3 top-3 action-secondary px-3 py-2">
+            {copied === activeTab ? <Check size={14} className="text-emerald-300" /> : <Copy size={14} />}
           </button>
         </div>
       </div>

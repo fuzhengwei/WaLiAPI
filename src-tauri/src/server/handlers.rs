@@ -23,7 +23,6 @@ pub async fn handle_chat_completions(
     };
 
     let is_stream = json.get("stream").and_then(|s| s.as_bool()).unwrap_or(false);
-    let model = json.get("model").and_then(|m| m.as_str()).unwrap_or("").to_string();
 
     let auth_header = headers.get("authorization").and_then(|h| h.to_str().ok()).unwrap_or("");
     let api_key = auth_header.strip_prefix("Bearer ").unwrap_or("").trim();
@@ -71,13 +70,10 @@ async fn handle_stream(
         Err(_) => return (StatusCode::SERVICE_UNAVAILABLE, "No channels available").into_response(),
     };
 
-    let channel = match Dispatcher::select_channel(&channels, &model) {
-        Some(c) => c,
-        None => return (StatusCode::SERVICE_UNAVAILABLE, "No channel for model").into_response(),
-    };
-
-    let config = Dispatcher::channel_to_config(&channel);
-    let adaptor = get_adaptor(&channel.channel_type);
+    let selected_channels = Dispatcher::select_channels(&channels, &model);
+    if selected_channels.is_empty() {
+        return (StatusCode::SERVICE_UNAVAILABLE, "No channel for model").into_response();
+    }
 
     let request = ProxyRequest {
         model: model.clone(),
@@ -85,66 +81,106 @@ async fn handle_stream(
         stream: true,
     };
 
-    match adaptor.forward_stream(&request, &config).await {
-        Ok(resp) => {
-            let status = resp.status();
-            if !status.is_success() {
-                let body_str = resp.text().await.unwrap_or_default();
-                return (StatusCode::BAD_GATEWAY, format!("Upstream error: {}", body_str)).into_response();
-            }
+    let mut last_error = None;
 
-            let stream = resp.bytes_stream().map(|result| {
-                match result {
-                    Ok(bytes) => Ok::<_, Infallible>(SseEvent::default().data(String::from_utf8_lossy(&bytes))),
-                    Err(_) => Ok(SseEvent::default().data("[DONE]")),
+    for (attempt, channel) in selected_channels.into_iter().enumerate() {
+        let config = Dispatcher::channel_to_config(&channel);
+        let adaptor = get_adaptor(&channel.channel_type);
+
+        match adaptor.forward_stream(&request, &config).await {
+            Ok(resp) => {
+                let status = resp.status();
+                if !status.is_success() {
+                    let body_str = resp.text().await.unwrap_or_default();
+                    last_error = Some(format!("{}: {}", channel.name, body_str));
+                    continue;
                 }
-            });
 
-            let start = std::time::Instant::now();
-            let channel_id = channel.id.clone();
-            let channel_name = channel.name.clone();
-            let repo_clone = repo.clone();
-            let api_key_id_clone = api_key_id.clone();
-            let api_key_name_clone = api_key_name.clone();
-            let model_clone = model.clone();
+                let stream = resp.bytes_stream().map(|result| {
+                    match result {
+                        Ok(bytes) => Ok::<_, Infallible>(SseEvent::default().data(String::from_utf8_lossy(&bytes))),
+                        Err(_) => Ok(SseEvent::default().data("[DONE]")),
+                    }
+                });
 
-            let log_stream = async_stream::stream! {
-                tokio::pin!(stream);
-                while let Some(event) = stream.next().await {
-                    if let Ok(sse_event) = event {
+                let start = std::time::Instant::now();
+                let channel_id = channel.id.clone();
+                let channel_name = channel.name.clone();
+                let repo_clone = repo.clone();
+                let api_key_id_clone = api_key_id.clone();
+                let api_key_name_clone = api_key_name.clone();
+                let model_clone = model.clone();
+                let is_retry = if attempt > 0 { 1 } else { 0 };
+
+                let log_stream = async_stream::stream! {
+                    tokio::pin!(stream);
+                    while let Some(event) = stream.next().await {
+                        let sse_event = match event {
+                            Ok(sse_event) => sse_event,
+                            Err(_) => continue,
+                        };
                         yield Ok::<_, Infallible>(sse_event);
                     }
-                }
-                let _ = repo_clone.create_log(&crate::db::models::RequestLog {
+                    let _ = repo_clone.create_log(&crate::db::models::RequestLog {
+                        id: crate::utils::id::new_id(),
+                        api_key_id: Some(api_key_id_clone),
+                        api_key_name: Some(api_key_name_clone),
+                        channel_id: Some(channel_id),
+                        channel_name: Some(channel_name),
+                        model: model_clone.clone(),
+                        upstream_model: Some(model_clone),
+                        mode: "chat".to_string(),
+                        status_code: 200,
+                        prompt_tokens: 0,
+                        completion_tokens: 0,
+                        total_tokens: 0,
+                        duration_ms: start.elapsed().as_millis() as i64,
+                        error_message: None,
+                        is_stream: 1,
+                        is_retry,
+                        created_at: crate::utils::time::now_iso(),
+                    }).await;
+                };
+
+                return Sse::new(log_stream).into_response();
+            }
+            Err(e) => {
+                let error_message = e.to_string();
+                let _ = repo.create_log(&crate::db::models::RequestLog {
                     id: crate::utils::id::new_id(),
-                    api_key_id: Some(api_key_id_clone),
-                    api_key_name: Some(api_key_name_clone),
-                    channel_id: Some(channel_id),
-                    channel_name: Some(channel_name),
-                    model: model_clone.clone(),
-                    upstream_model: Some(model_clone),
+                    api_key_id: Some(api_key_id.clone()),
+                    api_key_name: Some(api_key_name.clone()),
+                    channel_id: Some(channel.id.clone()),
+                    channel_name: Some(channel.name.clone()),
+                    model: model.clone(),
+                    upstream_model: Some(model.clone()),
                     mode: "chat".to_string(),
-                    status_code: 200,
+                    status_code: 502,
                     prompt_tokens: 0,
                     completion_tokens: 0,
                     total_tokens: 0,
-                    duration_ms: start.elapsed().as_millis() as i64,
-                    error_message: None,
+                    duration_ms: 0,
+                    error_message: Some(error_message.clone()),
                     is_stream: 1,
-                    is_retry: 0,
+                    is_retry: if attempt > 0 { 1 } else { 0 },
                     created_at: crate::utils::time::now_iso(),
                 }).await;
-            };
-
-            Sse::new(log_stream).into_response()
-        }
-        Err(e) => {
-            let err_body = serde_json::json!({
-                "error": { "message": format!("Stream error: {}", e), "type": "upstream_error" }
-            });
-            (StatusCode::BAD_GATEWAY, Json(err_body)).into_response()
+                last_error = Some(format!("{}: {}", channel.name, error_message));
+            }
         }
     }
+
+    let err_body = serde_json::json!({
+        "error": {
+            "message": format!(
+                "All stream channels failed for model {}: {}",
+                model,
+                last_error.unwrap_or_else(|| "unknown upstream error".to_string())
+            ),
+            "type": "upstream_error"
+        }
+    });
+    (StatusCode::BAD_GATEWAY, Json(err_body)).into_response()
 }
 
 pub async fn handle_completions(State(_shared): State<SharedState>) -> Response {
