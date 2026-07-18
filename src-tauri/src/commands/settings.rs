@@ -24,7 +24,7 @@ pub struct Settings {
     pub retry_times: i32,
 }
 
-fn default_port() -> u16 { 0 }
+fn default_port() -> u16 { 8777 }
 fn default_host() -> String { "127.0.0.1".to_string() }
 fn default_theme() -> String { "dark".to_string() }
 fn default_language() -> String { "zh-CN".to_string() }
@@ -67,7 +67,7 @@ fn get_bool(store: &tauri_plugin_store::Store<tauri::Wry>, key: &str, default: b
 pub async fn get_settings(app: AppHandle) -> Result<Settings, String> {
     let store = app.store("settings.json").map_err(|e| e.to_string())?;
     let settings = Settings {
-        server_port: get_u64(&store, "server.port", 0) as u16,
+        server_port: get_u64(&store, "server.port", 8777) as u16,
         server_host: get_str(&store, "server.host", "127.0.0.1"),
         ui_theme: get_str(&store, "ui.theme", "dark"),
         ui_language: get_str(&store, "ui.language", "zh-CN"),

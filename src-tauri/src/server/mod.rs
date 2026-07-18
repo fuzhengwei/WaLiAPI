@@ -36,5 +36,5 @@ async fn get_server_port(app: &AppHandle) -> u16 {
             }
         }
     }
-    0
+    8777
 }
