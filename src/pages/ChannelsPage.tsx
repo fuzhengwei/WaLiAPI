@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import { channelApi } from "../lib/api";
 import type { Channel } from "../types";
 import { CHANNEL_TYPES, formatTime } from "../lib/constants";
-import { Plus, Radio, Trash2, Play, Power, Edit, Gauge, Boxes } from "lucide-react";
+import { Plus, Radio, Trash2, Zap, Power, Edit, Gauge, Boxes } from "lucide-react";
 import { ChannelForm } from "../components/ChannelForm";
 
 export function ChannelsPage() {
@@ -141,8 +141,8 @@ export function ChannelsPage() {
                   </div>
 
                   <div className="flex flex-col gap-2">
-                    <button onClick={() => handleTest(ch.id)} disabled={testing === ch.id} className="action-secondary px-3 py-2 text-blue-300" title="测试">
-                      <Play size={16} />
+                    <button onClick={() => handleTest(ch.id)} disabled={testing === ch.id} className="action-secondary px-3 py-2 text-blue-300" title="测试连接">
+                      <Zap size={16} />
                     </button>
                     <button onClick={() => { setEditing(ch); setShowForm(true); }} className="action-secondary px-3 py-2" title="编辑">
                       <Edit size={16} />
