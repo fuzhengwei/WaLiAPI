@@ -9,11 +9,11 @@ type Platform = "curl-mac" | "curl-windows" | "javascript" | "typescript" | "jav
 type TestState = "idle" | "running" | "success" | "error";
 
 const tabs: { id: Platform; label: string; color: string; lang: string }[] = [
-  { id: "curl-mac", label: "cURL Mac/Linux", color: "text-green-300 border-green-300", lang: "bash" },
-  { id: "curl-windows", label: "cURL Windows", color: "text-blue-300 border-blue-300", lang: "batch" },
-  { id: "javascript", label: "JavaScript", color: "text-yellow-300 border-yellow-300", lang: "javascript" },
-  { id: "typescript", label: "TypeScript", color: "text-blue-400 border-blue-400", lang: "typescript" },
-  { id: "java", label: "Java", color: "text-orange-300 border-orange-300", lang: "java" },
+  { id: "curl-mac", label: "cURL Mac/Linux", color: "text-emerald-700 border-emerald-600", lang: "bash" },
+  { id: "curl-windows", label: "cURL Windows", color: "text-blue-700 border-blue-600", lang: "batch" },
+  { id: "javascript", label: "JavaScript", color: "text-amber-700 border-amber-600", lang: "javascript" },
+  { id: "typescript", label: "TypeScript", color: "text-blue-700 border-blue-600", lang: "typescript" },
+  { id: "java", label: "Java", color: "text-orange-700 border-orange-600", lang: "java" },
 ];
 
 export function UsagePage() {
@@ -119,49 +119,55 @@ public class XapiTest {
     } catch (e: any) { setTestState("error"); setTestResult(`Request failed: ${e.message || String(e)}\n\nCauses:\n1. Server not running\n2. Invalid key\n3. Upstream channel error`); }
   };
 
+  const resultStyle = testState === "success"
+    ? "border-emerald-200 bg-emerald-50 text-emerald-900"
+    : testState === "error"
+      ? "border-rose-200 bg-rose-50 text-rose-900"
+      : "border-slate-200 bg-slate-50 text-slate-900";
+
   return (
-    <div className="page-shell space-y-6 max-w-6xl">
+    <div className="page-shell space-y-6 max-w-6xl text-slate-900">
       <div className="page-header">
         <div>
-          <h1 className="page-title flex items-center gap-3"><BookOpen className="h-7 w-7 text-primary" />使用</h1>
+          <h1 className="page-title flex items-center gap-3"><BookOpen className="h-7 w-7 text-blue-600" />使用</h1>
           <p className="page-subtitle">按平台生成接入代码，并直接验证本地网关连通性</p>
         </div>
       </div>
 
       <div className="grid grid-cols-1 gap-4 xl:grid-cols-[1.1fr_0.9fr]">
         <div className="surface rounded-[24px] p-5 space-y-4">
-          <h2 className="text-lg font-semibold">接入信息</h2>
+          <h2 className="text-lg font-semibold text-slate-900">接入信息</h2>
           <div className="grid grid-cols-1 gap-4 md:grid-cols-3">
             <div className="surface-soft rounded-2xl p-4 md:col-span-3">
-              <div className="mb-2 flex items-center gap-2 text-sm text-muted-foreground"><Link2 size={14} /> Base URL</div>
+              <div className="mb-2 flex items-center gap-2 text-sm font-medium text-slate-600"><Link2 size={14} /> Base URL</div>
               <div className="flex items-center gap-2">
-                <code className="flex-1 break-all rounded-2xl bg-black/16 px-3 py-3 text-sm font-mono">{baseUrl}</code>
+                <code className="flex-1 break-all rounded-2xl border border-slate-200 bg-white px-3 py-3 text-sm font-mono text-slate-900">{baseUrl}</code>
                 <button onClick={() => copy(baseUrl, "baseurl")} className="action-secondary px-3 py-2">
-                  {copied === "baseurl" ? <Check size={16} className="text-emerald-300" /> : <Copy size={16} />}
+                  {copied === "baseurl" ? <Check size={16} className="text-emerald-700" /> : <Copy size={16} />}
                 </button>
               </div>
             </div>
             <div className="surface-soft rounded-2xl p-4 md:col-span-2">
-              <div className="mb-2 flex items-center gap-2 text-sm text-muted-foreground"><KeyRound size={14} /> API Key</div>
+              <div className="mb-2 flex items-center gap-2 text-sm font-medium text-slate-600"><KeyRound size={14} /> API Key</div>
               <div className="flex gap-2">
-                <select value={selKey} onChange={e => setSelKey(e.target.value)} className="flex-1 rounded-2xl border border-border bg-background/70 px-4 py-3 text-sm font-mono">
+                <select value={selKey} onChange={e => setSelKey(e.target.value)} className="flex-1 rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm font-mono text-slate-900 shadow-sm">
                   {keys.length === 0 && <option value="">请先创建密钥</option>}
                   {keys.map(k => <option key={k.id} value={k.key}>{k.name} ({k.key.slice(0, 12)}...)</option>)}
                 </select>
                 <button onClick={() => selKey && copy(selKey, "key")} disabled={!selKey} className="action-secondary px-3 py-2 disabled:opacity-50">
-                  {copied === "key" ? <Check size={16} className="text-emerald-300" /> : <Copy size={16} />}
+                  {copied === "key" ? <Check size={16} className="text-emerald-700" /> : <Copy size={16} />}
                 </button>
               </div>
             </div>
             <div className="surface-soft rounded-2xl p-4">
-              <div className="mb-2 flex items-center gap-2 text-sm text-muted-foreground"><Bot size={14} /> Model</div>
+              <div className="mb-2 flex items-center gap-2 text-sm font-medium text-slate-600"><Bot size={14} /> Model</div>
               <div className="flex gap-2">
-                <select value={selModel} onChange={e => setSelModel(e.target.value)} className="flex-1 rounded-2xl border border-border bg-background/70 px-4 py-3 text-sm font-mono">
+                <select value={selModel} onChange={e => setSelModel(e.target.value)} className="flex-1 rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm font-mono text-slate-900 shadow-sm">
                   {models.length === 0 && <option value="">请先配置渠道</option>}
                   {models.map(m => <option key={m} value={m}>{m}</option>)}
                 </select>
                 <button onClick={() => selModel && copy(selModel, "model")} disabled={!selModel} className="action-secondary px-3 py-2 disabled:opacity-50">
-                  {copied === "model" ? <Check size={16} className="text-emerald-300" /> : <Copy size={16} />}
+                  {copied === "model" ? <Check size={16} className="text-emerald-700" /> : <Copy size={16} />}
                 </button>
               </div>
             </div>
@@ -170,31 +176,31 @@ public class XapiTest {
 
         <div className="surface rounded-[24px] p-5">
           <div className="mb-4 flex items-center justify-between">
-            <h2 className="text-lg font-semibold">连接测试</h2>
+            <h2 className="text-lg font-semibold text-slate-900">连接测试</h2>
             <button onClick={handleTest} disabled={testState === "running" || !selKey || !selModel} className="action-primary disabled:opacity-50">
               {testState === "running" ? <Loader2 size={16} className="animate-spin" /> : <Play size={16} />}
               {testState === "running" ? "测试中..." : "发送测试请求"}
             </button>
           </div>
-          <div className="surface-soft rounded-2xl p-4 text-sm text-muted-foreground">
+          <div className="surface-soft rounded-2xl p-4 text-sm text-slate-600">
             将使用当前选中的 Base URL、Key 和 Model 发起一次标准 chat/completions 请求。
           </div>
           {testResult && (
-            <pre className={`mt-4 max-h-72 overflow-auto rounded-2xl p-4 text-sm font-mono whitespace-pre-wrap ${testState === "success" ? "bg-emerald-500/10 text-emerald-300" : testState === "error" ? "bg-red-500/10 text-red-300" : "bg-muted"}`}>{testResult}</pre>
+            <pre className={`mt-4 max-h-72 overflow-auto rounded-2xl border p-4 text-sm font-mono leading-6 whitespace-pre-wrap ${resultStyle}`}>{testResult}</pre>
           )}
         </div>
       </div>
 
       <div className="surface rounded-[24px] p-5">
-        <h2 className="mb-4 text-lg font-semibold">代码示例</h2>
-        <div className="mb-4 flex gap-2 overflow-x-auto border-b border-border pb-2">
+        <h2 className="mb-4 text-lg font-semibold text-slate-900">代码示例</h2>
+        <div className="mb-4 flex gap-2 overflow-x-auto border-b border-slate-200 pb-2">
           {tabs.map(t => (
-            <button key={t.id} onClick={() => setActiveTab(t.id)} className={`rounded-xl border-b-2 px-3 py-2 text-sm font-medium whitespace-nowrap transition-colors ${activeTab === t.id ? t.color : "border-transparent text-muted-foreground hover:text-foreground"}`}>
+            <button key={t.id} onClick={() => setActiveTab(t.id)} className={`rounded-xl border-b-2 px-3 py-2 text-sm font-medium whitespace-nowrap transition-colors ${activeTab === t.id ? t.color : "border-transparent text-slate-500 hover:text-slate-900"}`}>
               {t.label}
             </button>
           ))}
         </div>
-        <div className="relative overflow-hidden rounded-2xl border border-white/8">
+        <div className="relative overflow-hidden rounded-2xl border border-slate-200">
           <SyntaxHighlighter
             language={tabs.find(t => t.id === activeTab)?.lang || "bash"}
             style={oneDark}
@@ -204,13 +210,13 @@ public class XapiTest {
               fontSize: "0.875rem",
               maxHeight: "28rem",
               overflow: "auto",
-              background: "rgba(5, 7, 10, 0.92)",
+              background: "#111827",
             }}
           >
             {scripts[activeTab]}
           </SyntaxHighlighter>
           <button onClick={() => copy(scripts[activeTab], activeTab)} className="absolute right-3 top-3 action-secondary px-3 py-2">
-            {copied === activeTab ? <Check size={14} className="text-emerald-300" /> : <Copy size={14} />}
+            {copied === activeTab ? <Check size={14} className="text-emerald-700" /> : <Copy size={14} />}
           </button>
         </div>
       </div>

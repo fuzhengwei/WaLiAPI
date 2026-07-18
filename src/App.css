@@ -62,7 +62,27 @@ input,
 select,
 textarea {
   outline: none;
+  color: #16202b;
+  background-color: #ffffff;
   transition: border-color 0.16s ease, box-shadow 0.16s ease, background-color 0.16s ease;
+}
+
+select option {
+  color: #16202b;
+  background-color: #ffffff;
+}
+
+code {
+  color: #16202b;
+}
+
+pre {
+  color: #16202b;
+}
+
+input::placeholder,
+textarea::placeholder {
+  color: #8a98ab;
 }
 
 input:focus,
