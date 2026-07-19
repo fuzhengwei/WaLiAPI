@@ -39,3 +39,5 @@ src-tauri/gen/
 # Documentation artifacts
 xapi_build_complete_*.md
 xapi_usage_guide_*.md
+/.walicode/memory/core_memory.json
+/.walicode/output.json
