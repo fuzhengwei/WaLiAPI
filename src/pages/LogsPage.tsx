@@ -312,17 +312,17 @@ export function LogsPage() {
                 <table className="w-full table-fixed text-sm">
                   <thead className="sticky top-0 z-10 border-b border-border bg-white/90 backdrop-blur text-muted-foreground">
                     <tr>
-                      <th className="w-8 px-3 py-3"></th>
-                      <th className="w-16 px-2 py-3 text-left font-medium">#</th>
-                      <th className="w-32 px-3 py-3 text-left font-medium">时间</th>
-                      <th className="w-24 px-3 py-3 text-left font-medium">密钥</th>
-                      <th className="w-24 px-3 py-3 text-left font-medium">渠道</th>
-                      <th className="px-3 py-3 text-left font-medium">模型</th>
-                      <th className="w-20 px-3 py-3 text-left font-medium">状态</th>
-                      <th className="w-24 px-3 py-3 text-left font-medium">安全</th>
-                      <th className="w-20 px-3 py-3 text-right font-medium">Token</th>
-                      <th className="w-20 px-3 py-3 text-right font-medium">耗时</th>
-                      <th className="w-10 px-3 py-3"></th>
+                      <th className="w-8 px-2 py-3"></th>
+                      <th className="w-12 px-2 py-3 text-left font-medium">#</th>
+                      <th className="w-28 px-2 py-3 text-left font-medium">时间</th>
+                      <th className="w-24 px-2 py-3 text-left font-medium">密钥</th>
+                      <th className="w-20 px-2 py-3 text-left font-medium">渠道</th>
+                      <th className="px-2 py-3 text-left font-medium">模型</th>
+                      <th className="w-20 px-2 py-3 text-left font-medium">状态</th>
+                      <th className="w-28 px-2 py-3 text-right font-medium">安全</th>
+                      <th className="w-24 px-2 py-3 text-right font-medium">Token</th>
+                      <th className="w-16 px-2 py-3 text-right font-medium">耗时</th>
+                      <th className="w-10 px-2 py-3"></th>
                     </tr>
                   </thead>
                   <tbody>
@@ -394,12 +394,12 @@ function LogRow({
           </button>
         </td>
         <td className="px-2 py-2.5 text-xs text-muted-foreground/60 font-mono whitespace-nowrap">{log.seq != null ? `#${log.seq}` : "-"}</td>
-        <td className="px-3 py-2.5 text-xs text-muted-foreground whitespace-nowrap overflow-hidden">{formatTime(log.created_at)}</td>
-        <td className="px-3 py-2.5 text-xs overflow-hidden truncate">{log.api_key_name || "-"}</td>
-        <td className="px-3 py-2.5 text-xs overflow-hidden truncate">{log.channel_name || "-"}</td>
-        <td className="px-3 py-2.5 text-xs font-mono overflow-hidden truncate">
+        <td className="px-2 py-2.5 text-xs text-muted-foreground whitespace-nowrap overflow-hidden">{formatTime(log.created_at)}</td>
+        <td className="px-2 py-2.5 text-xs overflow-hidden truncate">{log.api_key_name || "-"}</td>
+        <td className="px-2 py-2.5 text-xs overflow-hidden truncate">{log.channel_name || "-"}</td>
+        <td className="px-2 py-2.5 text-[13px] font-mono overflow-hidden truncate">
           <div className="flex flex-col gap-0.5">
-            <span className="truncate">{log.model}</span>
+            <span className="truncate font-medium text-foreground">{log.model}</span>
             {log.upstream_model && log.upstream_model !== log.model && (
               <span className="text-[10px] text-blue-500 leading-tight truncate">
                 → {log.upstream_model}
@@ -407,7 +407,7 @@ function LogRow({
             )}
           </div>
         </td>
-        <td className="px-3 py-2.5 text-xs">
+        <td className="px-2 py-2.5 text-xs">
           <div className="flex items-center gap-1.5">
             <span className={`rounded-full px-2 py-0.5 ${log.status_code === 200 ? "bg-emerald-500/12 text-emerald-300" : "bg-red-500/12 text-red-300"}`}>
               {log.status_code}
@@ -416,8 +416,10 @@ function LogRow({
             {log.is_retry && <span className="text-amber-400 text-[10px]">retry</span>}
           </div>
         </td>
-        <td className="px-3 py-2.5 text-xs">
-          <RiskBadge log={log} />
+        <td className="px-2 py-2.5 text-xs">
+          <div className="flex justify-end">
+            <RiskBadge log={log} />
+          </div>
         </td>
         <td className="px-3 py-2.5 text-right text-xs">
           <span title={`Prompt: ${log.prompt_tokens}, Completion: ${log.completion_tokens}`}>
@@ -450,8 +452,8 @@ function LogRow({
 function RiskBadge({ log }: { log: RequestLog }) {
   const meta = getRiskMeta(log.risk_level);
   return (
-    <span title={log.risk_summary || undefined} className={`inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-[10px] font-medium ${meta.cls}`}>
-      <ShieldAlert size={10} />
+    <span title={log.risk_summary || undefined} className={`inline-flex items-center gap-1 rounded-full border px-2.5 py-0.5 text-[11px] font-medium ${meta.cls}`}>
+      <ShieldAlert size={11} />
       {meta.label}{log.risk_score > 0 ? ` ${log.risk_score}` : ""}
     </span>
   );
