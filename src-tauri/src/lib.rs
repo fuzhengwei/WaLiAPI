@@ -152,15 +152,25 @@ pub fn run() {
         .build(tauri::generate_context!())
         .expect("error while building WaLiAPI")
         .run(|app, event| {
-            if let RunEvent::Reopen { .. } = event {
-                let _ = restore_main_window(app);
+            #[cfg(target_os = "macos")]
+            {
+                if let RunEvent::Reopen { .. } = event {
+                    let _ = restore_main_window(app);
+                }
+            }
+            #[cfg(not(target_os = "macos"))]
+            {
+                let _ = (app, &event);
             }
         });
 }
 
 fn restore_main_window(app: &AppHandle) -> tauri::Result<()> {
     if let Some(window) = app.get_webview_window("main") {
-        let _ = app.show();
+        #[cfg(target_os = "macos")]
+        {
+            let _ = app.show();
+        }
         let _ = window.unminimize();
         let _ = window.show();
         let _ = window.set_focus();
