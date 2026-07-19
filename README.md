@@ -1,6 +1,6 @@
 ## WaLiAPI v0.1.0 — 本地 LLM API 网关
 
-> 本地运行的 LLM API 网关桌面软件，统一转换各供应商 API 为 OpenAI 兼容协议。
+> 本地运行的 LLM API 网关桌面软件，统一转换各供应商 API 为 OpenAI 兼容协议。可配合 [WaLiCode](https://walicode.xiaofuge.cn/)、Codex、Claude Code、QClaw 等 AI IDE，让你知道 AI 对话，到底在说啥。
 
 ### 🎯 核心功能
 
