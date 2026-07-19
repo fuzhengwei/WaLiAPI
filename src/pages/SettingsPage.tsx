@@ -21,6 +21,7 @@ export function SettingsPage() {
   const [newRule, setNewRule] = useState({ rule_type: "blacklist", category: "domain", pattern: "", severity: "medium", action: "warn", description: "" });
   const [editingBuiltin, setEditingBuiltin] = useState<string | null>(null);
   const [editBuiltinData, setEditBuiltinData] = useState({ severity: "", title: "", description: "" });
+  const [activeTab, setActiveTab] = useState<string>("security");
 
   useEffect(() => {
     settingsApi.get().then(setSettings).catch(() => {});
@@ -148,12 +149,21 @@ export function SettingsPage() {
   const selectCls = "w-full appearance-none rounded-2xl border border-border bg-background/70 px-4 py-3 pr-10 text-sm focus:outline-none focus:ring-2 focus:ring-primary/20 focus:border-primary bg-[url('data:image/svg+xml;utf8,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 20 20%22 fill=%22%2366758a%22><path d=%22M5.23 7.21a.75.75 0 011.06.02L10 11.06l3.71-3.83a.75.75 0 111.08 1.04l-4.25 4.39a.75.75 0 01-1.08 0L5.21 8.27a.75.75 0 01.02-1.06z%22/></svg>')] bg-[length:20px_20px] bg-[right_0.75rem_center] bg-no-repeat";
   const inputCls = "w-full rounded-2xl border border-border bg-background/70 px-4 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-primary/20 focus:border-primary";
 
+  // Tab 配置
+  const TABS = [
+    { id: "security", label: "安全审计", icon: ShieldAlert },
+    { id: "server", label: "服务配置", icon: Server },
+    { id: "general", label: "通用设置", icon: SlidersHorizontal },
+    { id: "appearance", label: "界面设置", icon: Palette },
+    { id: "retry", label: "重试策略", icon: RefreshCw },
+  ] as const;
+
   return (
-    <div className="page-shell space-y-6 max-w-5xl">
+    <div className="page-shell space-y-5 max-w-5xl">
       <div className="page-header">
         <div>
           <h1 className="page-title">设置</h1>
-          <p className="page-subtitle">服务、界面与重试策略统一配置</p>
+          <p className="page-subtitle">分类管理服务、安全、界面与重试策略</p>
         </div>
         <button onClick={handleSave} className="action-primary">
           {saved ? <Check size={16} /> : <Save size={16} />}
@@ -163,10 +173,31 @@ export function SettingsPage() {
 
       {message && <div className="surface-soft rounded-2xl px-4 py-3 text-sm text-primary">{message}</div>}
 
-      <div className="grid grid-cols-1 gap-4 xl:grid-cols-2">
+      {/* Tab 标签页 */}
+      <div className="flex items-center gap-1 border-b border-border overflow-x-auto">
+        {TABS.map(tab => {
+          const Icon = tab.icon;
+          const active = activeTab === tab.id;
+          return (
+            <button
+              key={tab.id}
+              onClick={() => setActiveTab(tab.id)}
+              className={`inline-flex items-center gap-1.5 px-4 py-2.5 text-sm font-medium border-b-2 -mb-px transition-colors whitespace-nowrap ${
+                active
+                  ? "border-primary text-primary"
+                  : "border-transparent text-muted-foreground hover:text-foreground hover:border-border"
+              }`}
+            >
+              <Icon size={15} />
+              {tab.label}
+            </button>
+          );
+        })}
+      </div>
 
-        {/* ── 安全审计中心 ── */}
-        <div className="surface rounded-[24px] p-6 space-y-5 xl:col-span-2">
+      {/* Tab 内容 */}
+      {activeTab === "security" && (
+        <div className="surface rounded-[24px] p-6 space-y-5">
           <div className="flex items-center gap-3">
             <div className="rounded-2xl border border-white/8 bg-white/6 p-3"><ShieldAlert size={18} className="text-primary" /></div>
             <div>
@@ -415,8 +446,9 @@ export function SettingsPage() {
 
           <p className="text-xs text-muted-foreground">默认建议使用「只审计」模式：先在请求日志中展示风险证据；需要强防护时再切换到「脱敏」或「阻断」。</p>
         </div>
+      )}
 
-        {/* ── 服务配置 ── */}
+      {activeTab === "server" && (
         <div className="surface rounded-[24px] p-6 space-y-5">
           <div className="flex items-center gap-3">
             <div className="rounded-2xl border border-white/8 bg-white/6 p-3"><Server size={18} className="text-primary" /></div>
@@ -448,8 +480,9 @@ export function SettingsPage() {
             <RotateCcw size={16} /> 重启服务
           </button>
         </div>
+      )}
 
-        {/* ── 通用设置 ── */}
+      {activeTab === "general" && (
         <div className="surface rounded-[24px] p-6 space-y-5">
           <div className="flex items-center gap-3">
             <div className="rounded-2xl border border-white/8 bg-white/6 p-3"><SlidersHorizontal size={18} className="text-primary" /></div>
@@ -476,8 +509,9 @@ export function SettingsPage() {
             ))}
           </div>
         </div>
+      )}
 
-        {/* ── 界面设置 ── */}
+      {activeTab === "appearance" && (
         <div className="surface rounded-[24px] p-6 space-y-5">
           <div className="flex items-center gap-3">
             <div className="rounded-2xl border border-white/8 bg-white/6 p-3"><Palette size={18} className="text-primary" /></div>
@@ -512,8 +546,9 @@ export function SettingsPage() {
             </div>
           </div>
         </div>
+      )}
 
-        {/* ── 重试策略 ── */}
+      {activeTab === "retry" && (
         <div className="surface rounded-[24px] p-6 space-y-5">
           <div className="flex items-center gap-3">
             <div className="rounded-2xl border border-white/8 bg-white/6 p-3"><RefreshCw size={18} className="text-primary" /></div>
@@ -544,7 +579,7 @@ export function SettingsPage() {
             </div>
           )}
         </div>
-      </div>
+      )}
     </div>
   );
 }
