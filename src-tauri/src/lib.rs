@@ -1,23 +1,34 @@
 // WaLiAPI - 本地 LLM API 网关
-// 第1-6节：API转发代理核心
+// 第1-7节：HTTP服务器与SSE流式
 mod adaptor;
-mod core;
-mod security;
 mod commands;
+mod core;
 mod db;
+mod security;
+mod server;
 mod utils;
+
+use std::sync::Arc;
+use tokio::sync::RwLock;
+
+pub struct AppState {
+    pub db: Arc<db::Database>,
+    pub server_port: Arc<RwLock<u16>>,
+    pub server_running: Arc<std::sync::atomic::AtomicBool>,
+    pub server_handle: Arc<RwLock<Option<tokio::task::JoinHandle<()>>>>,
+}
 
 #[tauri::command]
 fn greet(name: &str) -> String {
     format!("Hello, {}! WaLiAPI 工程已就绪。", name)
 }
 
-pub struct AppState {
-    pub db: std::sync::Arc<db::Database>,
-}
-
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    tracing_subscriber::fmt()
+        .with_max_level(tracing::Level::INFO)
+        .init();
+
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_shell::init())
@@ -29,9 +40,18 @@ pub fn run() {
             let app_handle = app.handle().clone();
             tauri::async_runtime::block_on(async move {
                 let db = db::Database::new(&app_handle).await;
-                app_handle.manage(std::sync::Arc::new(AppState {
-                    db: std::sync::Arc::new(db),
-                }));
+                let state = Arc::new(AppState {
+                    db: Arc::new(db),
+                    server_port: Arc::new(RwLock::new(0)),
+                    server_running: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                    server_handle: Arc::new(RwLock::new(None)),
+                });
+                app_handle.manage(state.clone());
+
+                let handle = app_handle.clone();
+                tauri::async_runtime::spawn(async move {
+                    let _ = server::start_server(handle, state).await;
+                });
             });
             Ok(())
         })
@@ -44,6 +64,16 @@ pub fn run() {
             commands::channel::toggle_channel,
             commands::channel::delete_channel,
             commands::channel::test_channel,
+            commands::log::get_logs,
+            commands::log::get_log,
+            commands::log::get_log_security_findings,
+            commands::log::delete_log,
+            commands::log::delete_logs_before,
+            commands::log::delete_all_logs,
+            commands::log::get_log_stats,
+            commands::stats::get_dashboard_stats,
+            commands::server::get_server_status,
+            commands::server::restart_server,
         ])
         .run(tauri::generate_context!())
         .expect("error while running WaLiAPI");
