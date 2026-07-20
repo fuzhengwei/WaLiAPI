@@ -1,6 +1,8 @@
 // WaLiAPI - 本地 LLM API 网关
 // 第1-3节：渠道适配器模式
 mod adaptor;
+
+use tauri::Manager;
 mod commands;
 mod db;
 mod utils;
