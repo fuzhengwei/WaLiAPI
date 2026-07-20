@@ -1,9 +1,9 @@
-//! 安全审计模块（最小桩版本）
-//! 第1-6节仅定义接口，保证 Proxy 全链路可编译运行；
-//! 完整的风险扫描引擎将在第2-2节实现。
-
 use serde::{Deserialize, Serialize};
 use tauri::AppHandle;
+use tauri_plugin_store::StoreExt;
+
+pub mod scanner;
+pub mod redact;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
@@ -116,7 +116,7 @@ pub struct SecuritySettings {
 impl Default for SecuritySettings {
     fn default() -> Self {
         Self {
-            enabled: false,
+            enabled: true,
             mode: "audit".to_string(),
             scan_request: true,
             scan_response: false,
@@ -130,18 +130,85 @@ impl Default for SecuritySettings {
     }
 }
 
-pub fn get_security_settings(_app: &AppHandle) -> SecuritySettings {
-    SecuritySettings::default()
+pub fn get_security_settings(app: &AppHandle) -> SecuritySettings {
+    let defaults = SecuritySettings::default();
+    let Ok(store) = app.store("settings.json") else {
+        return defaults;
+    };
+
+    SecuritySettings {
+        enabled: store.get("security.enabled").and_then(|v| v.as_bool()).unwrap_or(defaults.enabled),
+        mode: store.get("security.mode").and_then(|v| v.as_str().map(|s| s.to_string())).unwrap_or(defaults.mode),
+        scan_request: store.get("security.scan_request").and_then(|v| v.as_bool()).unwrap_or(defaults.scan_request),
+        scan_response: store.get("security.scan_response").and_then(|v| v.as_bool()).unwrap_or(defaults.scan_response),
+        scan_unicode: store.get("security.scan_unicode").and_then(|v| v.as_bool()).unwrap_or(defaults.scan_unicode),
+        scan_tools: store.get("security.scan_tools").and_then(|v| v.as_bool()).unwrap_or(defaults.scan_tools),
+        scan_network: store.get("security.scan_network").and_then(|v| v.as_bool()).unwrap_or(defaults.scan_network),
+        redact_secrets: store.get("security.redact_secrets").and_then(|v| v.as_bool()).unwrap_or(defaults.redact_secrets),
+        block_on_critical: store.get("security.block_on_critical").and_then(|v| v.as_bool()).unwrap_or(defaults.block_on_critical),
+        max_scan_bytes: store.get("security.max_scan_bytes").and_then(|v| v.as_u64()).unwrap_or(defaults.max_scan_bytes as u64) as usize,
+    }
 }
 
-pub fn scan_request(_body: &serde_json::Value, _settings: &SecuritySettings) -> SecurityScanResult {
-    SecurityScanResult::default()
+pub fn decide_action(result: &mut SecurityScanResult, settings: &SecuritySettings) {
+    if !settings.enabled {
+        result.action = SecurityAction::Allow;
+        return;
+    }
+
+    let mode = settings.mode.as_str();
+    result.action = match mode {
+        "off" | "audit" => SecurityAction::Allow,
+        "warn" => {
+            if result.risk_level.rank() >= RiskLevel::Medium.rank() { SecurityAction::Warn } else { SecurityAction::Allow }
+        }
+        "redact" => {
+            if result.risk_level.rank() >= RiskLevel::High.rank() { SecurityAction::Redact } else { SecurityAction::Allow }
+        }
+        "confirm" => {
+            if result.risk_level.rank() >= RiskLevel::High.rank() { SecurityAction::Confirm } else { SecurityAction::Allow }
+        }
+        "block" => {
+            if result.risk_level.rank() >= RiskLevel::High.rank() { SecurityAction::Block } else { SecurityAction::Allow }
+        }
+        _ => SecurityAction::Allow,
+    };
+
+    if settings.block_on_critical && result.risk_level == RiskLevel::Critical {
+        result.action = SecurityAction::Block;
+    }
+
+    if matches!(result.action, SecurityAction::Block) {
+        result.blocked_reason = Some(result.summary.clone());
+    }
 }
 
-pub fn scan_response(_body: &serde_json::Value, _settings: &SecuritySettings) -> SecurityScanResult {
-    SecurityScanResult::default()
+pub fn scan_request(body: &serde_json::Value, settings: &SecuritySettings) -> SecurityScanResult {
+    if !settings.enabled || !settings.scan_request {
+        return SecurityScanResult::default();
+    }
+    let mut result = scanner::scan_json(body, "request", settings);
+    decide_action(&mut result, settings);
+    result
 }
 
-pub fn redact_request_body(body: &serde_json::Value, _settings: &SecuritySettings) -> (serde_json::Value, bool) {
-    (body.clone(), false)
+/// Scan an upstream response for risks (sensitive info, tracking, etc.)
+pub fn scan_response(body: &serde_json::Value, settings: &SecuritySettings) -> SecurityScanResult {
+    if !settings.enabled || !settings.scan_response {
+        return SecurityScanResult::default();
+    }
+    let mut result = scanner::scan_json(body, "response", settings);
+    decide_action(&mut result, settings);
+    result
+}
+
+/// Redact sensitive data from the request body before forwarding upstream.
+/// Returns a new JSON value with secrets replaced.
+pub fn redact_request_body(body: &serde_json::Value, settings: &SecuritySettings) -> (serde_json::Value, bool) {
+    if !settings.enabled || !settings.redact_secrets {
+        return (body.clone(), false);
+    }
+    let redacted = redact::redact_json(body, settings);
+    let was_redacted = redacted != *body;
+    (redacted, was_redacted)
 }

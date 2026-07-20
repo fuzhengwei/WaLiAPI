@@ -1,5 +1,5 @@
 // WaLiAPI - 本地 LLM API 网关
-// 第2-1节：密钥管理与配额控制
+// 第2-2节：安全审计引擎
 mod adaptor;
 mod commands;
 mod core;
