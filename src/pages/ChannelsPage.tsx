@@ -2,7 +2,7 @@ import { useEffect, useState, useRef } from "react";
 import { channelApi, importExportApi } from "../lib/api";
 import type { Channel } from "../types";
 import { CHANNEL_TYPES, formatTime } from "../lib/constants";
-import { Plus, Radio, Trash2, Zap, Power, Edit, Gauge, Boxes, Download, ChevronDown, Upload, Loader2 } from "lucide-react";
+import { Plus, Radio, Trash2, Zap, Power, Edit, Gauge, Boxes, Download, ChevronDown, Upload, Loader2, X } from "lucide-react";
 import { ChannelForm } from "../components/ChannelForm";
 import { ImportDialog } from "../components/ImportDialog";
 
@@ -15,6 +15,9 @@ export function ChannelsPage() {
   const [showImport, setShowImport] = useState(false);
   const [showImportMenu, setShowImportMenu] = useState(false);
   const [exporting, setExporting] = useState(false);
+  const [deleteTarget, setDeleteTarget] = useState<Channel | null>(null);
+  const [deleting, setDeleting] = useState(false);
+  const [actionError, setActionError] = useState<string | null>(null);
   const importMenuRef = useRef<HTMLDivElement>(null);
 
   const load = () => channelApi.getAll().then(setChannels).catch(() => {});
@@ -55,10 +58,20 @@ export function ChannelsPage() {
     setTesting(null);
   };
 
-  const handleDelete = async (id: string) => {
-    if (!confirm("确认删除此渠道？")) return;
-    await channelApi.delete(id);
-    load();
+  // 注意：Tauri 2 的 webview 未实现原生 confirm()/alert()，
+  // confirm() 会静默返回 false，因此这里使用自定义确认弹窗（与密钥管理页一致）
+  const handleDelete = async () => {
+    if (!deleteTarget) return;
+    setDeleting(true);
+    try {
+      await channelApi.delete(deleteTarget.id);
+      setDeleteTarget(null);
+      load();
+    } catch (e) {
+      setActionError(`删除渠道失败: ${String(e)}`);
+    } finally {
+      setDeleting(false);
+    }
   };
 
   const handleToggle = async (ch: Channel) => {
@@ -68,7 +81,7 @@ export function ChannelsPage() {
       load();
     } catch (e) {
       console.error("Failed to toggle channel:", e);
-      alert(`切换渠道状态失败: ${String(e)}`);
+      setActionError(`切换渠道状态失败: ${String(e)}`);
     }
   };
 
@@ -119,6 +132,15 @@ export function ChannelsPage() {
           </button>
         </div>
       </div>
+
+      {actionError && (
+        <div className="flex items-center justify-between rounded-2xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">
+          <span>{actionError}</span>
+          <button onClick={() => setActionError(null)} className="ml-3 shrink-0 text-red-400 transition-colors hover:text-red-600" title="关闭">
+            <X size={16} />
+          </button>
+        </div>
+      )}
 
       {channels.length === 0 ? (
         <div className="surface empty-state">
@@ -228,7 +250,7 @@ export function ChannelsPage() {
                     <button onClick={() => handleToggle(ch)} className="action-secondary px-3 py-2" title={ch.status === 1 ? "禁用" : "启用"}>
                       <Power size={16} className={ch.status === 1 ? "text-emerald-300" : "text-zinc-400"} />
                     </button>
-                    <button onClick={() => handleDelete(ch.id)} className="action-secondary px-3 py-2 text-red-300" title="删除">
+                    <button onClick={() => setDeleteTarget(ch)} className="action-secondary px-3 py-2 text-red-300" title="删除">
                       <Trash2 size={16} />
                     </button>
                   </div>
@@ -253,6 +275,63 @@ export function ChannelsPage() {
           onImported={() => load()}
         />
       )}
+
+      <DeleteConfirmDialog
+        target={deleteTarget}
+        onClose={() => setDeleteTarget(null)}
+        onConfirm={handleDelete}
+        deleting={deleting}
+      />
+    </div>
+  );
+}
+
+function DeleteConfirmDialog({
+  target,
+  onClose,
+  onConfirm,
+  deleting,
+}: {
+  target: Channel | null;
+  onClose: () => void;
+  onConfirm: () => void;
+  deleting: boolean;
+}) {
+  if (!target) return null;
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4 backdrop-blur-sm"
+      onClick={onClose}
+    >
+      <div
+        className="surface w-full max-w-sm rounded-[28px] p-6"
+        onClick={e => e.stopPropagation()}
+      >
+        <div className="flex items-center gap-3">
+          <div className="rounded-2xl border border-red-200 bg-red-50 p-2.5">
+            <Trash2 className="h-5 w-5 text-red-600" />
+          </div>
+          <div>
+            <h3 className="text-base font-semibold">删除渠道</h3>
+            <p className="text-sm text-muted-foreground">此操作不可撤销</p>
+          </div>
+        </div>
+        <div className="mt-4 rounded-2xl border border-border bg-background/50 px-4 py-3 text-sm">
+          <div className="text-muted-foreground">渠道名称</div>
+          <div className="mt-1 font-medium">{target.name}</div>
+          <div className="mt-2 text-xs font-mono text-muted-foreground truncate">{target.base_url}</div>
+        </div>
+        <div className="mt-5 flex justify-end gap-2">
+          <button onClick={onClose} className="action-secondary">取消</button>
+          <button
+            onClick={onConfirm}
+            disabled={deleting}
+            className="inline-flex items-center gap-2 rounded-2xl bg-red-600 px-4 py-2.5 text-sm font-medium text-white transition-colors hover:bg-red-700 disabled:opacity-50"
+          >
+            {deleting ? "删除中..." : "确认删除"}
+          </button>
+        </div>
+      </div>
     </div>
   );
 }
