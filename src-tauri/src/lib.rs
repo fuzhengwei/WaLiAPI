@@ -1,6 +1,8 @@
 // WaLiAPI - 本地 LLM API 网关
 // 第1-2节：数据库设计与初始化
 mod db;
+
+use tauri::Manager;
 mod utils;
 
 #[tauri::command]
