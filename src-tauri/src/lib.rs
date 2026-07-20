@@ -1,6 +1,8 @@
 // WaLiAPI - 本地 LLM API 网关
 // 第2-1节：密钥管理与配额控制
 mod adaptor;
+
+use tauri::Manager;
 mod commands;
 mod core;
 mod db;
