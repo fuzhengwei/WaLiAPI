@@ -216,8 +216,8 @@ impl Repository {
 
     pub async fn create_log(&self, log: &RequestLog) -> Result<(), sqlx::Error> {
         sqlx::query(
-            "INSERT INTO request_logs (id, api_key_id, api_key_name, channel_id, channel_name, model, upstream_model, mode, status_code, prompt_tokens, completion_tokens, total_tokens, duration_ms, error_message, is_stream, is_retry, created_at, request_body)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+            "INSERT INTO request_logs (id, api_key_id, api_key_name, channel_id, channel_name, model, upstream_model, mode, status_code, prompt_tokens, completion_tokens, total_tokens, duration_ms, error_message, is_stream, is_retry, created_at, request_body, risk_level, risk_score, risk_summary, security_action, sanitized, blocked_reason)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
         )
         .bind(&log.id)
         .bind(&log.api_key_id)
@@ -237,6 +237,12 @@ impl Repository {
         .bind(log.is_retry)
         .bind(&log.created_at)
         .bind(&log.request_body)
+        .bind(&log.risk_level)
+        .bind(log.risk_score)
+        .bind(&log.risk_summary)
+        .bind(&log.security_action)
+        .bind(log.sanitized)
+        .bind(&log.blocked_reason)
         .execute(&self.pool)
         .await?;
         // Backfill seq with rowid for new rows
@@ -245,6 +251,38 @@ impl Repository {
             .execute(&self.pool)
             .await?;
         Ok(())
+    }
+
+    pub async fn create_security_findings(&self, log_id: &str, findings: &[crate::security::SecurityFinding], action: &str) -> Result<(), sqlx::Error> {
+        for finding in findings {
+            sqlx::query(
+                "INSERT INTO request_security_findings (id, log_id, phase, category, rule_id, severity, title, description, location, evidence_masked, evidence_hash, action, created_at)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+            )
+            .bind(crate::utils::id::new_id())
+            .bind(log_id)
+            .bind(&finding.phase)
+            .bind(&finding.category)
+            .bind(&finding.rule_id)
+            .bind(finding.severity.as_str())
+            .bind(&finding.title)
+            .bind(&finding.description)
+            .bind(&finding.location)
+            .bind(&finding.evidence_masked)
+            .bind(Option::<String>::None)
+            .bind(action)
+            .bind(crate::utils::time::now_iso())
+            .execute(&self.pool)
+            .await?;
+        }
+        Ok(())
+    }
+
+    pub async fn get_security_findings(&self, log_id: &str) -> Result<Vec<RequestSecurityFinding>, sqlx::Error> {
+        sqlx::query_as::<_, RequestSecurityFinding>("SELECT * FROM request_security_findings WHERE log_id = ? ORDER BY created_at ASC")
+            .bind(log_id)
+            .fetch_all(&self.pool)
+            .await
     }
 
     pub async fn get_log(&self, id: &str) -> Result<RequestLog, sqlx::Error> {

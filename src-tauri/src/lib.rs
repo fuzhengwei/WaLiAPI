@@ -1,7 +1,8 @@
 // WaLiAPI - 本地 LLM API 网关
-// 第1-5节：负载均衡调度器
+// 第1-6节：API转发代理核心
 mod adaptor;
 mod core;
+mod security;
 mod commands;
 mod db;
 mod utils;
