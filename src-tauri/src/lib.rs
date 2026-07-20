@@ -1,6 +1,8 @@
 // WaLiAPI - 本地 LLM API 网关
 // 第2-2节：安全审计引擎
 mod adaptor;
+
+use tauri::Manager;
 mod commands;
 mod core;
 mod db;
