@@ -1,5 +1,5 @@
 // WaLiAPI - 本地 LLM API 网关
-// 第1-7节：HTTP服务器与SSE流式
+// 第2-1节：密钥管理与配额控制
 mod adaptor;
 mod commands;
 mod core;
@@ -57,6 +57,10 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             greet,
+            commands::api_key::get_api_keys,
+            commands::api_key::create_api_key,
+            commands::api_key::update_api_key,
+            commands::api_key::delete_api_key,
             commands::channel::get_channels,
             commands::channel::get_channel,
             commands::channel::create_channel,
