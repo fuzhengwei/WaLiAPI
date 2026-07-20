@@ -4,6 +4,7 @@ use tauri_plugin_store::StoreExt;
 
 pub mod scanner;
 pub mod redact;
+pub mod rules;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]

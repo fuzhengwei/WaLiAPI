@@ -32,6 +32,9 @@ impl Database {
             .await
             .ok();
 
+        // Seed built-in security rules if table exists and is empty
+        let _ = crate::security::rules::seed_builtin_rules(&pool).await;
+
         Self { pool }
     }
 }
