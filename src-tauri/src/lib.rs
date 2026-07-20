@@ -1,6 +1,7 @@
 // WaLiAPI - 本地 LLM API 网关
-// 第1-3节：渠道适配器模式
+// 第1-5节：负载均衡调度器
 mod adaptor;
+mod core;
 mod commands;
 mod db;
 mod utils;
