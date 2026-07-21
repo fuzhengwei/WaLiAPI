@@ -4,7 +4,7 @@ import type { RequestLog, SecurityFinding } from "../types";
 import { formatTime, formatDuration, formatNumber } from "../lib/constants";
 import {
   ScrollText, RefreshCw, Trash2, ChevronDown, ChevronRight, AlertCircle,
-  Bot, User, Wrench, Terminal, Eye, FileCode2, Image, ArrowRightLeft, Shield, Timer, Coins,
+  Bot, User, Wrench, Terminal, Eye, FileCode2, Image, ArrowRightLeft, ArrowUp, ArrowDown, Shield, Timer, Coins,
   Search, X, Calendar, Key, Server, Box, ShieldAlert,
 } from "lucide-react";
 
@@ -621,6 +621,7 @@ function LogDetail({ log }: { log: RequestLog }) {
   const [responseChoicesExpanded, setResponseChoicesExpanded] = useState(
     !parsedChoices || parsedChoices.length <= 5
   );
+  const [activeTab, setActiveTab] = useState<"request" | "response">("request");
 
   return (
     <div className="space-y-4">
@@ -815,19 +816,70 @@ function LogDetail({ log }: { log: RequestLog }) {
         </div>
       )}
 
-      {/* ── Messages Timeline ── */}
+      {/* ── Request / Response Tabs ── */}
+      <div className="rounded-2xl border border-slate-200 bg-white overflow-hidden">
+        {/* Tab bar */}
+        <div className="flex items-center border-b border-slate-200 bg-slate-50/80">
+          <button
+            onClick={() => setActiveTab("request")}
+            className={`relative flex items-center gap-2 px-5 py-2.5 text-sm font-medium transition-all duration-200 ${
+              activeTab === "request"
+                ? "text-blue-600 bg-white"
+                : "text-slate-500 hover:text-slate-700 hover:bg-white/50"
+            }`}
+          >
+            <ArrowUp size={14} className={activeTab === "request" ? "text-blue-500" : "text-slate-400"} />
+            请求
+            {messages.length > 0 && (
+              <span className={`rounded-full px-1.5 py-0.5 text-[10px] font-mono ${activeTab === "request" ? "bg-blue-100 text-blue-600" : "bg-slate-200 text-slate-500"}`}>{messages.length}</span>
+            )}
+            {activeTab === "request" && <span className="absolute bottom-0 left-0 right-0 h-0.5 bg-blue-500" />}
+          </button>
+          <button
+            onClick={() => setActiveTab("response")}
+            className={`relative flex items-center gap-2 px-5 py-2.5 text-sm font-medium transition-all duration-200 ${
+              activeTab === "response"
+                ? "text-emerald-600 bg-white"
+                : "text-slate-500 hover:text-slate-700 hover:bg-white/50"
+            }`}
+          >
+            <ArrowDown size={14} className={activeTab === "response" ? "text-emerald-500" : "text-slate-400"} />
+            响应
+            {parsedChoices && parsedChoices.length > 0 && (
+              <span className={`rounded-full px-1.5 py-0.5 text-[10px] font-mono ${activeTab === "response" ? "bg-emerald-100 text-emerald-600" : "bg-slate-200 text-slate-500"}`}>{parsedChoices.length}</span>
+            )}
+            {activeTab === "response" && <span className="absolute bottom-0 left-0 right-0 h-0.5 bg-emerald-500" />}
+          </button>
+          <div className="flex-1" />
+          {/* Tab-specific actions */}
+          {activeTab === "request" && messages.length > 0 && (
+            <button
+              onClick={() => setJsonExpanded(!jsonExpanded)}
+              className="mr-3 text-xs text-blue-500 hover:text-blue-600 transition-colors font-medium"
+            >
+              {jsonExpanded ? "返回缩略视图" : "查看原始 JSON"}
+            </button>
+          )}
+          {activeTab === "response" && parsedChoices && parsedChoices.length > 0 && (
+            <button
+              onClick={() => setResponseJsonExpanded(!responseJsonExpanded)}
+              className="mr-3 text-xs text-blue-500 hover:text-blue-600 transition-colors font-medium"
+            >
+              {responseJsonExpanded ? "返回缩略视图" : "查看原始 JSON"}
+            </button>
+          )}
+        </div>
+
+        {/* Tab content */}
+        <div className="p-4">
+
+      {/* ── Request Tab Content ── */}
+      {activeTab === "request" && (
+      <>
       {messages.length > 0 ? (
         <div>
           <div className="flex items-center justify-between mb-2">
             <span className="text-xs font-medium text-slate-600">消息列表 ({messages.length} 条)</span>
-            <div className="flex items-center gap-3">
-              <button
-                onClick={() => setJsonExpanded(!jsonExpanded)}
-                className="text-xs text-blue-500 hover:text-blue-600 transition-colors font-medium"
-              >
-                {jsonExpanded ? "返回缩略视图" : "查看原始 JSON"}
-              </button>
-            </div>
           </div>
 
           {jsonExpanded ? (
@@ -860,7 +912,6 @@ function LogDetail({ log }: { log: RequestLog }) {
                     const role = (msg.role as string) || "unknown";
                     const meta = getRoleMeta(role);
                     const Icon = meta.icon;
-                    const toolNames = extractToolNames(msg);
                     const isExpanded = expandedMessages.has(i);
                     const preview = getContentPreview(msg, 140);
                     // Check if getContentPreview truncated the content
@@ -1064,12 +1115,6 @@ function LogDetail({ log }: { log: RequestLog }) {
         <div>
           <div className="flex items-center justify-between mb-2">
             <span className="text-xs text-slate-500">请求内容 ({sizeLabel})</span>
-            <button
-              onClick={() => setJsonExpanded(!jsonExpanded)}
-              className="text-xs text-blue-500 hover:text-blue-600 transition-colors"
-            >
-              {jsonExpanded ? "收起" : "展开全部"}
-            </button>
           </div>
           {jsonExpanded ? (
             <div className="relative">
@@ -1104,20 +1149,17 @@ function LogDetail({ log }: { log: RequestLog }) {
       {parseError && (
         <div className="text-xs text-amber-500">⚠ JSON 解析失败，显示原始内容</div>
       )}
+      </>
+      )}
 
+      {/* ── Response Tab Content ── */}
+      {activeTab === "response" && (
+      <>
       {/* ── Response Choices Timeline ── */}
       {parsedChoices && parsedChoices.length > 0 ? (
         <div>
           <div className="flex items-center justify-between mb-2">
             <span className="text-xs font-medium text-slate-600">选择列表 ({parsedChoices.length} 条)</span>
-            <div className="flex items-center gap-3">
-              <button
-                onClick={() => setResponseJsonExpanded(!responseJsonExpanded)}
-                className="text-xs text-blue-500 hover:text-blue-600 transition-colors font-medium"
-              >
-                {responseJsonExpanded ? "返回缩略视图" : "查看原始 JSON"}
-              </button>
-            </div>
           </div>
 
           {responseJsonExpanded ? (
@@ -1151,7 +1193,6 @@ function LogDetail({ log }: { log: RequestLog }) {
                     const role = (message.role as string) || "assistant";
                     const meta = getRoleMeta(role);
                     const Icon = meta.icon;
-                    const toolNames = extractToolNames(message);
                     const toolCalls = extractToolCalls(message);
 
                     const content = (message.content as string) || "";
@@ -1448,12 +1489,6 @@ function LogDetail({ log }: { log: RequestLog }) {
         <div>
           <div className="flex items-center justify-between mb-2">
             <span className="text-xs text-slate-500">响应内容</span>
-            <button
-              onClick={() => setResponseJsonExpanded(!responseJsonExpanded)}
-              className="text-xs text-blue-500 hover:text-blue-600 transition-colors"
-            >
-              {responseJsonExpanded ? "收起" : "展开全部"}
-            </button>
           </div>
           {responseJsonExpanded ? (
             <div className="relative">
@@ -1481,11 +1516,21 @@ function LogDetail({ log }: { log: RequestLog }) {
             <div className="text-xs text-slate-500">点击「展开全部」查看原始 JSON</div>
           )}
         </div>
-      ) : null}
+      ) : (
+        <div className="flex flex-col items-center justify-center py-8 text-center">
+          <ScrollText className="h-8 w-8 text-slate-300 mb-2" />
+          <p className="text-xs text-slate-400">无响应内容记录</p>
+        </div>
+      )}
 
       {choicesParseError && (
         <div className="text-xs text-amber-500">⚠ 响应 JSON 解析失败，显示原始内容</div>
       )}
+      </>
+      )}
+
+        </div>{/* end tab content */}
+      </div>{/* end tab container */}
     </div>
   );
 }

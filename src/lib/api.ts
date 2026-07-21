@@ -9,6 +9,19 @@ import type {
   BuiltinRule, CustomRule, CreateCustomRuleInput, UpdateBuiltinRuleInput,
 } from "../types";
 
+// Channel stats
+export interface ChannelStats {
+  channel_id: string;
+  total_calls: number;
+  success_calls: number;
+  failed_calls: number;
+  total_tokens: number;
+  prompt_tokens: number;
+  completion_tokens: number;
+  avg_latency_ms: number;
+  last_call_at: string | null;
+}
+
 // Channel commands
 export const channelApi = {
   getAll: () => invoke<Channel[]>("get_channels"),
@@ -18,6 +31,7 @@ export const channelApi = {
   toggle: (id: string, status: number) => invoke<void>("toggle_channel", { id, status }),
   delete: (id: string) => invoke<void>("delete_channel", { id }),
   test: (id: string) => invoke<TestChannelResult>("test_channel", { id }),
+  getStats: () => invoke<ChannelStats[]>("get_channel_stats"),
 };
 
 // API Key commands

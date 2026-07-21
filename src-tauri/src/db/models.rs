@@ -126,6 +126,19 @@ pub struct LogStats {
     pub total_tokens: i64,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
+pub struct ChannelStats {
+    pub channel_id: String,
+    pub total_calls: i64,
+    pub success_calls: i64,
+    pub failed_calls: i64,
+    pub total_tokens: i64,
+    pub prompt_tokens: i64,
+    pub completion_tokens: i64,
+    pub avg_latency_ms: f64,
+    pub last_call_at: Option<String>,
+}
+
 pub fn now_iso() -> String {
     Utc::now().format("%Y-%m-%dT%H:%M:%S%.3fZ").to_string()
 }

@@ -247,8 +247,8 @@ impl Repository {
         .bind(&log.trace_id)
         .execute(&self.pool)
         .await?;
-        // Backfill seq with rowid for new rows
-        sqlx::query("UPDATE request_logs SET seq = rowid WHERE id = ? AND seq IS NULL")
+        // Backfill seq with rowid for new rows (seq defaults to 0, so check for 0)
+        sqlx::query("UPDATE request_logs SET seq = rowid WHERE id = ? AND (seq IS NULL OR seq = 0)")
             .bind(&log.id)
             .execute(&self.pool)
             .await?;
@@ -453,6 +453,14 @@ impl Repository {
             total_requests,
             total_tokens,
         })
+    }
+
+    pub async fn get_channel_stats(&self) -> Result<Vec<ChannelStats>, sqlx::Error> {
+        sqlx::query_as::<_, ChannelStats>(
+            "SELECT\n                r.channel_id as channel_id,\n                COUNT(*) as total_calls,\n                SUM(CASE WHEN r.status_code >= 200 AND r.status_code < 300 THEN 1 ELSE 0 END) as success_calls,\n                SUM(CASE WHEN r.status_code >= 200 AND r.status_code < 300 THEN 0 ELSE 1 END) as failed_calls,\n                COALESCE(SUM(r.total_tokens), 0) as total_tokens,\n                COALESCE(SUM(r.prompt_tokens), 0) as prompt_tokens,\n                COALESCE(SUM(r.completion_tokens), 0) as completion_tokens,\n                COALESCE(AVG(r.duration_ms), 0) as avg_latency_ms,\n                MAX(r.created_at) as last_call_at\n            FROM request_logs r\n            WHERE r.channel_id IS NOT NULL\n            GROUP BY r.channel_id"
+        )
+        .fetch_all(&self.pool)
+        .await
     }
 
     pub async fn get_log_stats(&self, days: i64) -> Result<Vec<LogStats>, sqlx::Error> {
