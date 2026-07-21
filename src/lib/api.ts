@@ -1,13 +1,26 @@
 import { invoke } from "@tauri-apps/api/core";
 import type {
   Channel, CreateChannelInput, UpdateChannelInput, TestChannelResult,
-  ApiKey, CreateApiKeyInput,
+  ApiKey, CreateApiKeyInput, ApiKeyStats,
   RequestLog, LogStats, SecurityFinding,
   DashboardStats,
   Settings,
   ServerStatus,
   BuiltinRule, CustomRule, CreateCustomRuleInput, UpdateBuiltinRuleInput,
 } from "../types";
+
+// Channel stats
+export interface ChannelStats {
+  channel_id: string;
+  total_calls: number;
+  success_calls: number;
+  failed_calls: number;
+  total_tokens: number;
+  prompt_tokens: number;
+  completion_tokens: number;
+  avg_latency_ms: number;
+  last_call_at: string | null;
+}
 
 // Channel commands
 export const channelApi = {
@@ -18,6 +31,7 @@ export const channelApi = {
   toggle: (id: string, status: number) => invoke<void>("toggle_channel", { id, status }),
   delete: (id: string) => invoke<void>("delete_channel", { id }),
   test: (id: string) => invoke<TestChannelResult>("test_channel", { id }),
+  getStats: () => invoke<ChannelStats[]>("get_channel_stats"),
 };
 
 // API Key commands
@@ -26,6 +40,7 @@ export const apiKeyApi = {
   create: (input: CreateApiKeyInput) => invoke<ApiKey>("create_api_key", { input }),
   update: (id: string, status?: number) => invoke<void>("update_api_key", { input: { id, status } }),
   delete: (id: string) => invoke<void>("delete_api_key", { id }),
+  getStats: () => invoke<ApiKeyStats[]>("get_api_key_stats"),
 };
 
 export interface GetLogsInput {
@@ -37,6 +52,7 @@ export interface GetLogsInput {
   model?: string;
   date_from?: string;
   date_to?: string;
+  trace_id?: string;
 }
 
 // Log commands

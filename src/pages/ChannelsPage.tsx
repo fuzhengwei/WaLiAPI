@@ -1,13 +1,15 @@
 import { useEffect, useState, useRef } from "react";
 import { channelApi, importExportApi } from "../lib/api";
+import type { ChannelStats } from "../lib/api";
 import type { Channel } from "../types";
-import { CHANNEL_TYPES, formatTime } from "../lib/constants";
+import { CHANNEL_TYPES, formatTime, formatNumber, formatDuration } from "../lib/constants";
 import { Plus, Radio, Trash2, Zap, Power, Edit, Gauge, Boxes, Download, ChevronDown, Upload, Loader2, X } from "lucide-react";
 import { ChannelForm } from "../components/ChannelForm";
 import { ImportDialog } from "../components/ImportDialog";
 
 export function ChannelsPage() {
   const [channels, setChannels] = useState<Channel[]>([]);
+  const [channelStats, setChannelStats] = useState<Record<string, ChannelStats>>({});
   const [showForm, setShowForm] = useState(false);
   const [editing, setEditing] = useState<Channel | null>(null);
   const [testing, setTesting] = useState<string | null>(null);
@@ -20,7 +22,14 @@ export function ChannelsPage() {
   const [actionError, setActionError] = useState<string | null>(null);
   const importMenuRef = useRef<HTMLDivElement>(null);
 
-  const load = () => channelApi.getAll().then(setChannels).catch(() => {});
+  const load = () => {
+    channelApi.getAll().then(setChannels).catch(() => {});
+    channelApi.getStats().then(stats => {
+      const map: Record<string, ChannelStats> = {};
+      stats.forEach(s => { map[s.channel_id] = s; });
+      setChannelStats(map);
+    }).catch(() => {});
+  };
 
   useEffect(() => { load(); }, []);
 
@@ -153,6 +162,10 @@ export function ChannelsPage() {
           {channels.map(ch => {
             const typeInfo = CHANNEL_TYPES.find(t => t.value === ch.type);
             const result = testResult[ch.id];
+            const stats = channelStats[ch.id];
+            const successRate = stats && stats.total_calls > 0
+              ? ((stats.success_calls / stats.total_calls) * 100).toFixed(1)
+              : null;
             return (
               <div key={ch.id} className="surface rounded-[24px] p-5">
                 <div className="flex items-start justify-between gap-4">
@@ -202,6 +215,40 @@ export function ChannelsPage() {
                         <div className="font-medium">{ch.models.length} 个</div>
                       </div>
                     </div>
+
+                    {/* 调用统计 */}
+                    {stats && stats.total_calls > 0 ? (
+                      <div className="mt-4 grid grid-cols-4 gap-2 text-xs">
+                        <div className="surface-soft rounded-2xl px-3 py-2.5">
+                          <div className="text-muted-foreground mb-0.5">调用次数</div>
+                          <div className="font-bold text-sm">{formatNumber(stats.total_calls)}</div>
+                        </div>
+                        <div className="surface-soft rounded-2xl px-3 py-2.5">
+                          <div className="text-muted-foreground mb-0.5">消耗Token</div>
+                          <div className="font-bold text-sm">{formatNumber(stats.total_tokens)}</div>
+                        </div>
+                        <div className="surface-soft rounded-2xl px-3 py-2.5">
+                          <div className="text-muted-foreground mb-0.5">成功率</div>
+                          <div className={`font-bold text-sm ${
+                            successRate && Number(successRate) >= 95 ? "text-emerald-600" :
+                            successRate && Number(successRate) >= 80 ? "text-amber-600" : "text-red-600"
+                          }`}>
+                            {successRate}%
+                          </div>
+                          <div className="text-[10px] text-muted-foreground">
+                            {stats.success_calls}成功 / {stats.failed_calls}失败
+                          </div>
+                        </div>
+                        <div className="surface-soft rounded-2xl px-3 py-2.5">
+                          <div className="text-muted-foreground mb-0.5">平均延迟</div>
+                          <div className="font-bold text-sm">{formatDuration(stats.avg_latency_ms)}</div>
+                        </div>
+                      </div>
+                    ) : (
+                      <div className="mt-4 rounded-2xl border border-dashed border-slate-200 px-3 py-2.5 text-xs text-center text-muted-foreground">
+                        暂无调用记录
+                      </div>
+                    )}
 
                     {(ch.last_test_at || result) && (
                       <div className="mt-4 rounded-2xl border border-slate-200 bg-slate-50 px-3 py-3 text-xs">

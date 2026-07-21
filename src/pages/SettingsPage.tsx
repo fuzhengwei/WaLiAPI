@@ -159,7 +159,7 @@ export function SettingsPage() {
   ] as const;
 
   return (
-    <div className="page-shell space-y-5 max-w-5xl">
+    <div className="page-shell space-y-5">
       <div className="page-header">
         <div>
           <h1 className="page-title">设置</h1>
@@ -206,8 +206,8 @@ export function SettingsPage() {
             </div>
           </div>
 
-          {/* 启用 + 模式 */}
-          <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
+          {/* 启用 + 模式 + 子开关：横向铺开 */}
+          <div className="grid grid-cols-2 gap-4 lg:grid-cols-4 xl:grid-cols-5">
             <label className="surface-soft flex items-center justify-between rounded-2xl px-4 py-4">
               <span className="text-sm">启用安全审计</span>
               <input
@@ -217,7 +217,7 @@ export function SettingsPage() {
                 className="h-5 w-5"
               />
             </label>
-            <div>
+            <div className="col-span-1 lg:col-span-3 xl:col-span-4">
               <label className="mb-2 block text-sm font-medium">安全模式</label>
               <select
                 value={settings.security_mode}
@@ -232,8 +232,8 @@ export function SettingsPage() {
             </div>
           </div>
 
-          {/* 子开关 */}
-          <div className="grid grid-cols-1 gap-3 md:grid-cols-2 lg:grid-cols-3">
+          {/* 子开关：横向铺开 */}
+          <div className="grid grid-cols-2 gap-3 md:grid-cols-3 lg:grid-cols-6">
             {([
               ["Unicode 隐写检测", "security_scan_unicode"],
               ["工具/命令风险检测", "security_scan_tools"],
@@ -258,6 +258,8 @@ export function SettingsPage() {
             「响应侧安全扫描」开启后，上游返回内容也会被扫描并记录风险。
           </p>
 
+          {/* 内置规则 + 自定义规则：左右分栏 */}
+          <div className="grid grid-cols-1 gap-5 xl:grid-cols-2">
           {/* ── 内置规则 ── */}
           <div className="space-y-3">
             <div className="flex items-center justify-between">
@@ -443,8 +445,9 @@ export function SettingsPage() {
               <p className="text-xs text-muted-foreground">暂无自定义规则。可添加域名黑名单、工具白名单等。</p>
             )}
           </div>
+          </div>{/* end rules grid */}
 
-          <p className="text-xs text-muted-foreground">默认建议使用「只审计」模式：先在请求日志中展示风险证据；需要强防护时再切换到「脱敏」或「阻断」。</p>
+          <p className="text-xs text-muted-foreground">默认建议使用「只审计」模式：先在审计日志中展示风险证据；需要强防护时再切换到「脱敏」或「阻断」。</p>
         </div>
       )}
 
@@ -457,7 +460,7 @@ export function SettingsPage() {
               <p className="text-sm text-muted-foreground">控制本地网关监听地址与服务重启</p>
             </div>
           </div>
-          <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
+          <div className="grid grid-cols-1 gap-4 md:grid-cols-3">
             <div>
               <label className="mb-2 block text-sm font-medium">监听地址</label>
               <input
@@ -475,10 +478,12 @@ export function SettingsPage() {
                 className={inputCls}
               />
             </div>
+            <div className="flex items-end">
+              <button onClick={handleRestart} className="action-secondary w-full">
+                <RotateCcw size={16} /> 重启服务
+              </button>
+            </div>
           </div>
-          <button onClick={handleRestart} className="action-secondary">
-            <RotateCcw size={16} /> 重启服务
-          </button>
         </div>
       )}
 
@@ -491,7 +496,7 @@ export function SettingsPage() {
               <p className="text-sm text-muted-foreground">桌面端交互习惯与启动行为</p>
             </div>
           </div>
-          <div className="space-y-3">
+          <div className="grid grid-cols-1 gap-3 md:grid-cols-3">
             {([
               ["最小化到托盘", "minimize_to_tray"],
               ["关闭到托盘", "close_to_tray"],
@@ -557,27 +562,29 @@ export function SettingsPage() {
               <p className="text-sm text-muted-foreground">请求失败后的自动恢复行为</p>
             </div>
           </div>
-          <label className="surface-soft flex items-center justify-between rounded-2xl px-4 py-4">
-            <span className="text-sm">启用自动重试</span>
-            <input
-              type="checkbox"
-              checked={settings.retry_enabled}
-              onChange={e => setSettings({ ...settings, retry_enabled: e.target.checked })}
-              className="h-5 w-5"
-            />
-          </label>
-          {settings.retry_enabled && (
-            <div>
-              <label className="mb-2 block text-sm font-medium">重试次数</label>
+          <div className="grid grid-cols-1 gap-4 md:grid-cols-2 md:items-end">
+            <label className="surface-soft flex items-center justify-between rounded-2xl px-4 py-4">
+              <span className="text-sm">启用自动重试</span>
               <input
-                type="number"
-                min={0}
-                value={settings.retry_times}
-                onChange={e => setSettings({ ...settings, retry_times: Math.max(0, parseInt(e.target.value) || 0) })}
-                className={inputCls}
+                type="checkbox"
+                checked={settings.retry_enabled}
+                onChange={e => setSettings({ ...settings, retry_enabled: e.target.checked })}
+                className="h-5 w-5"
               />
-            </div>
-          )}
+            </label>
+            {settings.retry_enabled && (
+              <div>
+                <label className="mb-2 block text-sm font-medium">重试次数</label>
+                <input
+                  type="number"
+                  min={0}
+                  value={settings.retry_times}
+                  onChange={e => setSettings({ ...settings, retry_times: Math.max(0, parseInt(e.target.value) || 0) })}
+                  className={inputCls}
+                />
+              </div>
+            )}
+          </div>
         </div>
       )}
     </div>

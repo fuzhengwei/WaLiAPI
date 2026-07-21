@@ -72,6 +72,18 @@ export interface CreateApiKeyInput {
   expires_at?: string;
 }
 
+export interface ApiKeyStats {
+  api_key_id: string;
+  total_calls: number;
+  success_calls: number;
+  failed_calls: number;
+  total_tokens: number;
+  prompt_tokens: number;
+  completion_tokens: number;
+  avg_latency_ms: number;
+  last_call_at: string | null;
+}
+
 // Log types
 export interface RequestLog {
   id: string;
@@ -91,12 +103,14 @@ export interface RequestLog {
   is_retry: boolean;
   created_at: string;
   request_body: string | null;
+  response_choices: string | null;
   risk_level: string;
   risk_score: number;
   risk_summary: string | null;
   security_action: string;
   sanitized: boolean;
   blocked_reason: string | null;
+  trace_id: string | null;
 }
 
 export interface SecurityFinding {

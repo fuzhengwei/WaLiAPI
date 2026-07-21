@@ -97,12 +97,14 @@ pub struct RequestLog {
     pub is_retry: i64,
     pub created_at: String,
     pub request_body: Option<String>,
+    pub response_choices: Option<String>,
     pub risk_level: String,
     pub risk_score: i64,
     pub risk_summary: Option<String>,
     pub security_action: String,
     pub sanitized: i64,
     pub blocked_reason: Option<String>,
+    pub trace_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -122,6 +124,32 @@ pub struct LogStats {
     pub date: String,
     pub count: i64,
     pub total_tokens: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
+pub struct ChannelStats {
+    pub channel_id: String,
+    pub total_calls: i64,
+    pub success_calls: i64,
+    pub failed_calls: i64,
+    pub total_tokens: i64,
+    pub prompt_tokens: i64,
+    pub completion_tokens: i64,
+    pub avg_latency_ms: f64,
+    pub last_call_at: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
+pub struct ApiKeyStats {
+    pub api_key_id: String,
+    pub total_calls: i64,
+    pub success_calls: i64,
+    pub failed_calls: i64,
+    pub total_tokens: i64,
+    pub prompt_tokens: i64,
+    pub completion_tokens: i64,
+    pub avg_latency_ms: f64,
+    pub last_call_at: Option<String>,
 }
 
 pub fn now_iso() -> String {

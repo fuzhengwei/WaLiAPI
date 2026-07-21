@@ -216,8 +216,8 @@ impl Repository {
 
     pub async fn create_log(&self, log: &RequestLog) -> Result<(), sqlx::Error> {
         sqlx::query(
-            "INSERT INTO request_logs (id, api_key_id, api_key_name, channel_id, channel_name, model, upstream_model, mode, status_code, prompt_tokens, completion_tokens, total_tokens, duration_ms, error_message, is_stream, is_retry, created_at, request_body, risk_level, risk_score, risk_summary, security_action, sanitized, blocked_reason)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+            "INSERT INTO request_logs (id, api_key_id, api_key_name, channel_id, channel_name, model, upstream_model, mode, status_code, prompt_tokens, completion_tokens, total_tokens, duration_ms, error_message, is_stream, is_retry, created_at, request_body, response_choices, risk_level, risk_score, risk_summary, security_action, sanitized, blocked_reason, trace_id)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
         )
         .bind(&log.id)
         .bind(&log.api_key_id)
@@ -237,16 +237,18 @@ impl Repository {
         .bind(log.is_retry)
         .bind(&log.created_at)
         .bind(&log.request_body)
+        .bind(&log.response_choices)
         .bind(&log.risk_level)
         .bind(log.risk_score)
         .bind(&log.risk_summary)
         .bind(&log.security_action)
         .bind(log.sanitized)
         .bind(&log.blocked_reason)
+        .bind(&log.trace_id)
         .execute(&self.pool)
         .await?;
-        // Backfill seq with rowid for new rows
-        sqlx::query("UPDATE request_logs SET seq = rowid WHERE id = ? AND seq IS NULL")
+        // Backfill seq with rowid for new rows (seq defaults to 0, so check for 0)
+        sqlx::query("UPDATE request_logs SET seq = rowid WHERE id = ? AND (seq IS NULL OR seq = 0)")
             .bind(&log.id)
             .execute(&self.pool)
             .await?;
@@ -333,6 +335,7 @@ impl Repository {
         model: Option<&str>,
         date_from: Option<&str>,
         date_to: Option<&str>,
+        trace_id: Option<&str>,
         limit: i64,
         offset: i64,
     ) -> Result<Vec<RequestLog>, sqlx::Error> {
@@ -372,6 +375,11 @@ impl Repository {
 
         if let Some(to) = date_to {
             q.push(" AND created_at <= ").push_bind(to);
+        }
+
+        if let Some(tid) = trace_id {
+            let pattern = format!("%{}%", tid);
+            q.push(" AND trace_id LIKE ").push_bind(pattern);
         }
 
         q.push(" ORDER BY created_at DESC LIMIT ").push_bind(limit);
@@ -445,6 +453,22 @@ impl Repository {
             total_requests,
             total_tokens,
         })
+    }
+
+    pub async fn get_channel_stats(&self) -> Result<Vec<ChannelStats>, sqlx::Error> {
+        sqlx::query_as::<_, ChannelStats>(
+            "SELECT\n                r.channel_id as channel_id,\n                COUNT(*) as total_calls,\n                SUM(CASE WHEN r.status_code >= 200 AND r.status_code < 300 THEN 1 ELSE 0 END) as success_calls,\n                SUM(CASE WHEN r.status_code >= 200 AND r.status_code < 300 THEN 0 ELSE 1 END) as failed_calls,\n                COALESCE(SUM(r.total_tokens), 0) as total_tokens,\n                COALESCE(SUM(r.prompt_tokens), 0) as prompt_tokens,\n                COALESCE(SUM(r.completion_tokens), 0) as completion_tokens,\n                COALESCE(AVG(r.duration_ms), 0) as avg_latency_ms,\n                MAX(r.created_at) as last_call_at\n            FROM request_logs r\n            WHERE r.channel_id IS NOT NULL\n            GROUP BY r.channel_id"
+        )
+        .fetch_all(&self.pool)
+        .await
+    }
+
+    pub async fn get_api_key_stats(&self) -> Result<Vec<ApiKeyStats>, sqlx::Error> {
+        sqlx::query_as::<_, ApiKeyStats>(
+            "SELECT\n                r.api_key_id as api_key_id,\n                COUNT(*) as total_calls,\n                SUM(CASE WHEN r.status_code >= 200 AND r.status_code < 300 THEN 1 ELSE 0 END) as success_calls,\n                SUM(CASE WHEN r.status_code >= 200 AND r.status_code < 300 THEN 0 ELSE 1 END) as failed_calls,\n                COALESCE(SUM(r.total_tokens), 0) as total_tokens,\n                COALESCE(SUM(r.prompt_tokens), 0) as prompt_tokens,\n                COALESCE(SUM(r.completion_tokens), 0) as completion_tokens,\n                COALESCE(AVG(r.duration_ms), 0) as avg_latency_ms,\n                MAX(r.created_at) as last_call_at\n            FROM request_logs r\n            WHERE r.api_key_id IS NOT NULL\n            GROUP BY r.api_key_id"
+        )
+        .fetch_all(&self.pool)
+        .await
     }
 
     pub async fn get_log_stats(&self, days: i64) -> Result<Vec<LogStats>, sqlx::Error> {

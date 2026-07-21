@@ -22,12 +22,14 @@ pub struct LogDto {
     pub is_retry: bool,
     pub created_at: String,
     pub request_body: Option<String>,
+    pub response_choices: Option<String>,
     pub risk_level: String,
     pub risk_score: i64,
     pub risk_summary: Option<String>,
     pub security_action: String,
     pub sanitized: bool,
     pub blocked_reason: Option<String>,
+    pub trace_id: Option<String>,
 }
 
 impl From<RequestLog> for LogDto {
@@ -50,12 +52,14 @@ impl From<RequestLog> for LogDto {
             is_retry: l.is_retry == 1,
             created_at: l.created_at,
             request_body: l.request_body,
+            response_choices: l.response_choices,
             risk_level: l.risk_level,
             risk_score: l.risk_score,
             risk_summary: l.risk_summary,
             security_action: l.security_action,
             sanitized: l.sanitized == 1,
             blocked_reason: l.blocked_reason,
+            trace_id: l.trace_id,
         }
     }
 }
@@ -105,6 +109,7 @@ pub struct GetLogsInput {
     pub model: Option<String>,
     pub date_from: Option<String>,
     pub date_to: Option<String>,
+    pub trace_id: Option<String>,
 }
 
 #[tauri::command]
@@ -121,7 +126,8 @@ pub async fn get_logs(
         || input.channel_name.is_some()
         || input.model.is_some()
         || input.date_from.is_some()
-        || input.date_to.is_some();
+        || input.date_to.is_some()
+        || input.trace_id.is_some();
 
     let logs = if has_search {
         repo.search_logs(
@@ -131,6 +137,7 @@ pub async fn get_logs(
             input.model.as_deref(),
             input.date_from.as_deref(),
             input.date_to.as_deref(),
+            input.trace_id.as_deref(),
             limit,
             offset,
         ).await

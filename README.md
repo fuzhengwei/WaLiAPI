@@ -87,10 +87,10 @@ WaLiAPI 在网关层做协议翻译，入口多协议，出口统一为 OpenAI C
 
 | 协议 | 端点 | 认证方式 | 说明 |
 |:---|:---|:---|:---|
-| **OpenAI Chat Completions** | `POST /v1/chat/completions` | `Authorization: Bearer ****` | 标准兼容协议，支持流式 |
-| **OpenAI Responses** | `POST /v1/responses` | `Authorization: Bearer ****` | Responses API 双向转换 |
-| **Anthropic Messages** | `POST /v1/messages` | `x-api-key: ***` | Anthropic 协议，自动头转换 |
-| **模型列表** | `GET /v1/models` | `Authorization: Bearer ****` | 聚合所有启用渠道的模型 |
+| **OpenAI Chat Completions** | `POST /v1/chat/completions` | `Authorization: Bearer sk-waliapi-*` | 标准兼容协议，支持流式 |
+| **OpenAI Responses** | `POST /v1/responses` | `Authorization: Bearer sk-waliapi-*` | Responses API 双向转换 |
+| **Anthropic Messages** | `POST /v1/messages` | `x-api-key: sk-waliapi-*` | Anthropic 协议，自动头转换 |
+| **模型列表** | `GET /v1/models` | `Authorization: Bearer sk-waliapi-*` | 聚合所有启用渠道的模型 |
 | **健康检查** | `GET /health` | 无 | 服务存活探针 |
 
 接入示例（以 OpenAI 协议为例）：
@@ -194,7 +194,7 @@ WaLiAPI/
 │   │   ├── protocol/             # 协议转换层
 │   │   │   ├── mod.rs            # 双向格式转换
 │   │   │   ├── anthropic.rs      # Anthropic SSE 流式
-│   │   │   └── responses.rs      # Responses SSE 流式
+│   │   │   └── responses.rs     # Responses SSE 流式
 │   │   ├── core/                 # 核心逻辑
 │   │   │   └── proxy.rs          # 代理转发 + 重试
 │   │   ├── security/             # 安全审计

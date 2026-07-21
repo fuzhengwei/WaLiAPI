@@ -1,6 +1,6 @@
 [package]
 name = "waliapi"
-version = "0.1.0"
+version = "0.1.1"
 description = "WaLiAPI - Local LLM API Gateway"
 authors = ["xiaofuge"]
 edition = "2021"

@@ -1,17 +1,25 @@
 import { useEffect, useState } from "react";
 import { apiKeyApi } from "../lib/api";
-import type { ApiKey, CreateApiKeyInput } from "../types";
+import type { ApiKey, CreateApiKeyInput, ApiKeyStats } from "../types";
 import { formatTime } from "../lib/constants";
-import { Plus, Key, Trash2, Power, X, Check, Copy, ShieldCheck, CalendarClock, Database } from "lucide-react";
+import { Plus, Key, Trash2, Power, X, Check, Copy, ShieldCheck, CalendarClock, Database, Activity, Clock, TrendingUp } from "lucide-react";
 
 export function ApiKeysPage() {
   const [keys, setKeys] = useState<ApiKey[]>([]);
+  const [stats, setStats] = useState<Record<string, ApiKeyStats>>({});
   const [showForm, setShowForm] = useState(false);
   const [copied, setCopied] = useState<string | null>(null);
   const [deleteTarget, setDeleteTarget] = useState<ApiKey | null>(null);
   const [deleting, setDeleting] = useState(false);
 
-  const load = () => apiKeyApi.getAll().then(setKeys).catch(() => {});
+  const load = async () => {
+    const [ks, st] = await Promise.all([
+      apiKeyApi.getAll().catch(() => []),
+      apiKeyApi.getStats().catch(() => []),
+    ]);
+    setKeys(ks);
+    setStats(Object.fromEntries(st.map(s => [s.api_key_id, s])));
+  };
 
   useEffect(() => { load(); }, []);
 
@@ -93,6 +101,33 @@ export function ApiKeysPage() {
                       </div>
                     </div>
                   </div>
+
+                  {/* 使用量统计 */}
+                  {stats[k.id] && (() => {
+                    const s = stats[k.id];
+                    const successRate = s.total_calls > 0 ? (s.success_calls / s.total_calls * 100).toFixed(1) : "0.0";
+                    const successColor = Number(successRate) >= 95 ? "text-emerald-400" : Number(successRate) >= 80 ? "text-amber-400" : "text-red-400";
+                    return (
+                      <div className="mt-4 grid grid-cols-2 gap-3 md:grid-cols-4">
+                        <div className="surface-soft rounded-2xl px-3 py-2.5 text-sm">
+                          <div className="mb-1 flex items-center gap-1.5 text-muted-foreground"><Activity size={12} /> 调用次数</div>
+                          <div className="font-medium">{s.total_calls}</div>
+                        </div>
+                        <div className="surface-soft rounded-2xl px-3 py-2.5 text-sm">
+                          <div className="mb-1 flex items-center gap-1.5 text-muted-foreground"><TrendingUp size={12} /> 成功率</div>
+                          <div className={`font-medium ${successColor}`}>{successRate}%</div>
+                        </div>
+                        <div className="surface-soft rounded-2xl px-3 py-2.5 text-sm">
+                          <div className="mb-1 flex items-center gap-1.5 text-muted-foreground"><Database size={12} /> Token</div>
+                          <div className="font-medium">{s.total_tokens.toLocaleString()}</div>
+                        </div>
+                        <div className="surface-soft rounded-2xl px-3 py-2.5 text-sm">
+                          <div className="mb-1 flex items-center gap-1.5 text-muted-foreground"><Clock size={12} /> 平均延迟</div>
+                          <div className="font-medium">{s.avg_latency_ms > 0 ? `${Math.round(s.avg_latency_ms)}ms` : "-"}</div>
+                        </div>
+                      </div>
+                    );
+                  })()}
 
                   {k.allowed_models.length > 0 && (
                     <div className="mt-4 flex flex-wrap gap-2">

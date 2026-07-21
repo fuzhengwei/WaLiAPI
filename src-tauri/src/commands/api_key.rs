@@ -1,4 +1,4 @@
-use crate::db::models::{ApiKey, CreateApiKeyInput};
+use crate::db::models::{ApiKey, CreateApiKeyInput, ApiKeyStats};
 use crate::db::repository::Repository;
 use crate::AppState;
 use serde::{Deserialize, Serialize};
@@ -67,4 +67,10 @@ pub async fn update_api_key(input: UpdateApiKeyInput, state: tauri::State<'_, st
 pub async fn delete_api_key(id: String, state: tauri::State<'_, std::sync::Arc<AppState>>) -> Result<(), String> {
     let repo = Repository::new(state.db.pool.clone());
     repo.delete_api_key(&id).await.map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn get_api_key_stats(state: tauri::State<'_, std::sync::Arc<AppState>>) -> Result<Vec<ApiKeyStats>, String> {
+    let repo = Repository::new(state.db.pool.clone());
+    repo.get_api_key_stats().await.map_err(|e| e.to_string())
 }

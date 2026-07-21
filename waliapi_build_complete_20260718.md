@@ -23,7 +23,7 @@
 - `DashboardPage` — 仪表盘，展示统计数据和图表
 - `ChannelsPage` — 渠道管理，增删改查、测试、启用/禁用
 - `ApiKeysPage` — 密钥管理，创建、复制、配额管理
-- `LogsPage` — 请求日志，分页表格展示
+- `LogsPage` — 请求/响应日志，分页表格展示
 - `SettingsPage` — 服务配置、通用设置、界面、重试
 - `ChannelForm` — 渠道编辑表单组件
 - `Layout` — 侧边栏 + 主内容区布局
