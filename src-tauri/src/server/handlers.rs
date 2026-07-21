@@ -42,13 +42,16 @@ pub async fn handle_chat_completions(
         return (StatusCode::TOO_MANY_REQUESTS, "Quota exceeded").into_response();
     }
 
+    // Extract Wali-Trace-Id from request headers
+    let trace_id = headers.get("Wali-Trace-Id").and_then(|h| h.to_str().ok()).map(|s| s.to_string());
+
     // Store full request body for logging (no truncation — let frontend handle display)
     let request_body_str = serde_json::to_string(&json).unwrap_or_default();
 
     if is_stream {
-        handle_stream(shared, json, key_record.id, key_record.name, request_body_str).await
+        handle_stream(shared, json, key_record.id, key_record.name, request_body_str, trace_id).await
     } else {
-        match proxy::handle_request(&repo, &shared.app, &key_record.id, &key_record.name, json, false, Some(request_body_str)).await {
+        match proxy::handle_request(&repo, &shared.app, &key_record.id, &key_record.name, json, false, Some(request_body_str), trace_id).await {
             Ok(result) => (StatusCode::OK, Json(result.body)).into_response(),
             Err((code, msg)) => {
                 let err_body = serde_json::json!({
@@ -92,6 +95,7 @@ async fn handle_stream(
     api_key_id: String,
     api_key_name: String,
     request_body: String,
+    trace_id: Option<String>,
 ) -> Response {
     let model = json.get("model").and_then(|m| m.as_str()).unwrap_or("").to_string();
     let security_settings = security::get_security_settings(&shared.app);
@@ -112,6 +116,7 @@ async fn handle_stream(
 
     if matches!(security_result.action, security::SecurityAction::Block) {
         let log = crate::db::models::RequestLog {
+            response_choices: None,
             id: crate::utils::id::new_id(),
             seq: None,
             api_key_id: Some(api_key_id),
@@ -137,6 +142,7 @@ async fn handle_stream(
             security_action: security_result.action.as_str().to_string(),
             sanitized: if security_result.sanitized { 1 } else { 0 },
             blocked_reason: security_result.blocked_reason.clone(),
+            trace_id: trace_id.clone(),
         };
         let log_id = log.id.clone();
         let _ = repo.create_log(&log).await;
@@ -202,6 +208,7 @@ async fn handle_stream(
                 let upstream_model_clone = upstream_model.clone();
                 let request_body_clone = request_body.clone();
                 let security_result_clone = security_result.clone();
+                let trace_id_clone = trace_id.clone();
                 let is_retry = if attempt > 0 { 1 } else { 0 };
 
                 // ── Raw byte passthrough with usage parsing ───────────────
@@ -213,21 +220,103 @@ async fn handle_stream(
                 let passthrough_stream = async_stream::stream! {
                     tokio::pin!(upstream_stream);
 
-                    // Accumulate token usage from SSE chunks
+                    // Accumulate token usage and response content from SSE chunks
                     let mut usage_prompt: i64 = 0;
                     let mut usage_completion: i64 = 0;
                     let mut usage_total: i64 = 0;
                     let mut had_error = false;
+                    let mut accumulated_content = String::new();
+                    let mut accumulated_reasoning = String::new();
+                    let mut response_role: Option<String> = None;
+                    let mut finish_reason: Option<String> = None;
+                    // Accumulate tool_calls by index (streaming chunks may contain partial tool_calls)
+                    let mut tool_calls_map: std::collections::BTreeMap<i64, serde_json::Value> = std::collections::BTreeMap::new();
 
                     while let Some(chunk_result) = upstream_stream.next().await {
                         match chunk_result {
                             Ok(bytes) => {
-                                // Try to parse usage from this chunk
+                                // Try to parse usage and content from this chunk
                                 if let Ok(text) = std::str::from_utf8(&bytes) {
                                     if let Some((p, c, t)) = parse_usage_from_chunk(text) {
                                         usage_prompt = p;
                                         usage_completion = c;
                                         usage_total = t;
+                                    }
+                                    // Accumulate delta content from SSE chunks
+                                    for line in text.lines() {
+                                        let trimmed = line.trim();
+                                        if !trimmed.starts_with("data:") {
+                                            continue;
+                                        }
+                                        let data_str = trimmed.trim_start_matches("data:").trim();
+                                        if data_str == "[DONE]" || data_str.is_empty() {
+                                            continue;
+                                        }
+                                        if let Ok(json) = serde_json::from_str::<serde_json::Value>(data_str) {
+                                            if let Some(choices) = json.get("choices").and_then(|c| c.as_array()) {
+                                                if let Some(choice) = choices.first() {
+                                                    if let Some(delta) = choice.get("delta") {
+                                                        // Accumulate regular content
+                                                        if let Some(content) = delta.get("content").and_then(|c| c.as_str()) {
+                                                            accumulated_content.push_str(content);
+                                                        }
+                                                        // Accumulate reasoning/thinking content (DeepSeek R1, OpenAI o1/o3, etc.)
+                                                        if let Some(reasoning) = delta.get("reasoning_content").and_then(|c| c.as_str()) {
+                                                            accumulated_reasoning.push_str(reasoning);
+                                                        }
+                                                        if response_role.is_none() {
+                                                            if let Some(role) = delta.get("role").and_then(|r| r.as_str()) {
+                                                                response_role = Some(role.to_string());
+                                                            }
+                                                        }
+                                                        // Accumulate tool_calls by index
+                                                        if let Some(tcs) = delta.get("tool_calls").and_then(|t| t.as_array()) {
+                                                            for tc in tcs {
+                                                                let idx = tc.get("index").and_then(|i| i.as_i64()).unwrap_or(0);
+                                                                let entry = tool_calls_map.entry(idx).or_insert_with(|| {
+                                                                    serde_json::json!({
+                                                                        "id": "",
+                                                                        "type": "function",
+                                                                        "function": {
+                                                                            "name": "",
+                                                                            "arguments": ""
+                                                                        }
+                                                                    })
+                                                                });
+                                                                if let Some(id) = tc.get("id").and_then(|v| v.as_str()) {
+                                                                    if !id.is_empty() {
+                                                                        entry["id"] = serde_json::json!(id);
+                                                                    }
+                                                                }
+                                                                if let Some(t) = tc.get("type").and_then(|v| v.as_str()) {
+                                                                    if !t.is_empty() {
+                                                                        entry["type"] = serde_json::json!(t);
+                                                                    }
+                                                                }
+                                                                if let Some(func) = tc.get("function") {
+                                                                    if let Some(name) = func.get("name").and_then(|v| v.as_str()) {
+                                                                        if !name.is_empty() {
+                                                                            entry["function"]["name"] = serde_json::json!(name);
+                                                                        }
+                                                                    }
+                                                                    if let Some(args) = func.get("arguments").and_then(|v| v.as_str()) {
+                                                                        let existing = entry["function"]["arguments"].as_str().unwrap_or("");
+                                                                        entry["function"]["arguments"] = serde_json::json!(format!("{}{}", existing, args));
+                                                                    }
+                                                                }
+                                                            }
+                                                        }
+                                                    }
+                                                    if finish_reason.is_none() {
+                                                        if let Some(reason) = choice.get("finish_reason").and_then(|r| r.as_str()) {
+                                                            if !reason.is_empty() && reason != "null" {
+                                                                finish_reason = Some(reason.to_string());
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
                                     }
                                 }
                                 yield Ok::<_, std::io::Error>(bytes);
@@ -244,6 +333,34 @@ async fn handle_stream(
                             }
                         }
                     }
+
+                    // Build response_choices from accumulated streaming content
+                    let has_content = !accumulated_content.is_empty() || !accumulated_reasoning.is_empty() || !tool_calls_map.is_empty();
+                    let response_choices = if has_content {
+                        let mut message = serde_json::json!({
+                            "role": response_role.unwrap_or_else(|| "assistant".to_string()),
+                        });
+                        // Only include content if there is any
+                        if !accumulated_content.is_empty() {
+                            message["content"] = serde_json::json!(accumulated_content);
+                        }
+                        // Include reasoning_content if present
+                        if !accumulated_reasoning.is_empty() {
+                            message["reasoning_content"] = serde_json::json!(accumulated_reasoning);
+                        }
+                        // Include tool_calls if present
+                        if !tool_calls_map.is_empty() {
+                            let tcs: Vec<serde_json::Value> = tool_calls_map.into_values().collect();
+                            message["tool_calls"] = serde_json::json!(tcs);
+                        }
+                        Some(serde_json::to_string(&vec![serde_json::json!({
+                            "index": 0,
+                            "message": message,
+                            "finish_reason": finish_reason,
+                        })]).unwrap_or_default())
+                    } else {
+                        None
+                    };
 
                     // Log after stream completes
                     let quota_to_add = usage_total;
@@ -268,12 +385,14 @@ async fn handle_stream(
                         is_retry,
                         created_at: crate::utils::time::now_iso(),
                         request_body: Some(request_body_clone),
+                        response_choices,
                         risk_level: security_result_clone.risk_level.as_str().to_string(),
                         risk_score: security_result_clone.risk_score as i64,
                         risk_summary: Some(security_result_clone.summary.clone()),
                         security_action: security_result_clone.action.as_str().to_string(),
                         sanitized: if security_result_clone.sanitized { 1 } else { 0 },
                         blocked_reason: security_result_clone.blocked_reason.clone(),
+                        trace_id: trace_id_clone,
                     };
                     let log_id = log.id.clone();
                     let _ = repo_clone.create_log(&log).await;
@@ -315,12 +434,14 @@ async fn handle_stream(
                     is_retry: if attempt > 0 { 1 } else { 0 },
                     created_at: crate::utils::time::now_iso(),
                     request_body: Some(request_body.clone()),
+                    response_choices: None,
                     risk_level: security_result.risk_level.as_str().to_string(),
                     risk_score: security_result.risk_score as i64,
                     risk_summary: Some(security_result.summary.clone()),
                     security_action: security_result.action.as_str().to_string(),
                     sanitized: if security_result.sanitized { 1 } else { 0 },
                     blocked_reason: security_result.blocked_reason.clone(),
+                    trace_id: trace_id.clone(),
                 };
                 let log_id = log.id.clone();
                 let _ = repo.create_log(&log).await;

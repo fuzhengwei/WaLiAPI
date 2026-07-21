@@ -48,7 +48,7 @@ export function DashboardPage() {
     { title: "新建渠道", icon: Plus, action: () => navigate("/channels") },
     { title: "管理密钥", icon: Key, action: () => navigate("/api-keys") },
     { title: "接入示例", icon: BookOpen, action: () => navigate("/usage") },
-    { title: "请求日志", icon: FileText, action: () => navigate("/logs") },
+    { title: "请求/响应日志", icon: FileText, action: () => navigate("/logs") },
     { title: "安全设置", icon: ShieldCheck, action: () => navigate("/settings") },
     { title: "服务配置", icon: Settings, action: () => navigate("/settings") },
     { title: "渠道管理", icon: Globe, action: () => navigate("/channels") },
@@ -328,9 +328,9 @@ export function DashboardPage() {
               <div className="flex items-start gap-2.5">
                 <FileText className="mt-0.5 h-4 w-4 shrink-0 text-emerald-600" />
                 <div>
-                  <div className="text-sm font-medium text-emerald-900">调用后可查看请求日志</div>
+                  <div className="text-sm font-medium text-emerald-900">调用后可查看请求/响应日志</div>
                   <p className="mt-1 text-xs leading-5 text-emerald-700">
-                    发起请求后，进入「请求日志」页面查看每次调用的状态码、Token 消耗、工具调用、安全风险等级与上游路由详情。
+                    发起请求后，进入「请求/响应日志」页面查看每次调用的状态码、Token 消耗、工具调用、安全风险等级与上游路由详情。
                   </p>
                   <button
                     onClick={() => {
@@ -339,7 +339,7 @@ export function DashboardPage() {
                     }}
                     className="mt-2 inline-flex items-center gap-1 text-xs font-medium text-emerald-700 hover:text-emerald-800"
                   >
-                    前往请求日志<span aria-hidden>→</span>
+                    前往请求/响应日志<span aria-hidden>→</span>
                   </button>
                 </div>
               </div>

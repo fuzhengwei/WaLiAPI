@@ -37,6 +37,7 @@ export interface GetLogsInput {
   model?: string;
   date_from?: string;
   date_to?: string;
+  trace_id?: string;
 }
 
 // Log commands

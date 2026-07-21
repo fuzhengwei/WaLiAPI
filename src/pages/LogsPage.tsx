@@ -24,6 +24,15 @@ function getRiskMeta(level?: string) {
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
 
+interface ToolCall {
+  id?: string;
+  type?: string;
+  function?: {
+    name?: string;
+    arguments?: string;
+  };
+}
+
 /** Extract all tool/function names from a message object */
 function extractToolNames(msg: Record<string, unknown>): string[] {
   const names: string[] = [];
@@ -50,25 +59,61 @@ function extractToolNames(msg: Record<string, unknown>): string[] {
   return names;
 }
 
+/** Extract tool_calls details from a message object */
+function extractToolCalls(msg: Record<string, unknown>): ToolCall[] {
+  const result: ToolCall[] = [];
+  if (Array.isArray(msg.tool_calls)) {
+    for (const tc of msg.tool_calls as Array<Record<string, unknown>>) {
+      const fn = tc.function as Record<string, unknown> | undefined;
+      if (fn && typeof fn.name === "string") {
+        result.push({
+          id: typeof tc.id === "string" ? tc.id : undefined,
+          type: typeof tc.type === "string" ? tc.type : undefined,
+          function: {
+            name: fn.name,
+            arguments: typeof fn.arguments === "string" ? fn.arguments : undefined,
+          },
+        });
+      }
+    }
+  }
+  return result;
+}
+
+function formatArguments(args?: string): string {
+  if (!args) return "{}";
+  try {
+    return JSON.stringify(JSON.parse(args), null, 2);
+  } catch {
+    return args;
+  }
+}
+
 /** Get a short preview of message content */
 function getContentPreview(msg: Record<string, unknown>, maxLen: number = 140): string {
   const content = msg.content;
   if (typeof content === "string") {
-    return content.length > maxLen ? content.slice(0, maxLen) + "…" : content;
+    const compacted = content.replace(/\n+/g, " ").trim();
+    return compacted.length > maxLen ? compacted.slice(0, maxLen) + "…" : compacted;
   }
   if (Array.isArray(content)) {
     // Anthropic-style content blocks
     const parts: string[] = [];
     for (const block of content as Array<Record<string, unknown>>) {
       if (block.type === "text" && typeof block.text === "string") {
-        const t = block.text.length > maxLen ? block.text.slice(0, maxLen) + "…" : block.text;
+        const compacted = block.text.replace(/\n+/g, " ").trim();
+        const t = compacted.length > maxLen ? compacted.slice(0, maxLen) + "…" : compacted;
         parts.push(t);
       } else if (block.type === "tool_use") {
         parts.push(`🔧 ${block.name}`);
       } else if (block.type === "tool_result") {
-        const rc = typeof block.content === "string"
-          ? block.content.slice(0, 40) + "…"
-          : "tool_result";
+        let rc: string;
+        if (typeof block.content === "string") {
+          const compacted = block.content.replace(/\n+/g, " ").trim();
+          rc = compacted.slice(0, 40) + (compacted.length > 40 ? "…" : "");
+        } else {
+          rc = "tool_result";
+        }
         parts.push(`📤 ${rc}`);
       } else if (block.type === "image") {
         parts.push("🖼 image");
@@ -77,12 +122,14 @@ function getContentPreview(msg: Record<string, unknown>, maxLen: number = 140): 
       }
     }
     const joined = parts.join(" | ");
-    return joined.length > maxLen ? joined.slice(0, maxLen) + "…" : joined;
+    const compacted = joined.replace(/\n+/g, " ").trim();
+    return compacted.length > maxLen ? compacted.slice(0, maxLen) + "…" : compacted;
   }
   if (msg.tool_calls) return `🔧 ${extractToolNames(msg).join(", ")}`;
   if (msg.function_call) return `🔧 ${(msg.function_call as Record<string, unknown>).name as string}`;
   const str = JSON.stringify(content);
-  return str.length > maxLen ? str.slice(0, maxLen) + "…" : str;
+  const compacted = str.replace(/\n+/g, " ").trim();
+  return compacted.length > maxLen ? compacted.slice(0, maxLen) + "…" : compacted;
 }
 
 /** Collect distinct tool names across all messages */
@@ -123,8 +170,9 @@ export function LogsPage() {
   const [filterModel, setFilterModel] = useState("");
   const [filterDateFrom, setFilterDateFrom] = useState("");
   const [filterDateTo, setFilterDateTo] = useState("");
+  const [filterTraceId, setFilterTraceId] = useState("");
 
-  const hasActiveFilters = keyword || filterApiKey || filterChannel || filterModel || filterDateFrom || filterDateTo;
+  const hasActiveFilters = keyword || filterApiKey || filterChannel || filterModel || filterDateFrom || filterDateTo || filterTraceId;
 
   const load = useCallback((p: number = 0) => {
     setLoading(true);
@@ -140,11 +188,12 @@ export function LogsPage() {
       // "created_at <= 'YYYY-MM-DD'" 的字符串比较会漏掉结束日当天的全部日志
       date_from: filterDateFrom ? new Date(`${filterDateFrom}T00:00:00`).toISOString() : undefined,
       date_to: filterDateTo ? new Date(`${filterDateTo}T23:59:59.999`).toISOString() : undefined,
+        trace_id: filterTraceId || undefined,
     })
       .then(setLogs)
       .catch(() => {})
       .finally(() => setLoading(false));
-  }, [keyword, filterApiKey, filterChannel, filterModel, filterDateFrom, filterDateTo]);
+  }, [keyword, filterApiKey, filterChannel, filterModel, filterDateFrom, filterDateTo, filterTraceId]);
 
   useEffect(() => { load(0); }, [load]);
 
@@ -155,6 +204,7 @@ export function LogsPage() {
     setFilterModel("");
     setFilterDateFrom("");
     setFilterDateTo("");
+    setFilterTraceId("");
     setPage(0);
   };
 
@@ -189,7 +239,7 @@ export function LogsPage() {
       {/* Header */}
       <div className="flex items-center justify-between gap-4 px-7 pt-7 pb-4 shrink-0">
         <div>
-          <h1 className="text-[28px] font-bold leading-tight tracking-tight">请求日志</h1>
+          <h1 className="text-[28px] font-bold leading-tight tracking-tight">请求/响应日志</h1>
           <p className="mt-1.5 text-sm text-muted-foreground">查看请求结果、Token 消耗、工具调用与网关路由详情</p>
         </div>
         <div className="flex items-center gap-2">
@@ -273,6 +323,17 @@ export function LogsPage() {
                 className="w-full pl-9 pr-3 py-2 text-sm rounded-lg border border-slate-200 focus:outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500"
               />
             </div>
+            {/* Trace ID filter */}
+            <div className="relative">
+              <Search size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
+              <input
+                type="text"
+                placeholder="Trace ID"
+                value={filterTraceId}
+                onChange={(e) => { setFilterTraceId(e.target.value); setPage(0); }}
+                className="w-full pl-9 pr-3 py-2 text-sm rounded-lg border border-slate-200 focus:outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500"
+              />
+            </div>
             {/* Date from */}
             <div className="relative">
               <Calendar size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
@@ -305,7 +366,7 @@ export function LogsPage() {
           {logs.length === 0 ? (
             <div className="flex flex-1 flex-col items-center justify-center gap-2 text-center">
               <ScrollText className="h-12 w-12 text-muted-foreground/70" />
-              <p className="text-base font-medium">暂无请求日志</p>
+              <p className="text-base font-medium">暂无请求/响应日志</p>
               <p className="text-sm text-muted-foreground">当有模型请求经过网关后，这里会显示调用记录</p>
             </div>
           ) : (
@@ -318,6 +379,7 @@ export function LogsPage() {
                       <th className="w-8 px-2 py-3"></th>
                       <th className="w-12 px-2 py-3 text-left font-medium">#</th>
                       <th className="w-28 px-2 py-3 text-left font-medium">时间</th>
+                      <th className="w-28 px-2 py-3 text-left font-medium">Trace ID</th>
                       <th className="w-24 px-2 py-3 text-left font-medium">密钥</th>
                       <th className="w-20 px-2 py-3 text-left font-medium">渠道</th>
                       <th className="px-2 py-3 text-left font-medium">模型</th>
@@ -398,6 +460,7 @@ function LogRow({
         </td>
         <td className="px-2 py-2.5 text-xs text-muted-foreground/60 font-mono whitespace-nowrap">{log.seq != null ? `#${log.seq}` : "-"}</td>
         <td className="px-2 py-2.5 text-xs text-muted-foreground whitespace-nowrap overflow-hidden">{formatTime(log.created_at)}</td>
+        <td className="px-2 py-2.5 text-xs font-mono text-slate-500 whitespace-nowrap overflow-hidden truncate max-w-[180px]" title={log.trace_id || undefined}>{log.trace_id || "-"}</td>
         <td className="px-2 py-2.5 text-xs overflow-hidden truncate">{log.api_key_name || "-"}</td>
         <td className="px-2 py-2.5 text-xs overflow-hidden truncate">{log.channel_name || "-"}</td>
         <td className="px-2 py-2.5 text-[13px] font-mono overflow-hidden truncate">
@@ -442,7 +505,7 @@ function LogRow({
       </tr>
       {expanded && (
         <tr>
-          <td colSpan={11} className="px-4 py-4 bg-slate-50/80 border-b border-border">
+          <td colSpan={12} className="px-4 py-4 bg-slate-50/80 border-b border-border">
             <LogDetail log={log} />
           </td>
         </tr>
@@ -466,7 +529,16 @@ function RiskBadge({ log }: { log: RequestLog }) {
 
 function LogDetail({ log }: { log: RequestLog }) {
   const [jsonExpanded, setJsonExpanded] = useState(false);
+  const [responseJsonExpanded, setResponseJsonExpanded] = useState(false);
   const [findings, setFindings] = useState<SecurityFinding[]>([]);
+  const [expandedChoices, setExpandedChoices] = useState<Set<string>>(new Set());
+  const [expandedMessages, setExpandedMessages] = useState<Set<number>>(new Set());
+  const [copyingMessageKey, setCopyingMessageKey] = useState<string | null>(null);
+  const [copyingThinkingKey, setCopyingThinkingKey] = useState<string | null>(null);
+  const [copyingContentKey, setCopyingContentKey] = useState<string | null>(null);
+  const [expandedToolCalls, setExpandedToolCalls] = useState<Set<string>>(new Set());
+  const [copyingTool, setCopyingTool] = useState<string | null>(null);
+  const [copiedJsonKey, setCopiedJsonKey] = useState<string | null>(null);
 
   useEffect(() => {
     if (log.risk_score > 0) {
@@ -491,6 +563,7 @@ function LogDetail({ log }: { log: RequestLog }) {
   const sizeLabel = byteSize > 1024 ? `${(byteSize / 1024).toFixed(1)} KB` : `${byteSize} B`;
 
   const messages: Array<Record<string, unknown>> = parsed && Array.isArray(parsed.messages) ? parsed.messages : [];
+  const [messagesExpanded, setMessagesExpanded] = useState(messages.length <= 5);
   const allToolNames = useMemo(() => collectAllToolNames(messages), [messages]);
   const modelRequested = (parsed?.model as string) || log.model;
   const stream = (parsed?.stream as boolean) || false;
@@ -533,6 +606,21 @@ function LogDetail({ log }: { log: RequestLog }) {
   const modelMappingDisplay = log.upstream_model && log.upstream_model !== log.model
     ? `${log.model} → ${log.upstream_model}`
     : null;
+
+  // Parse response choices
+  let parsedChoices: Array<Record<string, unknown>> | null = null;
+  let prettyChoices = log.response_choices || "";
+  let choicesParseError = false;
+  try {
+    if (log.response_choices) {
+      parsedChoices = JSON.parse(log.response_choices) as Array<Record<string, unknown>>;
+      prettyChoices = JSON.stringify(parsedChoices, null, 2);
+    }
+  } catch { choicesParseError = true; }
+
+  const [responseChoicesExpanded, setResponseChoicesExpanded] = useState(
+    !parsedChoices || parsedChoices.length <= 5
+  );
 
   return (
     <div className="space-y-4">
@@ -592,6 +680,15 @@ function LogDetail({ log }: { log: RequestLog }) {
           </div>
         </div>
       </div>
+
+      {/* ── Trace ID ── */}
+      {log.trace_id && (
+        <div className="flex items-center gap-2 rounded-xl border border-slate-200 bg-white p-3">
+          <Search size={14} className="text-slate-400" />
+          <span className="text-xs text-slate-500">Trace ID:</span>
+          <span className="text-xs font-mono text-slate-700 break-all">{log.trace_id}</span>
+        </div>
+      )}
 
       {/* ── Security Summary ── */}
       {(log.risk_score > 0 || log.risk_summary) && (
@@ -723,64 +820,244 @@ function LogDetail({ log }: { log: RequestLog }) {
         <div>
           <div className="flex items-center justify-between mb-2">
             <span className="text-xs font-medium text-slate-600">消息列表 ({messages.length} 条)</span>
-            <button
-              onClick={() => setJsonExpanded(!jsonExpanded)}
-              className="text-xs text-blue-500 hover:text-blue-600 transition-colors font-medium"
-            >
-              {jsonExpanded ? "返回缩略视图" : "查看原始 JSON"}
-            </button>
+            <div className="flex items-center gap-3">
+              <button
+                onClick={() => setJsonExpanded(!jsonExpanded)}
+                className="text-xs text-blue-500 hover:text-blue-600 transition-colors font-medium"
+              >
+                {jsonExpanded ? "返回缩略视图" : "查看原始 JSON"}
+              </button>
+            </div>
           </div>
 
-          {!jsonExpanded && (
-            <div className="space-y-1 max-h-[420px] overflow-y-auto pr-1">
-              {messages.map((msg, i) => {
-                const role = (msg.role as string) || "unknown";
-                const meta = getRoleMeta(role);
-                const Icon = meta.icon;
-                const toolNames = extractToolNames(msg);
-                const preview = getContentPreview(msg, 140);
-
-                return (
-                  <div
-                    key={i}
-                    className={`flex items-start gap-2 rounded-lg ${meta.bg} border border-slate-200/60 px-3 py-2 text-xs transition-colors hover:border-slate-300`}
-                  >
-                    {/* Role badge */}
-                    <div className={`shrink-0 flex items-center gap-1 rounded-md ${meta.bg} px-1.5 py-0.5 font-semibold ${meta.color} min-w-[52px]`}>
-                      <Icon size={12} />
-                      <span className="text-[11px]">{meta.label}</span>
-                    </div>
-
-                    {/* Content preview */}
-                    <div className="min-w-0 flex-1">
-                      <span className="text-slate-600 font-mono leading-relaxed">{preview}</span>
-                      {/* Inline tool tags for this message */}
-                      {toolNames.length > 0 && (
-                        <div className="flex flex-wrap gap-1 mt-1">
-                          {toolNames.map(name => (
-                            <span
-                              key={name}
-                              className="inline-flex items-center gap-0.5 rounded bg-amber-100 px-1.5 py-0.5 text-[10px] font-medium text-amber-700"
-                            >
-                              🔧 {name}
-                            </span>
-                          ))}
-                        </div>
-                      )}
-                    </div>
-
-                    {/* Sequence number */}
-                    <span className="shrink-0 text-[10px] text-slate-400 font-mono">#&nbsp;{i + 1}</span>
-                  </div>
-                );
-              })}
+          {jsonExpanded ? (
+            <div className="relative">
+              <pre className="max-h-[420px] w-full overflow-auto rounded-xl bg-slate-50 border border-slate-200 p-3 pr-16 text-xs font-mono whitespace-pre-wrap break-all text-slate-700">
+                {pretty}
+              </pre>
+              <button
+                onClick={async () => {
+                  try {
+                    await navigator.clipboard.writeText(pretty);
+                    setCopiedJsonKey('request-messages');
+                    setTimeout(() => setCopiedJsonKey(null), 1500);
+                  } catch {}
+                }}
+                className={`absolute top-2 right-2 text-[10px] px-1.5 py-0.5 rounded-full transition-all shadow-sm ${
+                  copiedJsonKey === 'request-messages'
+                    ? 'bg-emerald-100 border-emerald-300 text-emerald-700'
+                    : 'bg-white/90 border border-slate-200 text-slate-600 hover:bg-blue-50 hover:text-blue-600 hover:border-blue-300'
+                }`}
+              >
+                {copiedJsonKey === 'request-messages' ? '✅ 已复制' : '📋 复制'}
+              </button>
             </div>
-          )}
+          ) : (
+            <div className="border border-slate-200 rounded-xl overflow-hidden bg-white">
+              {messagesExpanded && (
+                <div className="space-y-2 max-h-[420px] overflow-y-auto pr-1 p-3">
+                  {messages.map((msg, i) => {
+                    const role = (msg.role as string) || "unknown";
+                    const meta = getRoleMeta(role);
+                    const Icon = meta.icon;
+                    const toolNames = extractToolNames(msg);
+                    const isExpanded = expandedMessages.has(i);
+                    const preview = getContentPreview(msg, 140);
+                    // Check if getContentPreview truncated the content
+                    const fullContent = (() => {
+                      const content = msg.content;
+                      if (typeof content === "string") {
+                        // Convert escaped newline characters to actual newlines
+                        let processed = content
+                          .replace(/\\n/g, '\n')
+                          .replace(/\\r/g, '\r')
+                          .replace(/\\t/g, '\t');
+                        // Normalize line endings
+                        return processed.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+                      }
+                      return JSON.stringify(content);
+                    })();
+                    const isLongContent = fullContent.length > 140;
+                    const messageKey = `msg-${i}`;
 
-          {jsonExpanded && (
-            <pre className="max-h-[420px] w-full overflow-auto rounded-xl bg-slate-50 border border-slate-200 p-3 text-xs font-mono whitespace-pre-wrap break-all text-slate-700">
-              {pretty}
-            </pre>
+                    return (
+                      <div
+                        key={i}
+                        className={`rounded-lg border border-slate-200/70 bg-gradient-to-b from-white to-slate-50/30 overflow-hidden transition-all duration-300 hover:border-slate-300 hover:shadow-md hover:-translate-y-0.5 ${meta.bg}`}
+                      >
+                        {/* Header with role, index and expand button */}
+                        <div className={`flex items-center justify-between gap-2 px-3 py-1.5 border-b border-slate-200/50 bg-gradient-to-r ${meta.bg} to-white`}>
+                          <div className={`shrink-0 flex items-center gap-1.5 ${meta.color}`}>
+                            <div className="p-0.5 rounded-md bg-white/60 shadow-sm">
+                              <Icon size={12} className={meta.color} />
+                            </div>
+                            <span className={`text-xs font-semibold ${meta.color}`}>{meta.label}</span>
+                          </div>
+                          <div className="flex items-center gap-1.5">
+                            <span className="text-[10px] text-slate-400 font-mono bg-white/60 px-1 py-0.5 rounded-full shadow-sm">#&nbsp;{i + 1}</span>
+                            <button
+                               onClick={async () => {
+                                 try {
+                                   await navigator.clipboard.writeText(fullContent);
+                                   setCopyingMessageKey(messageKey);
+                                   setTimeout(() => setCopyingMessageKey(null), 1000);
+                                 } catch {
+                                   setCopyingMessageKey(null);
+                                 }
+                               }}
+                               className={`group relative text-[10px] px-1.5 py-0 rounded-full font-medium transition-all duration-200 flex items-center gap-0.5 overflow-hidden ${
+                                 copyingMessageKey === messageKey
+                                   ? 'bg-emerald-100 text-emerald-700'
+                                   : 'bg-gradient-to-r from-slate-100 to-slate-200 text-slate-700 hover:from-indigo-50 hover:to-indigo-100 hover:text-indigo-700 hover:shadow-md hover:-translate-y-0.5'
+                               }`}
+                             >
+                               {copyingMessageKey === messageKey ? '✅ 已复制' : '📋 复制'}
+                             </button>
+                            {isLongContent && (
+                              <button
+                                onClick={() => {
+                                  const newSet = new Set(expandedMessages);
+                                  if (newSet.has(i)) newSet.delete(i);
+                                  else newSet.add(i);
+                                  setExpandedMessages(newSet);
+                                }}
+                                className="group relative text-[10px] px-2 py-0.5 rounded-full font-medium transition-all duration-300 flex items-center gap-0.5 overflow-hidden bg-gradient-to-r from-slate-100 to-slate-200 text-slate-700 hover:from-indigo-50 hover:to-indigo-100 hover:text-indigo-700 hover:shadow-md hover:-translate-y-0.5"
+                              >
+                                {isExpanded ? (
+                                  <>
+                                    <span className="text-sm group-hover:-translate-y-0.5 transition-transform duration-200">↑</span>
+                                    <span className="font-medium">收起</span>
+                                  </>
+                                ) : (
+                                  <>
+                                    <span className="text-sm group-hover:translate-y-0.5 transition-transform duration-200">↓</span>
+                                    <span className="font-medium">展开</span>
+                                  </>
+                                )}
+                              </button>
+                            )}
+                          </div>
+                        </div>
+
+                        {/* Content section */}
+                        <div className="px-3 py-2">
+                          <div className="text-xs text-slate-700 leading-snug whitespace-pre-wrap break-words">
+                            {!isExpanded
+                              ? preview
+                              : fullContent
+                            }
+                          </div>
+                          {/* Tool calls detail */}
+                          {(() => {
+                            // Extract tool calls from message
+                            let toolCalls: any[] = [];
+                            if (Array.isArray(msg.tool_calls)) {
+                              toolCalls = msg.tool_calls;
+                            } else if (msg.tool_call) {
+                              toolCalls = [msg.tool_call];
+                            }
+                            if (toolCalls.length === 0) return null;
+
+                            return (
+                              <div className="mt-2 divide-y divide-slate-200">
+                                {toolCalls.map((tc, tci) => {
+                                  const toolKey = `msg-${i}-${tci}`;
+                                  const isToolExpanded = expandedToolCalls.has(toolKey);
+                                  const isCopyingToolKey = copyingTool === toolKey;
+                                  const formattedArgs = (() => {
+                                    try {
+                                      if (typeof tc.function?.arguments === 'string') {
+                                        return JSON.stringify(JSON.parse(tc.function.arguments), null, 2);
+                                      }
+                                      return JSON.stringify(tc.function?.arguments, null, 2);
+                                    } catch {
+                                      return String(tc.function?.arguments);
+                                    }
+                                  })();
+                                  const fullJson = JSON.stringify({
+                                    id: tc.id,
+                                    type: tc.type,
+                                    function: {
+                                      name: tc.function?.name,
+                                      arguments: tc.function?.arguments ? (typeof tc.function.arguments === 'string' ? JSON.parse(tc.function.arguments) : tc.function.arguments) : undefined,
+                                    }
+                                  }, null, 2);
+
+                                  return (
+                                    <div key={toolKey} className="py-2">
+                                      <div className="flex items-center justify-between gap-2 mb-1">
+                                        <div className="flex items-center gap-1.5 min-w-0">
+                                          <span className="inline-flex items-center gap-0.5 rounded-md bg-slate-100 border border-slate-200 px-1.5 py-0.5 text-[10px] font-semibold text-slate-700">
+                                            <span>🔧</span>
+                                            {tc.function?.name}
+                                          </span>
+                                          {tc.id && (
+                                            <span className="text-[10px] text-slate-400 font-mono truncate">{tc.id}</span>
+                                          )}
+                                        </div>
+                                        <div className="flex items-center gap-1">
+                                          <button
+                                            onClick={async () => {
+                                              setCopyingTool(toolKey);
+                                              try {
+                                                await navigator.clipboard.writeText(fullJson);
+                                                setTimeout(() => setCopyingTool(null), 1000);
+                                              } catch {
+                                                setCopyingTool(null);
+                                              }
+                                            }}
+                                            className={`group relative text-[8px] px-1.5 py-0 rounded-full font-medium transition-all duration-200 flex items-center gap-0.5 overflow-hidden ${
+                                              isCopyingToolKey
+                                                ? 'bg-emerald-100 text-emerald-700'
+                                                : 'bg-gradient-to-r from-slate-100 to-slate-200 text-slate-700 hover:from-indigo-50 hover:to-indigo-100 hover:text-indigo-700 hover:shadow-md hover:-translate-y-0.5'
+                                            }`}
+                                          >
+                                            {isCopyingToolKey ? '✅ 已复制' : '📋 复制'}
+                                          </button>
+                                          <button
+                                            onClick={() => {
+                                              const newSet = new Set(expandedToolCalls);
+                                              if (newSet.has(toolKey)) newSet.delete(toolKey);
+                                              else newSet.add(toolKey);
+                                              setExpandedToolCalls(newSet);
+                                            }}
+                                            className="group relative text-[8px] px-1.5 py-0 rounded-full font-medium transition-all duration-200 flex items-center gap-0.5 overflow-hidden bg-gradient-to-r from-slate-100 to-slate-200 text-slate-700 hover:from-indigo-50 hover:to-indigo-100 hover:text-indigo-700 hover:shadow-md hover:-translate-y-0.5"
+                                          >
+                                            {isToolExpanded ? '↑ 收起' : '↓ 详情'}
+                                          </button>
+                                        </div>
+                                      </div>
+                                      <div className="bg-slate-50 rounded border border-slate-200 overflow-hidden">
+                                        <pre className="text-[10px] font-mono text-slate-700 whitespace-pre-wrap break-all p-1.5 max-h-[120px] overflow-auto">
+                                          {isToolExpanded ? fullJson : formattedArgs}
+                                        </pre>
+                                      </div>
+                                    </div>
+                                  );
+                                })}
+                              </div>
+                            );
+                          })()}
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+              <div className="px-4 py-1.5 border-t border-slate-200 bg-slate-50/50 flex items-center justify-between">
+                {!messagesExpanded && (
+                  <div className="text-xs text-slate-600">
+                    共 {messages.length} 条消息，点击展开查看详情
+                  </div>
+                )}
+                <button
+                  onClick={() => setMessagesExpanded(!messagesExpanded)}
+                  className="text-slate-400 hover:text-slate-600 transition-colors"
+                >
+                  {messagesExpanded ? <ChevronDown size={16} /> : <ChevronRight size={16} />}
+                </button>
+              </div>
+            </div>
           )}
         </div>
       ) : log.request_body ? (
@@ -795,9 +1072,27 @@ function LogDetail({ log }: { log: RequestLog }) {
             </button>
           </div>
           {jsonExpanded ? (
-            <pre className="max-h-[420px] w-full overflow-auto rounded-xl bg-slate-50 border border-slate-200 p-3 text-xs font-mono whitespace-pre-wrap break-all text-slate-700">
-              {pretty}
-            </pre>
+            <div className="relative">
+              <pre className="max-h-[420px] w-full overflow-auto rounded-xl bg-slate-50 border border-slate-200 p-3 pr-16 text-xs font-mono whitespace-pre-wrap break-all text-slate-700">
+                {pretty}
+              </pre>
+              <button
+                onClick={async () => {
+                  try {
+                    await navigator.clipboard.writeText(pretty);
+                    setCopiedJsonKey('request-body');
+                    setTimeout(() => setCopiedJsonKey(null), 1500);
+                  } catch {}
+                }}
+                className={`absolute top-2 right-2 text-[10px] px-1.5 py-0.5 rounded-full transition-all shadow-sm ${
+                  copiedJsonKey === 'request-body'
+                    ? 'bg-emerald-100 border-emerald-300 text-emerald-700'
+                    : 'bg-white/90 border border-slate-200 text-slate-600 hover:bg-blue-50 hover:text-blue-600 hover:border-blue-300'
+                }`}
+              >
+                {copiedJsonKey === 'request-body' ? '✅ 已复制' : '📋 复制'}
+              </button>
+            </div>
           ) : (
             <div className="text-xs text-slate-500">点击「展开全部」查看原始 JSON</div>
           )}
@@ -808,6 +1103,388 @@ function LogDetail({ log }: { log: RequestLog }) {
 
       {parseError && (
         <div className="text-xs text-amber-500">⚠ JSON 解析失败，显示原始内容</div>
+      )}
+
+      {/* ── Response Choices Timeline ── */}
+      {parsedChoices && parsedChoices.length > 0 ? (
+        <div>
+          <div className="flex items-center justify-between mb-2">
+            <span className="text-xs font-medium text-slate-600">选择列表 ({parsedChoices.length} 条)</span>
+            <div className="flex items-center gap-3">
+              <button
+                onClick={() => setResponseJsonExpanded(!responseJsonExpanded)}
+                className="text-xs text-blue-500 hover:text-blue-600 transition-colors font-medium"
+              >
+                {responseJsonExpanded ? "返回缩略视图" : "查看原始 JSON"}
+              </button>
+            </div>
+          </div>
+
+          {responseJsonExpanded ? (
+            <div className="relative">
+              <pre className="max-h-[420px] w-full overflow-auto rounded-xl bg-slate-50 border border-slate-200 p-3 pr-16 text-xs font-mono whitespace-pre-wrap break-all text-slate-700">
+                {prettyChoices}
+              </pre>
+              <button
+                onClick={async () => {
+                  try {
+                    await navigator.clipboard.writeText(prettyChoices);
+                    setCopiedJsonKey('response-choices');
+                    setTimeout(() => setCopiedJsonKey(null), 1500);
+                  } catch {}
+                }}
+                className={`absolute top-2 right-2 text-[10px] px-1.5 py-0.5 rounded-full transition-all shadow-sm ${
+                  copiedJsonKey === 'response-choices'
+                    ? 'bg-emerald-100 border-emerald-300 text-emerald-700'
+                    : 'bg-white/90 border border-slate-200 text-slate-600 hover:bg-blue-50 hover:text-blue-600 hover:border-blue-300'
+                }`}
+              >
+                {copiedJsonKey === 'response-choices' ? '✅ 已复制' : '📋 复制'}
+              </button>
+            </div>
+          ) : (
+            <div className="border border-slate-200 rounded-xl overflow-hidden bg-white">
+              {responseChoicesExpanded && (
+                <div className="space-y-2 max-h-[500px] overflow-y-auto pr-1 pb-1 p-3">
+                  {parsedChoices.map((choice, i) => {
+                    const message = (choice.message || choice.delta || {}) as Record<string, unknown>;
+                    const role = (message.role as string) || "assistant";
+                    const meta = getRoleMeta(role);
+                    const Icon = meta.icon;
+                    const toolNames = extractToolNames(message);
+                    const toolCalls = extractToolCalls(message);
+
+                    const content = (message.content as string) || "";
+                    const reasoningContent = (message.reasoning_content as string) || "";
+
+                    const reasoningExpanded = expandedChoices.has(`${i}-reasoning`);
+                    const contentExpanded = expandedChoices.has(`${i}-content`);
+
+                    // Get preview for reasoning content (compact newlines)
+                    const reasoningPreview = reasoningContent.replace(/\n+/g, " ").trim();
+                    const reasoningPreviewTruncated = reasoningPreview.length > 200
+                      ? `${reasoningPreview.slice(0, 200)}…`
+                      : reasoningPreview;
+
+                    const toggleReasoning = () => {
+                      const newSet = new Set(expandedChoices);
+                      const key = `${i}-reasoning`;
+                      if (newSet.has(key)) newSet.delete(key);
+                      else newSet.add(key);
+                      setExpandedChoices(newSet);
+                    };
+
+                    const toggleContent = () => {
+                      const newSet = new Set(expandedChoices);
+                      const key = `${i}-content`;
+                      if (newSet.has(key)) newSet.delete(key);
+                      else newSet.add(key);
+                      setExpandedChoices(newSet);
+                    };
+
+                    return (
+                      <div
+                        key={i}
+                        className={`rounded-lg border border-slate-200/70 bg-gradient-to-b from-white to-slate-50/30 overflow-hidden transition-all duration-300 hover:border-slate-300 hover:shadow-md hover:-translate-y-0.5`}
+                      >
+                        {/* Header with role, index and actions */}
+                        <div className={`flex items-center justify-between gap-2 px-3 py-1.5 border-b border-slate-200/50 bg-gradient-to-r ${meta.bg} to-white`}>
+                          <div className={`flex items-center gap-1.5`}>
+                            <div className="p-0.5 rounded-md bg-white/60 shadow-sm">
+                              <Icon size={12} className={meta.color} />
+                            </div>
+                            <span className={`text-xs font-semibold ${meta.color}`}>{meta.label}</span>
+                          </div>
+                          <div className="flex items-center gap-1.5">
+                            <span className="text-[10px] text-slate-400 font-mono bg-white/60 px-1 py-0.5 rounded-full shadow-sm">#&nbsp;{i + 1}</span>
+                          </div>
+                        </div>
+
+                        {/* Thinking process section */}
+                        {reasoningContent && (
+                          <div className="px-3 py-2 border-b border-slate-200/30">
+                            <div className="flex items-center justify-between gap-1.5 mb-1">
+                              <div className="flex items-center gap-1.5">
+                                <span className="text-sm">💭</span>
+                                <span className="text-[11px] font-semibold text-slate-700">推理内容</span>
+                              </div>
+                              <div className="flex items-center gap-1">
+                                <button
+                                   onClick={async () => {
+                                     const thinkingKey = `thinking-${i}`;
+                                     try {
+                                       let processed = reasoningContent
+                                         .replace(/\\n/g, '\n')
+                                         .replace(/\\r/g, '\r')
+                                         .replace(/\\t/g, '\t');
+                                       processed = processed.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+                                       await navigator.clipboard.writeText(processed);
+                                       setCopyingThinkingKey(thinkingKey);
+                                       setTimeout(() => setCopyingThinkingKey(null), 1000);
+                                     } catch {
+                                       setCopyingThinkingKey(null);
+                                     }
+                                   }}
+                                   className={`group relative text-[10px] px-1.5 py-0 rounded-full font-medium transition-all duration-200 flex items-center gap-0.5 overflow-hidden ${
+                                     copyingThinkingKey === `thinking-${i}`
+                                       ? 'bg-emerald-100 text-emerald-700'
+                                       : 'bg-gradient-to-r from-slate-100 to-slate-200 text-slate-700 hover:from-indigo-50 hover:to-indigo-100 hover:text-indigo-700 hover:shadow-md hover:-translate-y-0.5'
+                                   }`}
+                                  >
+                                   {copyingThinkingKey === `thinking-${i}` ? '✅ 已复制' : '📋 复制'}
+                                  </button>
+                                {reasoningContent.length > 200 && (
+                                  <button
+                                    onClick={toggleReasoning}
+                                    className="group relative text-[10px] px-2 py-0.5 rounded-full font-medium transition-all duration-300 flex items-center gap-0.5 overflow-hidden bg-gradient-to-r from-slate-100 to-slate-200 text-slate-700 hover:from-indigo-50 hover:to-indigo-100 hover:text-indigo-700 hover:shadow-md hover:-translate-y-0.5"
+                                  >
+                                    {reasoningExpanded ? (
+                                      <>
+                                        <span className="text-sm group-hover:-translate-y-0.5 transition-transform duration-200">↑</span>
+                                        <span className="font-medium">收起</span>
+                                      </>
+                                    ) : (
+                                      <>
+                                        <span className="text-sm group-hover:translate-y-0.5 transition-transform duration-200">↓</span>
+                                        <span className="font-medium">展开</span>
+                                      </>
+                                    )}
+                                  </button>
+                                )}
+                              </div>
+                            </div>
+                            <div className="text-xs text-slate-700 leading-snug whitespace-pre-wrap break-words">
+                              {reasoningContent.length > 200 ? (
+                                reasoningExpanded ? (
+                                  (() => {
+                                    let processed = reasoningContent
+                                      .replace(/\\n/g, '\n')
+                                      .replace(/\\r/g, '\r')
+                                      .replace(/\\t/g, '\t');
+                                    return processed.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+                                  })()
+                                ) : reasoningPreviewTruncated
+                              ) : (
+                                (() => {
+                                  let processed = reasoningContent
+                                    .replace(/\\n/g, '\n')
+                                    .replace(/\\r/g, '\r')
+                                    .replace(/\\t/g, '\t');
+                                  return processed.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+                                })()
+                              )}
+                            </div>
+                          </div>
+                        )}
+
+                        {/* Content section */}
+                        <div className="px-3 py-2">
+                          <div className="flex items-center justify-between gap-1.5 mb-1">
+                            <div className="flex items-center gap-1.5">
+                              <span className="text-sm">✍️</span>
+                              <span className="text-[11px] font-semibold text-slate-700">正文内容</span>
+                            </div>
+                            <div className="flex items-center gap-1">
+                              <button
+                                onClick={async () => {
+                                  const contentKey = `content-${i}`;
+                                  try {
+                                    let processed = content
+                                      .replace(/\\n/g, '\n')
+                                      .replace(/\\r/g, '\r')
+                                      .replace(/\\t/g, '\t');
+                                    processed = processed.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+                                    await navigator.clipboard.writeText(processed);
+                                    setCopyingContentKey(contentKey);
+                                    setTimeout(() => setCopyingContentKey(null), 1000);
+                                  } catch {
+                                    setCopyingContentKey(null);
+                                  }
+                                }}
+                                className={`group relative text-[10px] px-1.5 py-0 rounded-full font-medium transition-all duration-200 flex items-center gap-0.5 overflow-hidden ${
+                                  copyingContentKey === `content-${i}`
+                                    ? 'bg-emerald-100 text-emerald-700'
+                                    : 'bg-gradient-to-r from-slate-100 to-slate-200 text-slate-700 hover:from-indigo-50 hover:to-indigo-100 hover:text-indigo-700 hover:shadow-md hover:-translate-y-0.5'
+                                }`}
+                              >
+                                {copyingContentKey === `content-${i}` ? '✅ 已复制' : '📋 复制'}
+                              </button>
+                              {content.length > 300 && (
+                                <button
+                                  onClick={toggleContent}
+                                  className="group relative text-[10px] px-2 py-0.5 rounded-full font-medium transition-all duration-300 flex items-center gap-0.5 overflow-hidden bg-gradient-to-r from-slate-100 to-slate-200 text-slate-700 hover:from-indigo-50 hover:to-indigo-100 hover:text-indigo-700 hover:shadow-md hover:-translate-y-0.5"
+                                >
+                                  {contentExpanded ? (
+                                    <>
+                                       <span className="text-sm group-hover:-translate-y-0.5 transition-transform duration-200">↑</span>
+                                       <span className="font-medium">收起</span>
+                                     </>
+                                   ) : (
+                                     <>
+                                       <span className="text-sm group-hover:translate-y-0.5 transition-transform duration-200">↓</span>
+                                       <span className="font-medium">展开</span>
+                                     </>
+                                   )}
+                                </button>
+                              )}
+                            </div>
+                          </div>
+                          <div className="text-xs text-slate-700 leading-snug whitespace-pre-wrap break-words">
+                            {content.length > 300 ? (
+                              contentExpanded ? (
+                                (() => {
+                                  let processed = content
+                                    .replace(/\\n/g, '\n')
+                                    .replace(/\\r/g, '\r')
+                                    .replace(/\\t/g, '\t');
+                                  return processed.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+                                })()
+                              ) : getContentPreview(message, 300)
+                            ) : (
+                              (() => {
+                                let processed = content
+                                  .replace(/\\n/g, '\n')
+                                  .replace(/\\r/g, '\r')
+                                  .replace(/\\t/g, '\t');
+                                return processed.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+                              })()
+                            )}
+                          </div>
+
+                          {/* Tool calls detail */}
+                          {toolCalls.length > 0 && (
+                            <div className="mt-1 divide-y divide-slate-200">
+                              {toolCalls.map((tc, tci) => {
+                                const toolKey = `${i}-${tci}`;
+                                const isToolExpanded = expandedToolCalls.has(toolKey);
+                                const isCopyingToolKey = copyingTool === toolKey;
+                                const formattedArgs = formatArguments(tc.function?.arguments);
+                                const fullJson = JSON.stringify({
+                                  id: tc.id,
+                                  type: tc.type,
+                                  function: {
+                                    name: tc.function?.name,
+                                    arguments: tc.function?.arguments ? JSON.parse(tc.function.arguments) : undefined,
+                                  }
+                                }, null, 2);
+
+                                  return (
+                                    <div key={toolKey} className="py-2">
+                                      <div className="flex items-center justify-between gap-2 mb-1">
+                                        <div className="flex items-center gap-1.5 min-w-0">
+                                          <span className="inline-flex items-center gap-0.5 rounded-md bg-slate-100 border border-slate-200 px-1.5 py-0.5 text-[10px] font-semibold text-slate-700">
+                                            <span>🔧</span>
+                                            {tc.function?.name}
+                                          </span>
+                                          {tc.id && (
+                                            <span className="text-[10px] text-slate-400 font-mono truncate">{tc.id}</span>
+                                          )}
+                                        </div>
+                                        <div className="flex items-center gap-1">
+                                          <button
+                                            onClick={async () => {
+                                              setCopyingTool(toolKey);
+                                              try {
+                                                await navigator.clipboard.writeText(fullJson);
+                                                setTimeout(() => setCopyingTool(null), 1000);
+                                              } catch {
+                                                setCopyingTool(null);
+                                              }
+                                            }}
+                                            className={`group relative text-[8px] px-1.5 py-0 rounded-full font-medium transition-all duration-200 flex items-center gap-0.5 overflow-hidden ${
+                                              isCopyingToolKey
+                                                ? 'bg-emerald-100 text-emerald-700'
+                                                : 'bg-gradient-to-r from-slate-100 to-slate-200 text-slate-700 hover:from-indigo-50 hover:to-indigo-100 hover:text-indigo-700 hover:shadow-md hover:-translate-y-0.5'
+                                            }`}
+                                          >
+                                            {isCopyingToolKey ? '✅ 已复制' : '📋 复制'}
+                                          </button>
+                                          <button
+                                            onClick={() => {
+                                              const newSet = new Set(expandedToolCalls);
+                                              if (newSet.has(toolKey)) newSet.delete(toolKey);
+                                              else newSet.add(toolKey);
+                                              setExpandedToolCalls(newSet);
+                                            }}
+                                            className="group relative text-[8px] px-1.5 py-0 rounded-full font-medium transition-all duration-200 flex items-center gap-0.5 overflow-hidden bg-gradient-to-r from-slate-100 to-slate-200 text-slate-700 hover:from-indigo-50 hover:to-indigo-100 hover:text-indigo-700 hover:shadow-md hover:-translate-y-0.5"
+                                          >
+                                            {isToolExpanded ? '↑ 收起' : '↓ 详情'}
+                                          </button>
+                                        </div>
+                                      </div>
+                                      <div className="bg-slate-50 rounded border border-slate-200 overflow-hidden">
+                                        <pre className="text-[10px] font-mono text-slate-700 whitespace-pre-wrap break-all p-1.5 max-h-[120px] overflow-auto">
+                                          {isToolExpanded ? fullJson : formattedArgs}
+                                        </pre>
+                                      </div>
+                                    </div>
+                                  );
+                                })}
+                            </div>
+                          )}
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+              <div className="px-4 py-1.5 border-t border-slate-200 bg-slate-50/50 flex items-center justify-between">
+                {!responseChoicesExpanded && (
+                  <div className="text-xs text-slate-600">
+                    共 {parsedChoices.length} 条响应，点击展开查看详情
+                  </div>
+                )}
+                <button
+                  onClick={() => setResponseChoicesExpanded(!responseChoicesExpanded)}
+                  className="text-slate-400 hover:text-slate-600 transition-colors"
+                >
+                  {responseChoicesExpanded ? <ChevronDown size={16} /> : <ChevronRight size={16} />}
+                </button>
+              </div>
+            </div>
+          )}
+        </div>
+      ) : log.response_choices ? (
+        <div>
+          <div className="flex items-center justify-between mb-2">
+            <span className="text-xs text-slate-500">响应内容</span>
+            <button
+              onClick={() => setResponseJsonExpanded(!responseJsonExpanded)}
+              className="text-xs text-blue-500 hover:text-blue-600 transition-colors"
+            >
+              {responseJsonExpanded ? "收起" : "展开全部"}
+            </button>
+          </div>
+          {responseJsonExpanded ? (
+            <div className="relative">
+              <pre className="max-h-[420px] w-full overflow-auto rounded-xl bg-slate-50 border border-slate-200 p-3 pr-16 text-xs font-mono whitespace-pre-wrap break-all text-slate-700">
+                {prettyChoices}
+              </pre>
+              <button
+                onClick={async () => {
+                  try {
+                    await navigator.clipboard.writeText(prettyChoices);
+                    setCopiedJsonKey('response-body');
+                    setTimeout(() => setCopiedJsonKey(null), 1500);
+                  } catch {}
+                }}
+                className={`absolute top-2 right-2 text-[10px] px-1.5 py-0.5 rounded-full transition-all shadow-sm ${
+                  copiedJsonKey === 'response-body'
+                    ? 'bg-emerald-100 border-emerald-300 text-emerald-700'
+                    : 'bg-white/90 border border-slate-200 text-slate-600 hover:bg-blue-50 hover:text-blue-600 hover:border-blue-300'
+                }`}
+              >
+                {copiedJsonKey === 'response-body' ? '✅ 已复制' : '📋 复制'}
+              </button>
+            </div>
+          ) : (
+            <div className="text-xs text-slate-500">点击「展开全部」查看原始 JSON</div>
+          )}
+        </div>
+      ) : null}
+
+      {choicesParseError && (
+        <div className="text-xs text-amber-500">⚠ 响应 JSON 解析失败，显示原始内容</div>
       )}
     </div>
   );

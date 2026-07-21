@@ -216,8 +216,8 @@ impl Repository {
 
     pub async fn create_log(&self, log: &RequestLog) -> Result<(), sqlx::Error> {
         sqlx::query(
-            "INSERT INTO request_logs (id, api_key_id, api_key_name, channel_id, channel_name, model, upstream_model, mode, status_code, prompt_tokens, completion_tokens, total_tokens, duration_ms, error_message, is_stream, is_retry, created_at, request_body, risk_level, risk_score, risk_summary, security_action, sanitized, blocked_reason)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+            "INSERT INTO request_logs (id, api_key_id, api_key_name, channel_id, channel_name, model, upstream_model, mode, status_code, prompt_tokens, completion_tokens, total_tokens, duration_ms, error_message, is_stream, is_retry, created_at, request_body, response_choices, risk_level, risk_score, risk_summary, security_action, sanitized, blocked_reason, trace_id)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
         )
         .bind(&log.id)
         .bind(&log.api_key_id)
@@ -237,12 +237,14 @@ impl Repository {
         .bind(log.is_retry)
         .bind(&log.created_at)
         .bind(&log.request_body)
+        .bind(&log.response_choices)
         .bind(&log.risk_level)
         .bind(log.risk_score)
         .bind(&log.risk_summary)
         .bind(&log.security_action)
         .bind(log.sanitized)
         .bind(&log.blocked_reason)
+        .bind(&log.trace_id)
         .execute(&self.pool)
         .await?;
         // Backfill seq with rowid for new rows
@@ -333,6 +335,7 @@ impl Repository {
         model: Option<&str>,
         date_from: Option<&str>,
         date_to: Option<&str>,
+        trace_id: Option<&str>,
         limit: i64,
         offset: i64,
     ) -> Result<Vec<RequestLog>, sqlx::Error> {
@@ -372,6 +375,11 @@ impl Repository {
 
         if let Some(to) = date_to {
             q.push(" AND created_at <= ").push_bind(to);
+        }
+
+        if let Some(tid) = trace_id {
+            let pattern = format!("%{}%", tid);
+            q.push(" AND trace_id LIKE ").push_bind(pattern);
         }
 
         q.push(" ORDER BY created_at DESC LIMIT ").push_bind(limit);

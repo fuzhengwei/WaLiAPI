@@ -444,7 +444,7 @@ export function SettingsPage() {
             )}
           </div>
 
-          <p className="text-xs text-muted-foreground">默认建议使用「只审计」模式：先在请求日志中展示风险证据；需要强防护时再切换到「脱敏」或「阻断」。</p>
+          <p className="text-xs text-muted-foreground">默认建议使用「只审计」模式：先在请求/响应日志中展示风险证据；需要强防护时再切换到「脱敏」或「阻断」。</p>
         </div>
       )}
 
