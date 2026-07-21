@@ -13,7 +13,7 @@
 
 > **WaLiAPI** 是一款本地运行的 LLM API 网关桌面软件。它将多个上游模型供应商（OpenAI、Claude、DeepSeek、Gemini……）统一为 OpenAI 兼容协议，配合 [WaLiCode](https://walicode.xiaofuge.cn/)、Codex、Claude Code、QClaw 等 AI IDE 使用，让你清楚知道 AI 对话到底在说什么。
 
-网盘下载：[https://pan.quark.cn/s/b6a134a77efa](https://pan.quark.cn/s/b6a134a77efa)
+下载：[https://github.com/fuzhengwei/WaLiAPI/releases/tag/waliapi-v0.1.1](https://github.com/fuzhengwei/WaLiAPI/releases/tag/waliapi-v0.1.1)
 
 ---
 
