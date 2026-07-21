@@ -12,9 +12,7 @@ import {
   ShieldCheck,
   Workflow,
   Plus,
-  Settings,
   BookOpen,
-  LayoutGrid,
   FileText,
   Globe,
   HelpCircle,
@@ -37,11 +35,16 @@ export function DashboardPage() {
     return <div className="page-shell text-sm text-slate-500">加载中...</div>;
   }
 
-  const statCards = [
+  const availability = stats.total_channels > 0 ? Math.round((stats.active_channels / stats.total_channels) * 100) : 0;
+
+  // 统一 6 卡片网格：今日请求 / 今日Token / 累计请求 / 累计Token / 活跃渠道 / 平均延迟
+  const metrics = [
     { label: "今日请求", value: formatNumber(stats.today_requests), icon: Activity, color: "text-blue-600", tone: "bg-blue-50" },
     { label: "今日 Token", value: formatNumber(stats.today_total_tokens), icon: Zap, color: "text-amber-600", tone: "bg-amber-50" },
+    { label: "累计请求", value: formatNumber(stats.total_requests), icon: TrendingUp, color: "text-indigo-600", tone: "bg-indigo-50" },
+    { label: "累计 Token", value: formatNumber(stats.total_tokens), icon: Zap, color: "text-orange-600", tone: "bg-orange-50" },
     { label: "活跃渠道", value: `${stats.active_channels}/${stats.total_channels}`, icon: Radio, color: "text-emerald-600", tone: "bg-emerald-50" },
-    { label: "密钥数量", value: stats.total_api_keys.toString(), icon: Key, color: "text-indigo-600", tone: "bg-indigo-50" },
+    { label: "平均延迟", value: formatDuration(Math.round(stats.avg_latency_ms)), icon: Workflow, color: "text-violet-600", tone: "bg-violet-50" },
   ];
 
   const quickActions = [
@@ -50,51 +53,14 @@ export function DashboardPage() {
     { title: "接入示例", icon: BookOpen, action: () => navigate("/usage") },
     { title: "审计日志", icon: FileText, action: () => navigate("/logs") },
     { title: "安全设置", icon: ShieldCheck, action: () => navigate("/settings") },
-    { title: "服务配置", icon: Settings, action: () => navigate("/settings") },
     { title: "渠道管理", icon: Globe, action: () => navigate("/channels") },
-    { title: "面板总览", icon: LayoutGrid, action: () => navigate("/") },
-  ];
-
-  const summaryItems = [
-    {
-      label: "累计请求",
-      value: formatNumber(stats.total_requests),
-      hint: "服务吞吐",
-      icon: TrendingUp,
-      color: "text-indigo-700",
-      tone: "border-indigo-100 bg-indigo-50",
-    },
-    {
-      label: "累计 Token",
-      value: formatNumber(stats.total_tokens),
-      hint: "模型消耗",
-      icon: Zap,
-      color: "text-amber-700",
-      tone: "border-amber-100 bg-amber-50",
-    },
-    {
-      label: "服务可用率",
-      value: stats.total_channels > 0 ? `${Math.round((stats.active_channels / stats.total_channels) * 100)}%` : "0%",
-      hint: "健康度",
-      icon: ShieldCheck,
-      color: "text-emerald-700",
-      tone: "border-emerald-100 bg-emerald-50",
-    },
-    {
-      label: "平均延迟",
-      value: formatDuration(Math.round(stats.avg_latency_ms)),
-      hint: "响应性能",
-      icon: Workflow,
-      color: "text-blue-700",
-      tone: "border-blue-100 bg-blue-50",
-    },
   ];
 
   return (
     <div className="page-shell space-y-5">
-      {/* 顶部：欢迎 + 数据展示 */}
+      {/* 顶部：欢迎 + 快速操作 */}
       <section className="surface rounded-[24px] p-6 md:p-7">
-        <div className="flex flex-col gap-6 xl:flex-row xl:items-start xl:justify-between">
+        <div className="flex flex-col gap-5 xl:flex-row xl:items-start xl:justify-between">
           <div className="max-w-2xl">
             <div className="inline-flex items-center gap-2 rounded-full border border-blue-100 bg-blue-50 px-3 py-1 text-xs font-medium text-blue-700">
               <Workflow className="h-3.5 w-3.5" /> 控制台首页
@@ -128,93 +94,81 @@ export function DashboardPage() {
             </div>
           </div>
 
-          {/* 数据展示：原控制台摘要 */}
-          <div className="grid grid-cols-2 gap-2.5 xl:w-[440px]">
-            {summaryItems.map(({ label, value, hint, icon: Icon, color, tone }) => (
-              <div key={label} className={`rounded-2xl border p-3.5 ${tone}`}>
-                <div className="flex items-center gap-1.5 text-xs">
-                  <Icon className={`h-3.5 w-3.5 ${color}`} />
-                  <span className={color}>{label}</span>
-                </div>
-                <div className="mt-1.5 text-xl font-semibold text-slate-900">{value}</div>
-                <div className="text-[11px] text-slate-500">{hint}</div>
+          {/* 健康度徽章 */}
+          <div className="flex gap-3 xl:w-auto">
+            <div className={`flex items-center gap-2.5 rounded-2xl border px-4 py-3 ${availability >= 80 ? "border-emerald-200 bg-emerald-50" : availability >= 50 ? "border-amber-200 bg-amber-50" : "border-rose-200 bg-rose-50"}`}>
+              <ShieldCheck className={`h-5 w-5 ${availability >= 80 ? "text-emerald-600" : availability >= 50 ? "text-amber-600" : "text-rose-600"}`} />
+              <div>
+                <div className="text-xs text-slate-500">服务可用率</div>
+                <div className={`text-lg font-semibold ${availability >= 80 ? "text-emerald-700" : availability >= 50 ? "text-amber-700" : "text-rose-700"}`}>{availability}%</div>
               </div>
-            ))}
+            </div>
           </div>
         </div>
       </section>
 
-      {/* 今日请求等卡片 */}
-      <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-4">
-        {statCards.map(({ label, value, icon: Icon, color, tone }) => (
+      {/* 统一指标卡片 */}
+      <div className="grid grid-cols-2 gap-3 md:grid-cols-3 xl:grid-cols-6">
+        {metrics.map(({ label, value, icon: Icon, color, tone }) => (
           <div key={label} className="surface data-card">
-            <div className="flex items-start justify-between">
-              <div>
-                <div className="text-sm text-slate-500">{label}</div>
-                <div className="mt-3 text-3xl font-semibold tracking-tight text-slate-900">{value}</div>
-              </div>
-              <div className={`rounded-2xl border border-white/0 px-3 py-3 ${tone}`}>
-                <Icon className={`h-5 w-5 ${color}`} />
+            <div className="flex items-center justify-between">
+              <div className={`rounded-xl ${tone} p-2`}>
+                <Icon className={`h-4 w-4 ${color}`} />
               </div>
             </div>
+            <div className="mt-3 text-2xl font-semibold tracking-tight text-slate-900">{value}</div>
+            <div className="text-xs text-slate-500">{label}</div>
           </div>
         ))}
       </div>
 
-      {/* 运行摘要 + 运维建议 */}
-      <div className="grid grid-cols-1 gap-4 xl:grid-cols-[1.3fr_0.9fr]">
-        <section className="surface rounded-[20px] p-6">
-          <div className="flex items-center justify-between">
-            <div>
-              <h2 className="text-lg font-semibold text-slate-900">运行摘要</h2>
-              <p className="mt-1 text-sm text-slate-500">核心指标帮助快速判断当前系统健康度</p>
-            </div>
-            <div className="rounded-2xl border border-slate-200 bg-slate-50 p-3">
-              <TrendingUp className="h-5 w-5 text-slate-500" />
-            </div>
+      {/* 运维建议 */}
+      <section className="surface rounded-[20px] p-6">
+        <div className="flex items-center justify-between">
+          <div>
+            <h2 className="text-lg font-semibold text-slate-900">运维建议</h2>
+            <p className="mt-1 text-sm text-slate-500">根据当前系统状态给出的运维参考</p>
           </div>
-
-          <div className="mt-6 grid grid-cols-1 gap-4 md:grid-cols-3">
-            <div className="rounded-2xl border border-blue-100 bg-blue-50 p-4">
-              <div className="text-sm text-blue-700">平均延迟</div>
-              <div className="mt-2 text-2xl font-semibold text-blue-900">{formatDuration(Math.round(stats.avg_latency_ms))}</div>
-              <div className="mt-2 flex items-center gap-1 text-xs text-blue-700">
-                <TrendingUp className="h-3.5 w-3.5" /> 响应性能稳定
-              </div>
+          <TrendingUp className="h-5 w-5 text-slate-400" />
+        </div>
+        <div className="mt-5 grid grid-cols-1 gap-3 md:grid-cols-3">
+          <div className="rounded-2xl border border-slate-200 bg-slate-50 p-4">
+            <div className="flex items-center gap-2">
+              <Radio className="h-4 w-4 text-emerald-600" />
+              <span className="text-sm font-medium text-slate-900">渠道健康度</span>
             </div>
-            <div className="rounded-2xl border border-amber-100 bg-amber-50 p-4">
-              <div className="text-sm text-amber-700">总 Token</div>
-              <div className="mt-2 text-2xl font-semibold text-amber-900">{formatNumber(stats.total_tokens)}</div>
-              <div className="mt-2 text-xs text-amber-700">累计消耗量</div>
-            </div>
-            <div className="rounded-2xl border border-emerald-100 bg-emerald-50 p-4">
-              <div className="text-sm text-emerald-700">可用渠道率</div>
-              <div className="mt-2 text-2xl font-semibold text-emerald-900">
-                {stats.total_channels > 0 ? `${Math.round((stats.active_channels / stats.total_channels) * 100)}%` : "0%"}
-              </div>
-              <div className="mt-2 text-xs text-emerald-700">已启用 / 总渠道</div>
-            </div>
+            <p className="mt-1.5 text-sm text-slate-500">
+              {availability >= 80
+                ? "当前渠道运行正常，各线路可用。"
+                : availability >= 50
+                  ? "部分渠道不可用，建议检查并启用备用线路。"
+                  : "活跃渠道较少，请前往渠道页测试并启用。"}
+            </p>
           </div>
-        </section>
-
-        <section className="surface rounded-[20px] p-6">
-          <h2 className="text-lg font-semibold text-slate-900">运维建议</h2>
-          <div className="mt-5 space-y-3">
-            <div className="rounded-2xl border border-slate-200 bg-slate-50 p-4">
-              <div className="text-sm font-medium text-slate-900">优先检查渠道健康度</div>
-              <div className="mt-1 text-sm text-slate-500">若活跃渠道偏少，建议前往渠道页执行测试并及时启用备用线路。</div>
+          <div className="rounded-2xl border border-slate-200 bg-slate-50 p-4">
+            <div className="flex items-center gap-2">
+              <Key className="h-4 w-4 text-indigo-600" />
+              <span className="text-sm font-medium text-slate-900">密钥配额</span>
             </div>
-            <div className="rounded-2xl border border-slate-200 bg-slate-50 p-4">
-              <div className="text-sm font-medium text-slate-900">关注 API Key 配额</div>
-              <div className="mt-1 text-sm text-slate-500">当配额接近上限时，及时新增或调整下游密钥策略，避免服务中断。</div>
-            </div>
-            <div className="rounded-2xl border border-slate-200 bg-slate-50 p-4">
-              <div className="text-sm font-medium text-slate-900">结合日志定位异常</div>
-              <div className="mt-1 text-sm text-slate-500">若平均延迟波动明显，可在日志页筛查失败请求与上游模型表现。</div>
-            </div>
+            <p className="mt-1.5 text-sm text-slate-500">
+              {stats.total_api_keys > 0
+                ? `共 ${stats.total_api_keys} 个密钥，定期检查配额使用情况。`
+                : "尚未创建密钥，请前往 API 密钥页创建。"}
+            </p>
           </div>
-        </section>
-      </div>
+          <div className="rounded-2xl border border-slate-200 bg-slate-50 p-4">
+            <div className="flex items-center gap-2">
+              <Activity className="h-4 w-4 text-blue-600" />
+              <span className="text-sm font-medium text-slate-900">性能监控</span>
+            </div>
+            <p className="mt-1.5 text-sm text-slate-500">
+              {stats.avg_latency_ms < 2000
+                ? `平均延迟 ${formatDuration(Math.round(stats.avg_latency_ms))}，响应正常。`
+                : `平均延迟 ${formatDuration(Math.round(stats.avg_latency_ms))}，建议查看日志排查慢请求。`}
+            </p>
+          </div>
+        </div>
+      </section>
 
       {/* 使用帮助弹窗 */}
       {showHelp && (

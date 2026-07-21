@@ -16,7 +16,7 @@ export const CHANNEL_TYPES: Array<{
 }> = [
   { value: "openai", label: "OpenAI", category: "international", icon: "🟢", default_base_url: "https://api.openai.com/v1", models: ["gpt-5.4", "gpt-5.5", "gpt-4o", "gpt-4o-mini", "gpt-4-turbo", "gpt-3.5-turbo"] },
   { value: "deepseek", label: "DeepSeek", category: "international", icon: "🐋", default_base_url: "https://api.deepseek.com/v1", models: ["deepseek-chat", "deepseek-coder", "deepseek-reasoner"] },
-  { value: "claude", label: "Anthropic Claude", category: "international", icon: "🤖", default_base_url: "https://api.anthropic.com", models: ["claude-sonnet-4-20250514", "claude-3-7-sonnet-20250219", "claude-3-5-haiku-20241022"] },
+  { value: "claude", label: "Anthropic Claude", category: "international", icon: "🤖", default_base_url: "https://api.anthropic.com/v1", models: ["claude-sonnet-4-20250514", "claude-3-7-sonnet-20250219", "claude-3-5-haiku-20241022"] },
   { value: "gemini", label: "Google Gemini", category: "international", icon: "💎", default_base_url: "https://generativelanguage.googleapis.com", models: ["gemini-2.5-flash", "gemini-2.5-pro", "gemini-2.0-flash"] },
   { value: "qwen", label: "通义千问", category: "domestic", icon: "🔮", default_base_url: "https://dashscope.aliyuncs.com/compatible-mode/v1", models: ["qwen-max", "qwen-plus", "qwen-turbo"] },
   { value: "zhipu", label: "智谱 GLM", category: "domestic", icon: "✨", default_base_url: "https://open.bigmodel.cn/api/paas/v4", models: ["glm-4-plus", "glm-4-flash", "glm-4-air"] },

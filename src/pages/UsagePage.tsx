@@ -7,6 +7,7 @@ import { BookOpen, Copy, Check, Play, Loader2, Link2, KeyRound, Bot, ChevronDown
 
 type Platform = "curl-mac" | "curl-windows" | "javascript" | "typescript" | "java";
 type TestState = "idle" | "running" | "success" | "error";
+type Protocol = "chat" | "responses" | "anthropic";
 
 const tabs: { id: Platform; label: string; color: string; lang: string }[] = [
   { id: "curl-mac", label: "cURL Mac/Linux", color: "text-emerald-700 border-emerald-600", lang: "bash" },
@@ -14,6 +15,12 @@ const tabs: { id: Platform; label: string; color: string; lang: string }[] = [
   { id: "javascript", label: "JavaScript", color: "text-amber-700 border-amber-600", lang: "javascript" },
   { id: "typescript", label: "TypeScript", color: "text-blue-700 border-blue-600", lang: "typescript" },
   { id: "java", label: "Java", color: "text-orange-700 border-orange-600", lang: "java" },
+];
+
+const protocolTabs: { id: Protocol; label: string; endpoint: string; desc: string }[] = [
+  { id: "chat", label: "OpenAI Chat", endpoint: "/v1/chat/completions", desc: "标准 OpenAI Chat Completions 协议" },
+  { id: "responses", label: "OpenAI Responses", endpoint: "/v1/responses", desc: "OpenAI Responses API（input/output 格式）" },
+  { id: "anthropic", label: "Anthropic Messages", endpoint: "/v1/messages", desc: "Anthropic Claude Messages 协议" },
 ];
 
 export function UsagePage() {
@@ -26,6 +33,7 @@ export function UsagePage() {
   const [testState, setTestState] = useState<TestState>("idle");
   const [testResult, setTestResult] = useState("");
   const [activeTab, setActiveTab] = useState<Platform>("curl-mac");
+  const [activeProtocol, setActiveProtocol] = useState<Protocol>("chat");
 
   useEffect(() => {
     Promise.all([
@@ -48,6 +56,7 @@ export function UsagePage() {
   }, []);
 
   const baseUrl = ss?.running ? `${ss.url}/v1` : "http://127.0.0.1:8777/v1";
+
   const modelList = useMemo(() => {
     const seen = new Set<string>();
     const real: string[] = [];
@@ -58,7 +67,6 @@ export function UsagePage() {
       });
       if (c.model_mapping) {
         Object.keys(c.model_mapping).forEach(from => {
-          // from = mapping name (what client requests)
           if (!seen.has(from)) { seen.add(from); mapped.push(from); }
         });
       }
@@ -70,19 +78,27 @@ export function UsagePage() {
 
   const copy = (text: string, id: string) => { navigator.clipboard.writeText(text); setCopied(id); setTimeout(() => setCopied(null), 2000); };
 
-  const scripts: Record<Platform, string> = {
-    "curl-mac": `curl ${baseUrl}/chat/completions \\
+  // Protocol-specific endpoints
+  const endpoints: Record<Protocol, string> = {
+    chat: `${baseUrl}/chat/completions`,
+    responses: `${baseUrl}/responses`,
+    anthropic: `${baseUrl}/messages`,
+  };
+
+  const scripts: Record<Protocol, Record<Platform, string>> = {
+    chat: {
+      "curl-mac": `curl ${endpoints.chat} \\
   -H "Content-Type: application/json" \\
   -H "Authorization: Bearer ${selKey}" \\
   -d '{
     "model": "${selModel}",
     "messages": [{"role": "user", "content": "Hello!"}]
   }'`,
-    "curl-windows": `curl ${baseUrl}/chat/completions ^
+      "curl-windows": `curl ${endpoints.chat} ^
   -H "Content-Type: application/json" ^
   -H "Authorization: Bearer ${selKey}" ^
   -d "{\\"model\\": \\"${selModel}\\", \\"messages\\": [{\\"role\\": \\"user\\", \\"content\\": \\"Hello!\\"}]}"`,
-    "javascript": `import OpenAI from "openai";
+      "javascript": `import OpenAI from "openai";
 
 const client = new OpenAI({
   baseURL: "${baseUrl}",
@@ -94,7 +110,7 @@ const response = await client.chat.completions.create({
   messages: [{ role: "user", content: "Hello!" }],
 });
 console.log(response.choices[0].message.content);`,
-    "typescript": `import OpenAI from "openai";
+      "typescript": `import OpenAI from "openai";
 
 const client = new OpenAI({
   baseURL: "${baseUrl}",
@@ -109,7 +125,7 @@ async function main() {
   console.log(response.choices[0].message.content);
 }
 main();`,
-    "java": `import java.net.URI;
+      "java": `import java.net.URI;
 import java.net.http.*;
 
 public class XapiTest {
@@ -117,7 +133,7 @@ public class XapiTest {
     HttpClient client = HttpClient.newHttpClient();
     String body = "{\\"model\\": \\"${selModel}\\", \\"messages\\": [{\\"role\\": \\"user\\", \\"content\\": \\"Hello!\\"}]}";
     HttpRequest req = HttpRequest.newBuilder()
-      .uri(URI.create("${baseUrl}/chat/completions"))
+      .uri(URI.create("${endpoints.chat}"))
       .header("Content-Type", "application/json")
       .header("Authorization", "Bearer ${selKey}")
       .POST(HttpRequest.BodyPublishers.ofString(body))
@@ -126,19 +142,176 @@ public class XapiTest {
     System.out.println(resp.body());
   }
 }`,
+    },
+    responses: {
+      "curl-mac": `curl ${endpoints.responses} \\
+  -H "Content-Type: application/json" \\
+  -H "Authorization: Bearer ${selKey}" \\
+  -d '{
+    "model": "${selModel}",
+    "input": [{"type": "message", "role": "user", "content": [{"type": "input_text", "text": "Hello!"}]}]
+  }'`,
+      "curl-windows": `curl ${endpoints.responses} ^
+  -H "Content-Type: application/json" ^
+  -H "Authorization: Bearer ${selKey}" ^
+  -d "{\\"model\\": \\"${selModel}\\", \\"input\\": [{\\"type\\": \\"message\\", \\"role\\": \\"user\\", \\"content\\": [{\\"type\\": \\"input_text\\", \\"text\\": \\"Hello!\\"}]}]}"`,
+      "javascript": `// OpenAI Responses API (fetch)
+const response = await fetch("${endpoints.responses}", {
+  method: "POST",
+  headers: {
+    "Content-Type": "application/json",
+    "Authorization": "Bearer ${selKey}",
+  },
+  body: JSON.stringify({
+    model: "${selModel}",
+    input: [{ type: "message", role: "user", content: [{ type: "input_text", text: "Hello!" }] }],
+  }),
+});
+const data = await response.json();
+console.log(data.output[0].content[0].text);`,
+      "typescript": `// OpenAI Responses API (fetch)
+async function main() {
+  const response = await fetch("${endpoints.responses}", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "Authorization": "Bearer ${selKey}",
+    },
+    body: JSON.stringify({
+      model: "${selModel}",
+      input: [{ type: "message" as const, role: "user" as const, content: [{ type: "input_text" as const, text: "Hello!" }] }],
+    }),
+  });
+  const data = await response.json();
+  console.log(data.output[0].content[0].text);
+}
+main();`,
+      "java": `import java.net.URI;
+import java.net.http.*;
+
+public class ResponsesTest {
+  public static void main(String[] args) throws Exception {
+    HttpClient client = HttpClient.newHttpClient();
+    String body = "{\\"model\\": \\"${selModel}\\", \\"input\\": [{\\"type\\": \\"message\\", \\"role\\": \\"user\\", \\"content\\": [{\\"type\\": \\"input_text\\", \\"text\\": \\"Hello!\\"}]}]}";
+    HttpRequest req = HttpRequest.newBuilder()
+      .uri(URI.create("${endpoints.responses}"))
+      .header("Content-Type", "application/json")
+      .header("Authorization", "Bearer ${selKey}")
+      .POST(HttpRequest.BodyPublishers.ofString(body))
+      .build();
+    HttpResponse<String> resp = client.send(req, HttpResponse.BodyHandlers.ofString());
+    System.out.println(resp.body());
+  }
+}`,
+    },
+    anthropic: {
+      "curl-mac": `curl ${endpoints.anthropic} \\
+  -H "Content-Type: application/json" \\
+  -H "x-api-key: ${selKey}" \\
+  -H "anthropic-version: 2023-06-01" \\
+  -d '{
+    "model": "${selModel}",
+    "max_tokens": 1024,
+    "messages": [{"role": "user", "content": "Hello!"}]
+  }'`,
+      "curl-windows": `curl ${endpoints.anthropic} ^
+  -H "Content-Type: application/json" ^
+  -H "x-api-key: ${selKey}" ^
+  -H "anthropic-version: 2023-06-01" ^
+  -d "{\\"model\\": \\"${selModel}\\", \\"max_tokens\\": 1024, \\"messages\\": [{\\"role\\": \\"user\\", \\"content\\": \\"Hello!\\"}]}"`,
+      "javascript": `// Anthropic Messages API (fetch)
+const response = await fetch("${endpoints.anthropic}", {
+  method: "POST",
+  headers: {
+    "Content-Type": "application/json",
+    "x-api-key": "${selKey}",
+    "anthropic-version": "2023-06-01",
+  },
+  body: JSON.stringify({
+    model: "${selModel}",
+    max_tokens: 1024,
+    messages: [{ role: "user", content: "Hello!" }],
+  }),
+});
+const data = await response.json();
+console.log(data.content[0].text);`,
+      "typescript": `// Anthropic Messages API (fetch)
+async function main() {
+  const response = await fetch("${endpoints.anthropic}", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "x-api-key": "${selKey}",
+      "anthropic-version": "2023-06-01",
+    },
+    body: JSON.stringify({
+      model: "${selModel}",
+      max_tokens: 1024,
+      messages: [{ role: "user" as const, content: "Hello!" }],
+    }),
+  });
+  const data = await response.json();
+  console.log(data.content[0].text);
+}
+main();`,
+      "java": `import java.net.URI;
+import java.net.http.*;
+
+public class AnthropicTest {
+  public static void main(String[] args) throws Exception {
+    HttpClient client = HttpClient.newHttpClient();
+    String body = "{\\"model\\": \\"${selModel}\\", \\"max_tokens\\": 1024, \\"messages\\": [{\\"role\\": \\"user\\", \\"content\\": \\"Hello!\\"}]}";
+    HttpRequest req = HttpRequest.newBuilder()
+      .uri(URI.create("${endpoints.anthropic}"))
+      .header("Content-Type", "application/json")
+      .header("x-api-key", "${selKey}")
+      .header("anthropic-version", "2023-06-01")
+      .POST(HttpRequest.BodyPublishers.ofString(body))
+      .build();
+    HttpResponse<String> resp = client.send(req, HttpResponse.BodyHandlers.ofString());
+    System.out.println(resp.body());
+  }
+}`,
+    },
   };
 
   const handleTest = async () => {
     if (!selKey || !selModel) return;
     setTestState("running"); setTestResult("");
     try {
-      const resp = await fetch(`${baseUrl}/chat/completions`, {
-        method: "POST", headers: { "Content-Type": "application/json", "Authorization": `Bearer ${selKey}` },
-        body: JSON.stringify({ model: selModel, messages: [{ role: "user", content: "Say hello in one sentence" }] }),
-      });
+      const isAnthropic = activeProtocol === "anthropic";
+      const isResponses = activeProtocol === "responses";
+      const url = endpoints[activeProtocol];
+      const headers: Record<string, string> = { "Content-Type": "application/json" };
+      if (isAnthropic) {
+        headers["x-api-key"] = selKey;
+        headers["anthropic-version"] = "2023-06-01";
+      } else {
+        headers["Authorization"] = `Bearer ${selKey}`;
+      }
+      let body: string;
+      if (isAnthropic) {
+        body = JSON.stringify({ model: selModel, max_tokens: 1024, messages: [{ role: "user", content: "Say hello in one sentence" }] });
+      } else if (isResponses) {
+        body = JSON.stringify({ model: selModel, input: [{ type: "message", role: "user", content: [{ type: "input_text", text: "Say hello in one sentence" }] }] });
+      } else {
+        body = JSON.stringify({ model: selModel, messages: [{ role: "user", content: "Say hello in one sentence" }] });
+      }
+      const resp = await fetch(url, { method: "POST", headers, body });
       const data = await resp.json();
-      if (resp.ok) { setTestState("success"); setTestResult(`OK ${resp.status}\n\n${data.choices?.[0]?.message?.content || JSON.stringify(data, null, 2)}`); }
-      else { setTestState("error"); setTestResult(`Error ${resp.status} ${resp.statusText}\n\n${JSON.stringify(data, null, 2)}`); }
+      if (resp.ok) {
+        setTestState("success");
+        if (isAnthropic) {
+          setTestResult(`OK ${resp.status}\n\n${data.content?.[0]?.text || JSON.stringify(data, null, 2)}`);
+        } else if (isResponses) {
+          setTestResult(`OK ${resp.status}\n\n${data.output?.[0]?.content?.[0]?.text || JSON.stringify(data, null, 2)}`);
+        } else {
+          setTestResult(`OK ${resp.status}\n\n${data.choices?.[0]?.message?.content || JSON.stringify(data, null, 2)}`);
+        }
+      } else {
+        setTestState("error");
+        setTestResult(`Error ${resp.status} ${resp.statusText}\n\n${JSON.stringify(data, null, 2)}`);
+      }
     } catch (e: any) { setTestState("error"); setTestResult(`Request failed: ${e.message || String(e)}\n\nCauses:\n1. Server not running\n2. Invalid key\n3. Upstream channel error`); }
   };
 
@@ -148,68 +321,90 @@ public class XapiTest {
       ? "border-rose-200 bg-rose-50 text-rose-900"
       : "border-slate-200 bg-slate-50 text-slate-900";
 
+  const currentScripts = scripts[activeProtocol];
+
   return (
     <div className="page-shell space-y-6 max-w-6xl text-slate-900">
       <div className="page-header">
         <div>
           <h1 className="page-title flex items-center gap-3"><BookOpen className="h-7 w-7 text-blue-600" />使用</h1>
-          <p className="page-subtitle">按平台生成接入代码，并直接验证本地网关连通性</p>
+          <p className="page-subtitle">支持三种协议接入，按平台生成代码，并直接验证本地网关连通性</p>
         </div>
       </div>
 
       <div className="grid grid-cols-1 gap-4 xl:grid-cols-[1.1fr_0.9fr]">
         <div className="surface rounded-[24px] p-5 space-y-4">
           <h2 className="text-lg font-semibold text-slate-900">接入信息</h2>
-          <div className="grid grid-cols-1 gap-4 md:grid-cols-3">
-            <div className="surface-soft rounded-2xl p-4 md:col-span-3">
-              <div className="mb-2 flex items-center gap-2 text-sm font-medium text-slate-600"><Link2 size={14} /> Base URL</div>
-              <div className="flex items-center gap-2">
-                <code className="flex-1 break-all rounded-2xl border border-slate-200 bg-white px-3 py-3 text-sm font-mono text-slate-900">{baseUrl}</code>
-                <button onClick={() => copy(baseUrl, "baseurl")} className="action-secondary px-3 py-2">
-                  {copied === "baseurl" ? <Check size={16} className="text-emerald-700" /> : <Copy size={16} />}
+          {/* Base URL */}
+          <div className="surface-soft rounded-2xl p-4">
+            <div className="mb-2 flex items-center gap-2 text-sm font-medium text-slate-600"><Link2 size={14} /> Base URL</div>
+            <div className="flex items-center gap-2">
+              <code className="flex-1 break-all rounded-2xl border border-slate-200 bg-white px-3 py-3 text-sm font-mono text-slate-900">{baseUrl}</code>
+              <button onClick={() => copy(baseUrl, "baseurl")} className="action-secondary px-3 py-2">
+                {copied === "baseurl" ? <Check size={16} className="text-emerald-700" /> : <Copy size={16} />}
+              </button>
+            </div>
+          </div>
+
+          {/* Protocol endpoints */}
+          <div className="surface-soft rounded-2xl p-4 space-y-3">
+            <div className="text-sm font-medium text-slate-600">协议端点</div>
+            {protocolTabs.map(p => (
+              <div key={p.id} className="flex items-center gap-2">
+                <button
+                  onClick={() => setActiveProtocol(p.id)}
+                  className={`rounded-lg border px-3 py-1.5 text-xs font-medium whitespace-nowrap transition-colors ${activeProtocol === p.id ? "border-blue-500 bg-blue-50 text-blue-700" : "border-slate-200 bg-white text-slate-600 hover:text-slate-900"}`}
+                >
+                  {p.label}
+                </button>
+                <code className="flex-1 break-all text-xs font-mono text-slate-500">{endpoints[p.id]}</code>
+                <button onClick={() => copy(endpoints[p.id], `ep-${p.id}`)} className="action-secondary px-2 py-1">
+                  {copied === `ep-${p.id}` ? <Check size={12} className="text-emerald-700" /> : <Copy size={12} />}
                 </button>
               </div>
-            </div>
-            <div className="surface-soft rounded-2xl p-4 md:col-span-3">
-              <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
-                <div>
-                  <div className="mb-2 flex items-center gap-2 text-sm font-medium text-slate-600"><KeyRound size={14} /> API Key</div>
-                  <div className="flex gap-2">
-                    <div className="relative flex-1">
-                      <select value={selKey} onChange={e => setSelKey(e.target.value)} className="flex-1 w-full appearance-none rounded-2xl border border-slate-200 bg-white px-4 py-3 pr-9 text-sm font-mono text-slate-900 shadow-sm cursor-pointer">
-                        {keys.length === 0 && <option value="">请先创建密钥</option>}
-                        {keys.map(k => <option key={k.id} value={k.key}>{k.name} ({k.key.slice(0, 12)}...)</option>)}
-                      </select>
-                      <ChevronDown size={14} className="pointer-events-none absolute right-3 top-1/2 -translate-y-1/2 text-slate-400" />
-                    </div>
-                    <button onClick={() => selKey && copy(selKey, "key")} disabled={!selKey} className="action-secondary px-3 py-2 disabled:opacity-50">
-                      {copied === "key" ? <Check size={16} className="text-emerald-700" /> : <Copy size={16} />}
-                    </button>
+            ))}
+          </div>
+
+          {/* API Key & Model */}
+          <div className="surface-soft rounded-2xl p-4">
+            <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
+              <div>
+                <div className="mb-2 flex items-center gap-2 text-sm font-medium text-slate-600"><KeyRound size={14} /> API Key</div>
+                <div className="flex gap-2">
+                  <div className="relative flex-1">
+                    <select value={selKey} onChange={e => setSelKey(e.target.value)} className="flex-1 w-full appearance-none rounded-2xl border border-slate-200 bg-white px-4 py-3 pr-9 text-sm font-mono text-slate-900 shadow-sm cursor-pointer">
+                      {keys.length === 0 && <option value="">请先创建密钥</option>}
+                      {keys.map(k => <option key={k.id} value={k.key}>{k.name} ({k.key.slice(0, 12)}...)</option>)}
+                    </select>
+                    <ChevronDown size={14} className="pointer-events-none absolute right-3 top-1/2 -translate-y-1/2 text-slate-400" />
                   </div>
+                  <button onClick={() => selKey && copy(selKey, "key")} disabled={!selKey} className="action-secondary px-3 py-2 disabled:opacity-50">
+                    {copied === "key" ? <Check size={16} className="text-emerald-700" /> : <Copy size={16} />}
+                  </button>
                 </div>
-                <div>
-                  <div className="mb-2 flex items-center gap-2 text-sm font-medium text-slate-600"><Bot size={14} /> Model</div>
-                  <div className="flex gap-2">
-                    <div className="relative flex-1">
-                      <select value={selModel} onChange={e => setSelModel(e.target.value)} className="flex-1 w-full appearance-none rounded-2xl border border-slate-200 bg-white px-4 py-3 pr-9 text-sm font-mono text-slate-900 shadow-sm cursor-pointer">
-                        {models.length === 0 && <option value="">请先配置渠道</option>}
-                        {modelList.real.length > 0 && (
-                          <optgroup label="实际模型">
-                            {modelList.real.map(m => <option key={m} value={m}>{m}</option>)}
-                          </optgroup>
-                        )}
-                        {modelList.mapped.length > 0 && (
-                          <optgroup label="映射模型">
-                            {modelList.mapped.map(m => <option key={m} value={m}>{m}</option>)}
-                          </optgroup>
-                        )}
-                      </select>
-                      <ChevronDown size={14} className="pointer-events-none absolute right-3 top-1/2 -translate-y-1/2 text-slate-400" />
-                    </div>
-                    <button onClick={() => selModel && copy(selModel, "model")} disabled={!selModel} className="action-secondary px-3 py-2 disabled:opacity-50">
-                      {copied === "model" ? <Check size={16} className="text-emerald-700" /> : <Copy size={16} />}
-                    </button>
+              </div>
+              <div>
+                <div className="mb-2 flex items-center gap-2 text-sm font-medium text-slate-600"><Bot size={14} /> Model</div>
+                <div className="flex gap-2">
+                  <div className="relative flex-1">
+                    <select value={selModel} onChange={e => setSelModel(e.target.value)} className="flex-1 w-full appearance-none rounded-2xl border border-slate-200 bg-white px-4 py-3 pr-9 text-sm font-mono text-slate-900 shadow-sm cursor-pointer">
+                      {models.length === 0 && <option value="">请先配置渠道</option>}
+                      {modelList.real.length > 0 && (
+                        <optgroup label="实际模型">
+                          {modelList.real.map(m => <option key={m} value={m}>{m}</option>)}
+                        </optgroup>
+                      )}
+                      {modelList.mapped.length > 0 && (
+                        <optgroup label="映射模型">
+                          {modelList.mapped.map(m => <option key={m} value={m}>{m}</option>)}
+                        </optgroup>
+                      )}
+                    </select>
+                    <ChevronDown size={14} className="pointer-events-none absolute right-3 top-1/2 -translate-y-1/2 text-slate-400" />
                   </div>
+                  <button onClick={() => selModel && copy(selModel, "model")} disabled={!selModel} className="action-secondary px-3 py-2 disabled:opacity-50">
+                    {copied === "model" ? <Check size={16} className="text-emerald-700" /> : <Copy size={16} />}
+                  </button>
                 </div>
               </div>
             </div>
@@ -225,7 +420,7 @@ public class XapiTest {
             </button>
           </div>
           <div className="surface-soft rounded-2xl p-4 text-sm text-slate-600">
-            将使用当前选中的 Base URL、Key 和 Model 发起一次标准 chat/completions 请求。
+            将使用当前选中的协议（<span className="font-medium text-slate-900">{protocolTabs.find(p => p.id === activeProtocol)?.label}</span>）、Base URL、Key 和 Model 发起一次测试请求。
           </div>
           {testResult && (
             <pre className={`mt-4 max-h-72 overflow-auto rounded-2xl border p-4 text-sm font-mono leading-6 whitespace-pre-wrap ${resultStyle}`}>{testResult}</pre>
@@ -234,7 +429,19 @@ public class XapiTest {
       </div>
 
       <div className="surface rounded-[24px] p-5">
-        <h2 className="mb-4 text-lg font-semibold text-slate-900">代码示例</h2>
+        <div className="mb-4 flex items-center justify-between">
+          <h2 className="text-lg font-semibold text-slate-900">代码示例</h2>
+          <div className="text-sm text-slate-500">{protocolTabs.find(p => p.id === activeProtocol)?.desc}</div>
+        </div>
+        {/* Protocol selector */}
+        <div className="mb-4 flex gap-2 overflow-x-auto border-b border-slate-200 pb-2">
+          {protocolTabs.map(p => (
+            <button key={p.id} onClick={() => setActiveProtocol(p.id)} className={`rounded-xl border-b-2 px-3 py-2 text-sm font-medium whitespace-nowrap transition-colors ${activeProtocol === p.id ? "border-blue-500 text-blue-700" : "border-transparent text-slate-500 hover:text-slate-900"}`}>
+              {p.label}
+            </button>
+          ))}
+        </div>
+        {/* Platform selector */}
         <div className="mb-4 flex gap-2 overflow-x-auto border-b border-slate-200 pb-2">
           {tabs.map(t => (
             <button key={t.id} onClick={() => setActiveTab(t.id)} className={`rounded-xl border-b-2 px-3 py-2 text-sm font-medium whitespace-nowrap transition-colors ${activeTab === t.id ? t.color : "border-transparent text-slate-500 hover:text-slate-900"}`}>
@@ -255,9 +462,9 @@ public class XapiTest {
               background: "#111827",
             }}
           >
-            {scripts[activeTab]}
+            {currentScripts[activeTab]}
           </SyntaxHighlighter>
-          <button onClick={() => copy(scripts[activeTab], activeTab)} className="absolute right-3 top-3 action-secondary px-3 py-2">
+          <button onClick={() => copy(currentScripts[activeTab], activeTab)} className="absolute right-3 top-3 action-secondary px-3 py-2">
             {copied === activeTab ? <Check size={14} className="text-emerald-700" /> : <Copy size={14} />}
           </button>
         </div>
