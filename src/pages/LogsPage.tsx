@@ -135,8 +135,11 @@ export function LogsPage() {
       api_key_name: filterApiKey || undefined,
       channel_name: filterChannel || undefined,
       model: filterModel || undefined,
-      date_from: filterDateFrom || undefined,
-      date_to: filterDateTo || undefined,
+      // created_at 存储为 UTC 完整时间戳（如 2026-07-20T12:34:56.789Z），
+      // 需把本地日期转换为覆盖当天 [00:00, 24:00) 的 UTC 时刻，否则
+      // "created_at <= 'YYYY-MM-DD'" 的字符串比较会漏掉结束日当天的全部日志
+      date_from: filterDateFrom ? new Date(`${filterDateFrom}T00:00:00`).toISOString() : undefined,
+      date_to: filterDateTo ? new Date(`${filterDateTo}T23:59:59.999`).toISOString() : undefined,
     })
       .then(setLogs)
       .catch(() => {})
