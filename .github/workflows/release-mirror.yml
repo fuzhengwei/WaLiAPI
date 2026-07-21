@@ -1,0 +1,100 @@
+name: Mirror Release to GitCode
+
+# 当 GitHub Release 发布完成后,把同一份产物同步到 gitcode
+# 这样国内用户访问 gitcode 上的 latest.json,签名用同一把私钥(产物内容完全一致,签名可复用)
+
+on:
+  release:
+    types: [published]
+
+jobs:
+  mirror:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: 解析 release tag
+        id: tag
+        run: |
+          TAG="${GITHUB_REF#refs/tags/}"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "Release tag: $TAG"
+
+      - name: 下载所有 Release 资产
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          mkdir -p assets
+          gh release download "${{ steps.tag.outputs.tag }}" \
+            --repo "${{ github.repository }}" \
+            --dir assets \
+            --clobber
+
+      - name: 检查 gitcode 仓库
+        env:
+          GITCODE_TOKEN: ${{ secrets.GITCODE_TOKEN }}
+        run: |
+          if [ -z "$GITCODE_TOKEN" ]; then
+            echo "::error::未配置 GITCODE_TOKEN,跳过镜像同步"
+            exit 0
+          fi
+
+          # gitcode API: https://gitcode.com/api/v3
+          # 验证仓库存在(自动处理 404)
+          HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" \
+            -H "PRIVATE-TOKEN: $GITCODE_TOKEN" \
+            "https://gitcode.com/api/v3/projects/fuzhengwei%2FWaLiAPI")
+          echo "gitcode repo HTTP: $HTTP_CODE"
+          if [ "$HTTP_CODE" != "200" ]; then
+            echo "::warning::gitcode 仓库 fuzhengwei/WaLiAPI 不存在或不可访问,跳过"
+            exit 0
+          fi
+
+      - name: 上传资产到 gitcode Release
+        env:
+          GITCODE_TOKEN: ${{ secrets.GITCODE_TOKEN }}
+          TAG: ${{ steps.tag.outputs.tag }}
+        run: |
+          if [ -z "$GITCODE_TOKEN" ]; then
+            exit 0
+          fi
+
+          # 1. 确保 gitcode 上有该 tag 的 release
+          # gitcode API 端点(基于 GitLab)
+          PROJECT_ID="fuzhengwei%2FWaLiAPI"
+          API="https://gitcode.com/api/v4/projects/${PROJECT_ID}"
+
+          # 查找现有 release
+          RELEASE_ID=$(curl -s \
+            -H "PRIVATE-TOKEN: $GITCODE_TOKEN" \
+            "${API}/releases/${TAG}" | jq -r '.id // empty')
+
+          if [ -z "$RELEASE_ID" ]; then
+            echo "创建 gitcode release: $TAG"
+            RELEASE_ID=$(curl -s -X POST \
+              -H "PRIVATE-TOKEN: $GITCODE_TOKEN" \
+              -F "tag_name=${TAG}" \
+              -F "name=WaLiAPI ${TAG}" \
+              -F "description=Mirror of GitHub release. 国内用户可从此下载。" \
+              "${API}/releases" | jq -r '.id // empty')
+          fi
+
+          if [ -z "$RELEASE_ID" ] || [ "$RELEASE_ID" = "null" ]; then
+            echo "::error::无法获取 gitcode release id,终止"
+            exit 1
+          fi
+
+          echo "gitcode release id: $RELEASE_ID"
+
+          # 2. 逐个上传资产
+          shopt -s nullglob
+          for f in assets/*; do
+            echo "上传: $(basename "$f")"
+            curl -s -X POST \
+              -H "PRIVATE-TOKEN: $GITCODE_TOKEN" \
+              -F "file=@${f}" \
+              "${API}/releases/${RELEASE_ID}/assets/uploads" \
+              | jq -r '.url // .markdown // "ok"' | head -1
+          done
+
+          echo "✓ gitcode 镜像同步完成"

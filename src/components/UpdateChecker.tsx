@@ -2,20 +2,75 @@ import { useEffect, useState } from "react";
 import { check, type Update } from "@tauri-apps/plugin-updater";
 import { relaunch } from "@tauri-apps/plugin-process";
 import { getVersion } from "@tauri-apps/api/app";
-import { X, Download, Loader2, RefreshCw, CheckCircle2, AlertCircle } from "lucide-react";
+import {
+  X,
+  Download,
+  Loader2,
+  RefreshCw,
+  CheckCircle2,
+  AlertCircle,
+  Globe,
+  Zap,
+} from "lucide-react";
+import {
+  SOURCES,
+  type UpdaterSource,
+} from "../lib/updater-sources";
 
 type Stage =
   | { kind: "idle" }
   | { kind: "checking" }
-  | { kind: "latest" }
-  | { kind: "available"; update: Update }
-  | { kind: "downloading"; update: Update; percent: number }
+  | { kind: "latest"; source: UpdaterSource }
+  | { kind: "available"; source: UpdaterSource; update: Update }
+  | { kind: "downloading"; source: UpdaterSource; update: Update; percent: number }
   | { kind: "ready" }
-  | { kind: "error"; message: string };
+  | { kind: "error"; message: string; probeResults?: ProbeResult[] };
+
+type ProbeResult = { source: UpdaterSource; status: "ok" | "fail"; latencyMs?: number };
+
+/**
+ * 探测所有源的网络情况(用于 UI 展示 + 决定默认源)。
+ * 实际下载走 Tauri 内置的 plugin-updater,会按 tauri.conf.json 的 endpoints 顺序自动 fallback。
+ */
+async function probeAllSources(): Promise<{
+  results: ProbeResult[];
+  firstOk: UpdaterSource | null;
+}> {
+  const results = await Promise.all(
+    SOURCES.map(async (s) => {
+      const start = performance.now();
+      try {
+        const ctrl = new AbortController();
+        const timer = setTimeout(() => ctrl.abort(), 3000);
+        const res = await fetch(s.latestJsonUrl, {
+          method: "HEAD",
+          signal: ctrl.signal,
+          cache: "no-store",
+        });
+        clearTimeout(timer);
+        if (res.ok || res.status === 405) {
+          return {
+            source: s,
+            status: "ok" as const,
+            latencyMs: Math.round(performance.now() - start),
+          };
+        }
+        return { source: s, status: "fail" as const };
+      } catch {
+        return { source: s, status: "fail" as const };
+      }
+    }),
+  );
+  return {
+    results,
+    firstOk: results.find((r) => r.status === "ok")?.source ?? null,
+  };
+}
 
 export function UpdateChecker({ onClose }: { onClose?: () => void }) {
   const [stage, setStage] = useState<Stage>({ kind: "idle" });
   const [currentVersion, setCurrentVersion] = useState("");
+  const [probeResults, setProbeResults] = useState<ProbeResult[]>([]);
 
   useEffect(() => {
     getVersion().then(setCurrentVersion).catch(() => {});
@@ -24,27 +79,51 @@ export function UpdateChecker({ onClose }: { onClose?: () => void }) {
   const startCheck = async () => {
     setStage({ kind: "checking" });
     try {
+      // 1. 探测所有源(只用于 UI 展示,不阻塞 check)
+      const { results, firstOk } = await probeAllSources();
+      setProbeResults(results);
+
+      if (!firstOk) {
+        setStage({
+          kind: "error",
+          message: "所有更新源均不可达,请检查网络后重试。",
+          probeResults: results,
+        });
+        return;
+      }
+
+      // 2. 调用 Tauri 内置 check() - 它会按 tauri.conf.json 的 endpoints 顺序自动 fallback
+      //    网络不可达的源会被它自动跳过,我们不需要在这里手动选
       const update = await check();
       if (update) {
-        setStage({ kind: "available", update });
+        setStage({ kind: "available", source: firstOk, update });
       } else {
-        setStage({ kind: "latest" });
+        setStage({ kind: "latest", source: firstOk });
       }
     } catch (e: any) {
-      setStage({ kind: "error", message: String(e) });
+      setStage({
+        kind: "error",
+        message: String(e?.message ?? e),
+        probeResults,
+      });
     }
   };
 
   // 打开即自动检查一次
   useEffect(() => {
     startCheck();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   const handleUpdate = async (update: Update) => {
-    let downloaded = 0;
-    let total = 0;
-    setStage({ kind: "downloading", update, percent: 0 });
+    const source =
+      stage.kind === "available" || stage.kind === "downloading"
+        ? stage.source
+        : SOURCES[0];
+    setStage({ kind: "downloading", source, update, percent: 0 });
     try {
+      let downloaded = 0;
+      let total = 0;
       await update.downloadAndInstall((event) => {
         if (event.event === "Started" && event.data.contentLength) {
           total = event.data.contentLength;
@@ -54,7 +133,7 @@ export function UpdateChecker({ onClose }: { onClose?: () => void }) {
             setStage((s) =>
               s.kind === "downloading"
                 ? { ...s, percent: Math.min(99, Math.round((downloaded / total) * 100)) }
-                : s
+                : s,
             );
           }
         } else if (event.event === "Finished") {
@@ -63,11 +142,12 @@ export function UpdateChecker({ onClose }: { onClose?: () => void }) {
       });
       setStage({ kind: "ready" });
     } catch (e: any) {
-      setStage({ kind: "error", message: String(e) });
+      setStage({ kind: "error", message: String(e?.message ?? e), probeResults });
     }
   };
 
-  // 状态卡片:高对比度、明确边界、清晰层级
+  // ===== UI 组件 =====
+
   const StatusCard = ({
     icon,
     title,
@@ -112,19 +192,86 @@ export function UpdateChecker({ onClose }: { onClose?: () => void }) {
     </div>
   );
 
+  // 更新源状态面板
+  const SourceIndicator = ({
+    showTitle = true,
+  }: {
+    showTitle?: boolean;
+  }) => {
+    if (probeResults.length === 0) return null;
+    return (
+      <div className="space-y-1.5">
+        {showTitle && (
+          <p className="text-[11px] uppercase tracking-wider text-white/40">
+            更新源探测
+          </p>
+        )}
+        {SOURCES.map((s) => {
+          const r = probeResults.find((x) => x.source.id === s.id);
+          const ok = r?.status === "ok";
+          return (
+            <div
+              key={s.id}
+              className={`flex items-center justify-between rounded-lg border px-3 py-1.5 text-[12px] ${
+                ok
+                  ? "border-emerald-400/25 bg-emerald-500/10 text-emerald-200"
+                  : "border-red-400/25 bg-red-500/10 text-red-200"
+              }`}
+            >
+              <div className="flex items-center gap-2">
+                {ok ? <CheckCircle2 size={13} /> : <AlertCircle size={13} />}
+                <span className="font-medium">{s.label}</span>
+              </div>
+              <span className="font-mono text-[11px] opacity-80">
+                {ok ? `${r?.latencyMs}ms` : "不可达"}
+              </span>
+            </div>
+          );
+        })}
+      </div>
+    );
+  };
+
+  // 当前所用源徽标
+  const CurrentSourceBadge = ({ source }: { source: UpdaterSource }) => {
+    const r = probeResults.find((x) => x.source.id === source.id);
+    const ok = r?.status === "ok";
+    return (
+      <div
+        className={`flex items-center gap-1.5 text-[12px] ${
+          ok ? "text-emerald-300" : "text-white/50"
+        }`}
+      >
+        {ok ? <Zap size={12} /> : <Globe size={12} />}
+        <span>检测源:</span>
+        <span className="font-medium text-white/90">{source.label}</span>
+        {ok && r?.latencyMs && (
+          <span className="font-mono text-[11px] text-white/50">
+            ({r.latencyMs}ms)
+          </span>
+        )}
+      </div>
+    );
+  };
+
   const content = (() => {
     switch (stage.kind) {
       case "idle":
       case "checking":
         return (
-          <StatusCard
-            icon={<Loader2 size={24} className="animate-spin text-sky-300" />}
-            title="正在检查更新"
-            subtitle="正在连接更新服务器,请稍候…"
-            tone="info"
-            iconBg="bg-sky-500/20"
-            borderColor="border-sky-400/30"
-          />
+          <>
+            <StatusCard
+              icon={<Loader2 size={24} className="animate-spin text-sky-300" />}
+              title="正在检查更新"
+              subtitle="正在探测可用更新源,请稍候…"
+              tone="info"
+              iconBg="bg-sky-500/20"
+              borderColor="border-sky-400/30"
+            />
+            <div className="mt-4">
+              <SourceIndicator />
+            </div>
+          </>
         );
       case "latest":
         return (
@@ -137,7 +284,16 @@ export function UpdateChecker({ onClose }: { onClose?: () => void }) {
               iconBg="bg-emerald-500/20"
               borderColor="border-emerald-400/30"
             />
-            <div className="mt-5 flex justify-end">
+            <div className="mt-3 flex justify-between">
+              <CurrentSourceBadge source={stage.source} />
+            </div>
+            <div className="mt-4 flex justify-end gap-2">
+              <button
+                onClick={startCheck}
+                className="flex items-center gap-1.5 rounded-lg bg-white/5 px-4 py-2 text-[13px] text-white/80 ring-1 ring-white/15 transition hover:bg-white/10"
+              >
+                <RefreshCw size={13} /> 重新检查
+              </button>
               <button
                 onClick={onClose}
                 className="rounded-lg bg-white/10 px-5 py-2 text-[14px] font-medium text-white ring-1 ring-white/20 transition hover:bg-white/20"
@@ -158,6 +314,9 @@ export function UpdateChecker({ onClose }: { onClose?: () => void }) {
               iconBg="bg-sky-500/20"
               borderColor="border-sky-400/30"
             />
+            <div className="rounded-lg bg-white/5 px-3 py-2">
+              <CurrentSourceBadge source={stage.source} />
+            </div>
             {stage.update.body && (
               <div className="max-h-32 overflow-y-auto rounded-xl border border-white/10 bg-black/30 p-3.5 text-[13px] leading-relaxed text-white/75 whitespace-pre-wrap">
                 {stage.update.body}
@@ -185,7 +344,7 @@ export function UpdateChecker({ onClose }: { onClose?: () => void }) {
             <StatusCard
               icon={<Download size={24} className="text-sky-300" />}
               title={`正在下载 v${stage.update.version}`}
-              subtitle="下载期间请勿关闭应用,完成后将自动准备安装。"
+              subtitle={`下载期间请勿关闭应用,完成后将自动准备安装。`}
               tone="info"
               iconBg="bg-sky-500/20"
               borderColor="border-sky-400/30"
@@ -244,6 +403,9 @@ export function UpdateChecker({ onClose }: { onClose?: () => void }) {
               iconBg="bg-red-500/20"
               borderColor="border-red-400/30"
             />
+            {stage.probeResults && stage.probeResults.length > 0 && (
+              <SourceIndicator showTitle={false} />
+            )}
             <div className="flex justify-end gap-2">
               <button
                 onClick={onClose}
@@ -274,7 +436,6 @@ export function UpdateChecker({ onClose }: { onClose?: () => void }) {
         className="relative w-full max-w-sm overflow-hidden rounded-2xl border border-white/10 bg-zinc-900/95 p-6 shadow-2xl shadow-black/60 ring-1 ring-white/5"
         onClick={(e) => e.stopPropagation()}
       >
-        {/* 顶部装饰光晕,提升卡片质感 */}
         <div className="pointer-events-none absolute -top-px left-1/2 h-px w-1/2 -translate-x-1/2 bg-gradient-to-r from-transparent via-sky-400/60 to-transparent" />
 
         <div className="mb-5 flex items-center justify-between">
