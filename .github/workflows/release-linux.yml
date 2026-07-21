@@ -63,7 +63,7 @@ jobs:
           tagName: waliapi-v__VERSION__
           releaseName: 'WaLiAPI v__VERSION__'
           releaseBody: 'See the assets to download this version and install.'
-          releaseDraft: true
+          releaseDraft: false
           prerelease: false
           args: '--target x86_64-unknown-linux-gnu'
 
