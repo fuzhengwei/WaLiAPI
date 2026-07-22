@@ -6,6 +6,11 @@
       "id": "github",
       "label": "GitHub",
       "latestJsonUrl": "https://github.com/fuzhengwei/WaLiAPI/releases/latest/download/latest.json"
+    },
+    {
+      "id": "gitcode",
+      "label": "GitCode",
+      "latestJsonUrl": "https://gitcode.com/fuzhengwei/WaLiAPI/releases/latest/download/latest.json"
     }
   ]
 }
