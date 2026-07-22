@@ -313,20 +313,20 @@ fn convert_responses_input_to_messages(input: &Value) -> Value {
 
 /// Convert OpenAI Chat Completions response to Anthropic Messages format.
 pub fn openai_to_anthropic(openai_resp: &Value, model: &str) -> Value {
-    let content = openai_resp
+    let choice = openai_resp
         .get("choices")
         .and_then(|c| c.as_array())
-        .and_then(|arr| arr.first())
-        .and_then(|choice| choice.get("message"))
+        .and_then(|arr| arr.first());
+
+    let message = choice.and_then(|ch| ch.get("message"));
+
+    let content_text = message
         .and_then(|msg| msg.get("content"))
         .and_then(|c| c.as_str())
         .unwrap_or("");
 
-    let finish_reason = openai_resp
-        .get("choices")
-        .and_then(|c| c.as_array())
-        .and_then(|arr| arr.first())
-        .and_then(|choice| choice.get("finish_reason"))
+    let finish_reason = choice
+        .and_then(|ch| ch.get("finish_reason"))
         .and_then(|f| f.as_str())
         .unwrap_or("stop");
 
@@ -348,15 +348,49 @@ pub fn openai_to_anthropic(openai_resp: &Value, model: &str) -> Value {
         .and_then(|t| t.as_u64())
         .unwrap_or(0);
 
+    // Build content array: text blocks + tool_use blocks
+    let mut content_blocks = Vec::new();
+
+    // Add text block if present
+    if !content_text.is_empty() {
+        content_blocks.push(serde_json::json!({
+            "type": "text",
+            "text": content_text
+        }));
+    }
+
+    // Add tool_use blocks for tool_calls
+    if let Some(tool_calls) = message.and_then(|m| m.get("tool_calls")).and_then(|t| t.as_array()) {
+        for tc in tool_calls {
+            let id = tc.get("id").and_then(|i| i.as_str()).unwrap_or("");
+            let func = tc.get("function");
+            let name = func.and_then(|f| f.get("name").and_then(|n| n.as_str())).unwrap_or("");
+            let arguments_str = func.and_then(|f| f.get("arguments").and_then(|a| a.as_str())).unwrap_or("{}");
+            let input: Value = serde_json::from_str(&arguments_str).unwrap_or(serde_json::json!({}));
+
+            content_blocks.push(serde_json::json!({
+                "type": "tool_use",
+                "id": id,
+                "name": name,
+                "input": input
+            }));
+        }
+    }
+
+    // If no content blocks at all, add empty text
+    if content_blocks.is_empty() {
+        content_blocks.push(serde_json::json!({
+            "type": "text",
+            "text": ""
+        }));
+    }
+
     serde_json::json!({
         "id": openai_resp.get("id").cloned().unwrap_or(Value::String(format!("msg_{}", uuid::Uuid::new_v4().simple()))),
         "type": "message",
         "role": "assistant",
         "model": model,
-        "content": [{
-            "type": "text",
-            "text": content
-        }],
+        "content": content_blocks,
         "stop_reason": stop_reason,
         "usage": {
             "input_tokens": input_tokens,
@@ -403,12 +437,79 @@ pub fn anthropic_to_openai(body: &Value) -> Value {
     if let Some(top_p) = body.get("top_p") {
         openai_body["top_p"] = top_p.clone();
     }
+    // Pass through top_k (OpenAI also supports this via some providers)
+    if let Some(top_k) = body.get("top_k") {
+        openai_body["top_k"] = top_k.clone();
+    }
+    // Pass through stop_sequences → stop
+    if let Some(stop_seq) = body.get("stop_sequences") {
+        openai_body["stop"] = stop_seq.clone();
+    }
+    // Note: thinking field is not forwarded to OpenAI API since most providers don't support it.
+    // It's safely ignored rather than causing an error.
+
+    // Convert Anthropic tools to OpenAI tools format
+    // Anthropic: {"name": "xxx", "description": "xxx", "input_schema": {...}}
+    // OpenAI: {"type": "function", "function": {"name": "xxx", "description": "xxx", "parameters": {...}}}
+    // Also handles Anthropic built-in tools (web_search, computer_use, etc.) which are skipped.
+    if let Some(tools) = body.get("tools").and_then(|t| t.as_array()) {
+        let openai_tools: Vec<Value> = tools.iter().filter_map(|tool| {
+            // Get the tool type — Anthropic custom tools use "custom" or have no type field
+            let tool_type = tool.get("type").and_then(|t| t.as_str()).unwrap_or("custom");
+            match tool_type {
+                // Standard function tools (type "custom" or no type)
+                "custom" | "" => {
+                    let name = tool.get("name").and_then(|n| n.as_str()).unwrap_or("");
+                    if name.is_empty() { return None; }
+                    let description = tool.get("description").and_then(|d| d.as_str()).unwrap_or("");
+                    let parameters = tool.get("input_schema").cloned().unwrap_or(serde_json::json!({}));
+                    Some(serde_json::json!({
+                        "type": "function",
+                        "function": {
+                            "name": name,
+                            "description": description,
+                            "parameters": parameters
+                        }
+                    }))
+                }
+                // Built-in tools (web_search_*, computer_*, bash_*, text_editor_*, etc.) — skip
+                _ => None
+            }
+        }).collect();
+        if !openai_tools.is_empty() {
+            openai_body["tools"] = Value::Array(openai_tools);
+        }
+    }
+
+    // Convert tool_choice
+    // Anthropic: {"type": "auto"} or {"type": "any"} or {"type": "tool", "name": "xxx"}
+    // OpenAI: "auto" or "required" or {"type": "function", "function": {"name": "xxx"}}
+    if let Some(tc) = body.get("tool_choice") {
+        if let Some(tc_type) = tc.get("type").and_then(|t| t.as_str()) {
+            let openai_tc = match tc_type {
+                "auto" => Value::String("auto".to_string()),
+                "any" => Value::String("required".to_string()),
+                "tool" => {
+                    let name = tc.get("name").and_then(|n| n.as_str()).unwrap_or("");
+                    serde_json::json!({
+                        "type": "function",
+                        "function": {"name": name}
+                    })
+                }
+                _ => Value::String("auto".to_string()),
+            };
+            openai_body["tool_choice"] = openai_tc;
+        } else if let Some(s) = tc.as_str() {
+            openai_body["tool_choice"] = Value::String(s.to_string());
+        }
+    }
 
     openai_body
 }
 
 /// Convert Anthropic messages array to OpenAI messages array.
 /// Anthropic content can be string or array of content blocks.
+/// Handles: text, tool_use (assistant), tool_result (user)
 fn convert_anthropic_messages_to_openai(messages: &Value, system: Option<String>) -> Value {
     let mut msgs = Vec::new();
 
@@ -420,25 +521,108 @@ fn convert_anthropic_messages_to_openai(messages: &Value, system: Option<String>
     if let Some(arr) = messages.as_array() {
         for msg in arr {
             let role = msg.get("role").and_then(|r| r.as_str()).unwrap_or("user").to_string();
-            let content = if let Some(content_arr) = msg.get("content").and_then(|c| c.as_array()) {
-                // Extract text from content blocks
-                let texts: Vec<String> = content_arr.iter().filter_map(|block| {
-                    if block.get("type").and_then(|t| t.as_str()) == Some("text") {
-                        block.get("text").and_then(|t| t.as_str()).map(|s| s.to_string())
-                    } else {
-                        None
+
+            if let Some(content_arr) = msg.get("content").and_then(|c| c.as_array()) {
+                // Complex content: may contain text, tool_use, or tool_result blocks
+                let mut text_parts: Vec<String> = Vec::new();
+                let mut tool_calls: Vec<Value> = Vec::new();
+                let mut tool_results: Vec<Value> = Vec::new();
+
+                for block in content_arr {
+                    match block.get("type").and_then(|t| t.as_str()).unwrap_or("") {
+                        "text" => {
+                            if let Some(t) = block.get("text").and_then(|t| t.as_str()) {
+                                text_parts.push(t.to_string());
+                            }
+                        }
+                        "tool_use" => {
+                            // Anthropic tool_use → OpenAI assistant tool_calls
+                            let id = block.get("id").and_then(|i| i.as_str()).unwrap_or("");
+                            let name = block.get("name").and_then(|n| n.as_str()).unwrap_or("");
+                            let input = block.get("input").cloned().unwrap_or(serde_json::json!({}));
+                            let arguments = serde_json::to_string(&input).unwrap_or_default();
+                            tool_calls.push(serde_json::json!({
+                                "id": id,
+                                "type": "function",
+                                "function": {
+                                    "name": name,
+                                    "arguments": arguments
+                                }
+                            }));
+                        }
+                        "thinking" => {
+                            // Anthropic thinking block — extract text, prepend to message content
+                            // OpenAI doesn't have a native thinking block, so we include it as text
+                            if let Some(t) = block.get("thinking").and_then(|t| t.as_str()) {
+                                text_parts.push(t.to_string());
+                            }
+                        }
+                        "image" => {
+                            // Anthropic image block — skip for now (would need URL conversion)
+                            // Future: convert to OpenAI image_url format
+                        }
+                        "tool_result" => {
+                            // Anthropic tool_result → OpenAI tool message
+                            let tool_use_id = block.get("tool_use_id").and_then(|t| t.as_str()).unwrap_or("");
+                            let result_content = if let Some(rc) = block.get("content").and_then(|c| c.as_array()) {
+                                // Extract text from result content blocks
+                                let texts: Vec<String> = rc.iter().filter_map(|b| {
+                                    b.get("text").and_then(|t| t.as_str()).map(|s| s.to_string())
+                                }).collect();
+                                texts.join("")
+                            } else if let Some(s) = block.get("content").and_then(|c| c.as_str()) {
+                                s.to_string()
+                            } else {
+                                String::new()
+                            };
+                            tool_results.push(serde_json::json!({
+                                "role": "tool",
+                                "tool_call_id": tool_use_id,
+                                "content": result_content
+                            }));
+                        }
+                        _ => {}
                     }
-                }).collect();
-                Value::String(texts.join(""))
+                }
+
+                if !tool_calls.is_empty() {
+                    // Assistant message with tool_calls
+                    let content = if text_parts.is_empty() { Value::Null } else { Value::String(text_parts.join("")) };
+                    msgs.push(serde_json::json!({
+                        "role": role,
+                        "content": content,
+                        "tool_calls": tool_calls
+                    }));
+                } else if !tool_results.is_empty() {
+                    // Tool result messages (may be multiple)
+                    // If there's also text, add it as a preceding user message
+                    if !text_parts.is_empty() {
+                        msgs.push(serde_json::json!({
+                            "role": role,
+                            "content": text_parts.join("")
+                        }));
+                    }
+                    for tr in tool_results {
+                        msgs.push(tr);
+                    }
+                } else {
+                    // Plain text message
+                    msgs.push(serde_json::json!({
+                        "role": role,
+                        "content": text_parts.join("")
+                    }));
+                }
             } else if let Some(s) = msg.get("content").and_then(|c| c.as_str()) {
-                Value::String(s.to_string())
+                msgs.push(serde_json::json!({
+                    "role": role,
+                    "content": s.to_string(),
+                }));
             } else {
-                msg.get("content").cloned().unwrap_or(Value::String(String::new()))
-            };
-            msgs.push(serde_json::json!({
-                "role": role,
-                "content": content,
-            }));
+                msgs.push(serde_json::json!({
+                    "role": role,
+                    "content": msg.get("content").cloned().unwrap_or(Value::String(String::new())),
+                }));
+            }
         }
     }
 
