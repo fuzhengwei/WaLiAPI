@@ -134,19 +134,60 @@ pub fn responses_to_openai(body: &Value) -> Value {
     if let Some(top_p) = body.get("top_p") {
         openai_body["top_p"] = top_p.clone();
     }
-    // Pass through tools (convert Responses tool format to OpenAI function tool format)
+    // Convert Responses API tools to Chat Completions tools format.
+    // Responses API uses flat format: { type: "function", name, parameters, description }
+    // Chat Completions uses nested format: { type: "function", function: { name, parameters, description } }
     if let Some(tools) = body.get("tools") {
         if let Some(arr) = tools.as_array() {
             let openai_tools: Vec<Value> = arr.iter().filter_map(|t| {
-                // Only convert function-type tools, skip built-in tools (web_search, file_search, etc.)
-                if t.get("type").and_then(|ty| ty.as_str()) == Some("function") {
-                    Some(t.clone())
-                } else {
-                    None
+                let tool_type = t.get("type").and_then(|ty| ty.as_str()).unwrap_or("");
+                match tool_type {
+                    // Function tools: convert flat → nested
+                    "function" => {
+                        // Already in Chat Completions format (has "function" field) — pass through
+                        if t.get("function").is_some() {
+                            return Some(t.clone());
+                        }
+                        // Responses API flat format → convert to Chat Completions nested format
+                        let func = serde_json::json!({
+                            "name": t.get("name").cloned().unwrap_or(Value::Null),
+                            "parameters": t.get("parameters").cloned().unwrap_or(Value::Null),
+                        });
+                        let mut func_obj = func;
+                        if let Some(desc) = t.get("description") {
+                            func_obj["description"] = desc.clone();
+                        }
+                        if let Some(strict) = t.get("strict") {
+                            func_obj["strict"] = strict.clone();
+                        }
+                        Some(serde_json::json!({
+                            "type": "function",
+                            "function": func_obj
+                        }))
+                    }
+                    // Built-in tools (web_search, file_search, computer_use, etc.) — skip
+                    _ => None
                 }
             }).collect();
             if !openai_tools.is_empty() {
                 openai_body["tools"] = Value::Array(openai_tools);
+            }
+        }
+    }
+
+    // Pass through tool_choice (format is the same between Responses and Chat Completions)
+    if let Some(tc) = body.get("tool_choice") {
+        openai_body["tool_choice"] = tc.clone();
+    }
+
+    // Pass through instructions as a system message if present
+    if let Some(instructions) = body.get("instructions").and_then(|i| i.as_str()) {
+        if !instructions.is_empty() {
+            if let Some(msgs) = openai_body.get_mut("messages").and_then(|m| m.as_array_mut()) {
+                msgs.insert(0, serde_json::json!({
+                    "role": "system",
+                    "content": instructions
+                }));
             }
         }
     }

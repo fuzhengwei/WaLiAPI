@@ -125,14 +125,14 @@ pub fn sanitize_messages(mut body: serde_json::Value) -> serde_json::Value {
         None => return body,
     };
 
-    messages.retain(|msg| {
+    // First pass: normalize content for assistant messages with tool_calls but empty content
+    for msg in messages.iter_mut() {
         let role = msg.get("role").and_then(|r| r.as_str()).unwrap_or("");
         if role != "assistant" {
-            return true;
+            continue;
         }
 
-        let content = msg.get("content");
-        let is_empty_content = match content {
+        let is_empty_content = match msg.get("content") {
             None => true,
             Some(serde_json::Value::Null) => true,
             Some(serde_json::Value::String(s)) => s.is_empty(),
@@ -146,18 +146,35 @@ pub fn sanitize_messages(mut body: serde_json::Value) -> serde_json::Value {
             .map(|a| !a.is_empty())
             .unwrap_or(false);
 
-        if is_empty_content && !has_tool_calls {
-            // Drop empty assistant messages without tool calls
-            false
-        } else if is_empty_content && has_tool_calls {
-            // Keep but normalize content to null
+        if is_empty_content && has_tool_calls {
             if let Some(obj) = msg.as_object_mut() {
                 obj.insert("content".to_string(), serde_json::Value::Null);
             }
-            true
-        } else {
-            true
         }
+    }
+
+    // Second pass: remove assistant messages with empty content and no tool_calls
+    messages.retain(|msg| {
+        let role = msg.get("role").and_then(|r| r.as_str()).unwrap_or("");
+        if role != "assistant" {
+            return true;
+        }
+
+        let is_empty_content = match msg.get("content") {
+            None => true,
+            Some(serde_json::Value::Null) => true,
+            Some(serde_json::Value::String(s)) => s.is_empty(),
+            Some(serde_json::Value::Array(a)) => a.is_empty(),
+            _ => false,
+        };
+
+        let has_tool_calls = msg
+            .get("tool_calls")
+            .and_then(|t| t.as_array())
+            .map(|a| !a.is_empty())
+            .unwrap_or(false);
+
+        !(is_empty_content && !has_tool_calls)
     });
 
     body
