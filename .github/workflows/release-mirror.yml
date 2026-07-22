@@ -1,19 +1,26 @@
 name: Mirror Release to GitCode
 
-# 当 GitHub Release 发布后,自动把产物同步到 gitcode
+# 在 Release 构建完成后,自动把产物同步到 gitcode
 # 国内用户访问 gitcode 上的 latest.json,签名用同一把私钥(产物完全一致,签名可复用)
 
 on:
-  release:
-    types: [published]
+  workflow_run:
+    workflows: ["Release macOS ARM64", "Release Windows", "Release Linux"]
+    types: [completed]
+    branches:
+      - 'macos-arm64-v*'
+      - 'all-win-v*'
+      - 'linux-v*'
 
 # 同一 release tag 只同步一次(多平台发布时去重)
 concurrency:
-  group: mirror-gitcode-${{ github.event.release.tag_name }}
+  group: mirror-gitcode-${{ github.event.workflow_run.head_branch }}
   cancel-in-progress: false
 
 jobs:
   mirror:
+    # 只在构建成功时运行
+    if: ${{ github.event.workflow_run.conclusion == 'success' }}
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -21,7 +28,15 @@ jobs:
       - name: 解析 release tag
         id: tag
         run: |
-          TAG="${{ github.event.release.tag_name }}"
+          # 从触发分支名提取版本号
+          BRANCH="${{ github.event.workflow_run.head_branch }}"
+          echo "触发分支: $BRANCH"
+
+          # tauri-action 创建的 release tag 格式: waliapi-v{version}
+          # 触发分支格式: macos-arm64-v0.1.2 / all-win-v0.1.2 / linux-v0.1.2
+          # 提取版本号
+          VERSION=$(echo "$BRANCH" | sed -E 's/^[a-z0-9-]+-v//')
+          TAG="waliapi-v${VERSION}"
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
           echo "Release tag: $TAG"
 
@@ -44,6 +59,14 @@ jobs:
           TAG: ${{ steps.tag.outputs.tag }}
         run: |
           mkdir -p assets
+
+          # 检查 release 是否存在
+          if ! gh release view "${TAG}" --repo "${{ github.repository }}" > /dev/null 2>&1; then
+            echo "::warning::Release ${TAG} 不存在,跳过"
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
           gh release download "${TAG}" \
             --repo "${{ github.repository }}" \
             --dir assets \
@@ -57,19 +80,30 @@ jobs:
           GITCODE_TOKEN: ${{ secrets.GITCODE_TOKEN }}
           TAG: ${{ steps.tag.outputs.tag }}
         run: |
+          if [ -z "$GITCODE_TOKEN" ]; then
+            exit 0
+          fi
+
+          # 检查 assets 目录是否有文件
+          if [ -z "$(ls -A assets/ 2>/dev/null)" ]; then
+            echo "::warning::没有可同步的资产,跳过"
+            exit 0
+          fi
+
           PROJECT_ID="fuzhengwei%2FWaLiAPI"
           API="https://gitcode.com/api/v4/projects/${PROJECT_ID}"
 
           # 1. 查找现有 release
-          RELEASE_ID=$(curl -s \
-            -H "PRIVATE-TOKEN: $GITCODE_TOKEN" \
-            "${API}/releases/${TAG}" | jq -r '.id // empty')
+          RELEASE_RESP=$(curl -s \
+            -H "PRIVATE-TOKEN: ${GITCODE_TOKEN}" \
+            "${API}/releases/${TAG}")
+          RELEASE_ID=$(echo "$RELEASE_RESP" | jq -r '.id // empty')
 
           # 2. 不存在则创建
           if [ -z "$RELEASE_ID" ] || [ "$RELEASE_ID" = "null" ]; then
             echo "创建 gitcode release: $TAG"
             CREATE_RESP=$(curl -s -X POST \
-              -H "PRIVATE-TOKEN: $GITCODE_TOKEN" \
+              -H "PRIVATE-TOKEN: ${GITCODE_TOKEN}" \
               -H "Content-Type: application/json" \
               -d "{\"tag_name\":\"${TAG}\",\"name\":\"WaLiAPI ${TAG}\",\"description\":\"Mirror of GitHub release. 国内用户可从此下载。\"}" \
               "${API}/releases")
@@ -84,28 +118,28 @@ jobs:
 
           echo "gitcode release id: $RELEASE_ID"
 
-          # 3. 逐个上传资产
+          # 3. 获取已存在的资产列表(去重)
+          EXISTING_LINKS=$(curl -s \
+            -H "PRIVATE-TOKEN: ${GITCODE_TOKEN}" \
+            "${API}/releases/${TAG}/assets/links" | jq -r '.[].name')
+
+          # 4. 逐个上传资产
           UPLOADED=0
           shopt -s nullglob
           for f in assets/*; do
             FNAME=$(basename "$f")
-            echo "上传: $FNAME"
+            echo "处理: $FNAME"
 
-            # 检查资产是否已存在(去重)
-            EXISTING=$(curl -s \
-              -H "PRIVATE-TOKEN: $GITCODE_TOKEN" \
-              "${API}/releases/${TAG}/assets/links" | \
-              jq -r --arg name "$FNAME" '.[] | select(.name == $name) | .id')
-
-            if [ -n "$EXISTING" ]; then
+            # 检查是否已存在
+            if echo "$EXISTING_LINKS" | grep -qFx "$FNAME"; then
               echo "  → 已存在,跳过"
               UPLOADED=$((UPLOADED + 1))
               continue
             fi
 
-            # 上传文件
+            # 上传文件到 gitcode
             UPLOAD_RESP=$(curl -s -X POST \
-              -H "PRIVATE-TOKEN: $GITCODE_TOKEN" \
+              -H "PRIVATE-TOKEN: ${GITCODE_TOKEN}" \
               -F "file=@${f}" \
               "${API}/uploads")
             FILE_URL=$(echo "$UPLOAD_RESP" | jq -r '.url // empty')
@@ -117,7 +151,7 @@ jobs:
 
             # 关联到 release
             curl -s -X POST \
-              -H "PRIVATE-TOKEN: $GITCODE_TOKEN" \
+              -H "PRIVATE-TOKEN: ${GITCODE_TOKEN}" \
               -H "Content-Type: application/json" \
               -d "{\"name\":\"${FNAME}\",\"url\":\"${FILE_URL}\",\"link_type\":\"other\"}" \
               "${API}/releases/${TAG}/assets/links" | jq -r '.name // "ok"' | head -1
@@ -127,4 +161,4 @@ jobs:
 
           echo ""
           echo "✓ gitcode 镜像同步完成: $UPLOADED 个文件"
-          echo "  → https://gitcode.com/${PROJECT_ID//%2F//}/releases/${TAG}"
+          echo "  → https://gitcode.com/fuzhengwei/WaLiAPI/releases/${TAG}"
