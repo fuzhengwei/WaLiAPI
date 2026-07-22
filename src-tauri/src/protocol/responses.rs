@@ -10,6 +10,7 @@ use serde_json::Value;
 /// Responses API stream events:
 /// - response.created
 /// - response.output_text.delta (for content deltas)
+/// - response.function_call_arguments.delta (for tool call argument deltas)
 /// - response.completed
 ///
 /// This function takes a raw SSE chunk text and returns a list of event strings to emit.
@@ -44,6 +45,41 @@ pub fn convert_openai_sse_to_responses(chunk_text: &str, model: &str, response_i
                                 "delta": content
                             });
                             events.push(format!("event: response.output_text.delta\ndata: {}\n\n", event));
+                        }
+                    }
+
+                    // Tool calls delta — emit function_call events
+                    if let Some(tool_calls) = delta.get("tool_calls").and_then(|t| t.as_array()) {
+                        for tc in tool_calls {
+                            let index = tc.get("index").and_then(|i| i.as_u64()).unwrap_or(0);
+                            let tc_id = tc.get("id").and_then(|i| i.as_str()).unwrap_or("");
+                            let func = tc.get("function");
+                            let name = func.and_then(|f| f.get("name")).and_then(|n| n.as_str()).unwrap_or("");
+                            let arguments = func.and_then(|f| f.get("arguments")).and_then(|a| a.as_str()).unwrap_or("");
+
+                            // If this delta has an id and name, it's the first chunk of a tool call
+                            // → emit function_call event with name
+                            if !tc_id.is_empty() && !name.is_empty() {
+                                let event = serde_json::json!({
+                                    "type": "response.function_call",
+                                    "response_id": response_id,
+                                    "call_id": tc_id,
+                                    "name": name,
+                                    "arguments": ""
+                                });
+                                events.push(format!("event: response.function_call\ndata: {}\n\n", event));
+                            }
+
+                            // If this delta has argument fragments, emit delta event
+                            if !arguments.is_empty() {
+                                let event = serde_json::json!({
+                                    "type": "response.function_call_arguments.delta",
+                                    "response_id": response_id,
+                                    "item_id": format!("fc_{}", index),
+                                    "delta": arguments
+                                });
+                                events.push(format!("event: response.function_call_arguments.delta\ndata: {}\n\n", event));
+                            }
                         }
                     }
                 }

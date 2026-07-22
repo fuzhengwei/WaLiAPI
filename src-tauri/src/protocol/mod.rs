@@ -50,20 +50,20 @@ pub fn is_responses_request(body: &Value) -> bool {
 
 /// Convert OpenAI Chat Completions response to Responses API format.
 pub fn openai_to_responses(openai_resp: &Value, model: &str) -> Value {
-    let content = openai_resp
+    let choice = openai_resp
         .get("choices")
         .and_then(|c| c.as_array())
-        .and_then(|arr| arr.first())
-        .and_then(|choice| choice.get("message"))
+        .and_then(|arr| arr.first());
+
+    let message = choice.and_then(|ch| ch.get("message"));
+
+    let content = message
         .and_then(|msg| msg.get("content"))
         .and_then(|c| c.as_str())
         .unwrap_or("");
 
-    let finish_reason = openai_resp
-        .get("choices")
-        .and_then(|c| c.as_array())
-        .and_then(|arr| arr.first())
-        .and_then(|choice| choice.get("finish_reason"))
+    let finish_reason = choice
+        .and_then(|ch| ch.get("finish_reason"))
         .and_then(|f| f.as_str())
         .unwrap_or("stop");
 
@@ -78,12 +78,29 @@ pub fn openai_to_responses(openai_resp: &Value, model: &str) -> Value {
         .and_then(|t| t.as_u64())
         .unwrap_or(0);
 
-    serde_json::json!({
-        "id": openai_resp.get("id").cloned().unwrap_or(Value::String(format!("resp_{}", uuid::Uuid::new_v4()))),
-        "object": "response",
-        "created_at": chrono::Utc::now().timestamp(),
-        "model": model,
-        "output": [{
+    // Build output array: message + function_call items
+    let mut output = Vec::new();
+
+    // Add function_call outputs for tool_calls
+    if let Some(tool_calls) = message.and_then(|m| m.get("tool_calls")).and_then(|t| t.as_array()) {
+        for tc in tool_calls {
+            let name = tc.get("function").and_then(|f| f.get("name")).and_then(|n| n.as_str()).unwrap_or("");
+            let arguments = tc.get("function").and_then(|f| f.get("arguments")).and_then(|a| a.as_str()).unwrap_or("");
+            let call_id = tc.get("id").and_then(|i| i.as_str()).unwrap_or("");
+            output.push(serde_json::json!({
+                "id": format!("fc_{}", uuid::Uuid::new_v4().simple()),
+                "type": "function_call",
+                "call_id": call_id,
+                "name": name,
+                "arguments": arguments,
+                "status": "completed"
+            }));
+        }
+    }
+
+    // Add text message output (always include, even if empty when tool_calls present)
+    if !content.is_empty() || output.is_empty() {
+        output.push(serde_json::json!({
             "id": format!("msg_{}", uuid::Uuid::new_v4().simple()),
             "type": "message",
             "role": "assistant",
@@ -92,7 +109,15 @@ pub fn openai_to_responses(openai_resp: &Value, model: &str) -> Value {
                 "text": content
             }],
             "status": "completed"
-        }],
+        }));
+    }
+
+    serde_json::json!({
+        "id": openai_resp.get("id").cloned().unwrap_or(Value::String(format!("resp_{}", uuid::Uuid::new_v4()))),
+        "object": "response",
+        "created_at": chrono::Utc::now().timestamp(),
+        "model": model,
+        "output": output,
         "usage": {
             "input_tokens": prompt_tokens,
             "output_tokens": completion_tokens,
@@ -196,41 +221,83 @@ pub fn responses_to_openai(body: &Value) -> Value {
 }
 
 /// Convert Responses API `input` array to OpenAI `messages` array.
+/// Handles: message, function_call (assistant tool call), function_call_output (tool result)
 fn convert_responses_input_to_messages(input: &Value) -> Value {
     let messages = if let Some(arr) = input.as_array() {
         let mut msgs = Vec::new();
         for item in arr {
-            // Each item can be a message: {type: "message", role: "user", content: [{type: "input_text", text: "..."}]}
-            if item.get("type").and_then(|t| t.as_str()) == Some("message") || item.get("role").is_some() {
-                let role = item.get("role").and_then(|r| r.as_str()).unwrap_or("user").to_string();
-                let content = if let Some(content_arr) = item.get("content").and_then(|c| c.as_array()) {
-                    // Extract text from content blocks
-                    let texts: Vec<String> = content_arr.iter().filter_map(|block| {
-                        // input_text, output_text, text
-                        block.get("text").and_then(|t| t.as_str()).map(|s| s.to_string())
-                    }).collect();
-                    Value::String(texts.join(""))
-                } else if let Some(text) = item.get("content").and_then(|c| c.as_str()) {
-                    Value::String(text.to_string())
-                } else {
-                    Value::String(String::new())
-                };
-                msgs.push(serde_json::json!({
-                    "role": role,
-                    "content": content,
-                }));
-            } else if let Some(text) = item.get("text").and_then(|t| t.as_str()) {
-                // Simple string input or {type: "input_text", text: "..."}
-                msgs.push(serde_json::json!({
-                    "role": "user",
-                    "content": text,
-                }));
-            } else if let Some(s) = item.as_str() {
+            let item_type = item.get("type").and_then(|t| t.as_str()).unwrap_or("");
+
+            match item_type {
+                // function_call: assistant's tool call → OpenAI assistant message with tool_calls
+                "function_call" => {
+                    let name = item.get("name").and_then(|n| n.as_str()).unwrap_or("");
+                    let arguments = item.get("arguments").and_then(|a| a.as_str()).unwrap_or("");
+                    let call_id = item.get("call_id").and_then(|c| c.as_str()).unwrap_or("");
+                    msgs.push(serde_json::json!({
+                        "role": "assistant",
+                        "content": null,
+                        "tool_calls": [{
+                            "id": call_id,
+                            "type": "function",
+                            "function": {
+                                "name": name,
+                                "arguments": arguments
+                            }
+                        }]
+                    }));
+                }
+
+                // function_call_output: tool result → OpenAI tool message
+                "function_call_output" => {
+                    let call_id = item.get("call_id").and_then(|c| c.as_str()).unwrap_or("");
+                    let output = item.get("output").and_then(|o| o.as_str()).unwrap_or("");
+                    msgs.push(serde_json::json!({
+                        "role": "tool",
+                        "tool_call_id": call_id,
+                        "content": output
+                    }));
+                }
+
+                // message: standard chat message
+                "message" | _ if item.get("role").is_some() => {
+                    let role = item.get("role").and_then(|r| r.as_str()).unwrap_or("user").to_string();
+                    let content = if let Some(content_arr) = item.get("content").and_then(|c| c.as_array()) {
+                        // Extract text from content blocks
+                        let texts: Vec<String> = content_arr.iter().filter_map(|block| {
+                            // input_text, output_text, text
+                            block.get("text").and_then(|t| t.as_str()).map(|s| s.to_string())
+                        }).collect();
+                        Value::String(texts.join(""))
+                    } else if let Some(text) = item.get("content").and_then(|c| c.as_str()) {
+                        Value::String(text.to_string())
+                    } else {
+                        Value::String(String::new())
+                    };
+                    msgs.push(serde_json::json!({
+                        "role": role,
+                        "content": content,
+                    }));
+                }
+
+                // Simple text item
+                _ if item.get("text").is_some() => {
+                    let text = item.get("text").and_then(|t| t.as_str()).unwrap_or("");
+                    msgs.push(serde_json::json!({
+                        "role": "user",
+                        "content": text,
+                    }));
+                }
+
                 // Raw string input
-                msgs.push(serde_json::json!({
-                    "role": "user",
-                    "content": s,
-                }));
+                _ => {
+                    if let Some(s) = item.as_str() {
+                        msgs.push(serde_json::json!({
+                            "role": "user",
+                            "content": s,
+                        }));
+                    }
+                }
             }
         }
         msgs
