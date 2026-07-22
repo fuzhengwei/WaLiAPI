@@ -1,8 +1,5 @@
-// 更新源配置(共享给前端 UI + Rust 构建时)
-// 实际下载走 Tauri plugin-updater,会按 tauri.conf.json 的 endpoints 顺序自动 fallback。
-// 本文件仅用于前端 UI 展示(探测网络延迟 + 标识当前使用的源)。
-
-import sourcesJson from "../../src-tauri/updater-config.json";
+// 更新源配置 - 当前仅 GitHub 单源
+// 如需添加镜像源,在 updater-config.json 中添加,并在 tauri.conf.json endpoints 中同步配置
 
 export type UpdaterSource = {
   id: string;
@@ -10,5 +7,6 @@ export type UpdaterSource = {
   latestJsonUrl: string;
 };
 
+import sourcesJson from "../../src-tauri/updater-config.json";
+
 export const SOURCES: UpdaterSource[] = sourcesJson.sources as UpdaterSource[];
-export const PROBE_TIMEOUT_MS: number = sourcesJson.probeTimeoutMs ?? 3000;
