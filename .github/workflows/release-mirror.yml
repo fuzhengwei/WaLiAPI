@@ -19,7 +19,6 @@ concurrency:
 
 jobs:
   mirror:
-    # 只在构建成功时运行
     if: ${{ github.event.workflow_run.conclusion == 'success' }}
     runs-on: ubuntu-latest
     permissions:
@@ -28,13 +27,8 @@ jobs:
       - name: 解析 release tag
         id: tag
         run: |
-          # 从触发分支名提取版本号
           BRANCH="${{ github.event.workflow_run.head_branch }}"
           echo "触发分支: $BRANCH"
-
-          # tauri-action 创建的 release tag 格式: waliapi-v{version}
-          # 触发分支格式: macos-arm64-v0.1.2 / all-win-v0.1.2 / linux-v0.1.2
-          # 提取版本号
           VERSION=$(echo "$BRANCH" | sed -E 's/^[a-z0-9-]+-v//')
           TAG="waliapi-v${VERSION}"
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
@@ -46,119 +40,159 @@ jobs:
           GITCODE_TOKEN: ${{ secrets.GITCODE_TOKEN }}
         run: |
           if [ -z "$GITCODE_TOKEN" ]; then
-            echo "::warning::未配置 GITCODE_TOKEN,跳过镜像同步"
+            echo "::warning::未配置 GITCODE_TOKEN,跳过"
             echo "skip=true" >> "$GITHUB_OUTPUT"
           else
             echo "skip=false" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: 下载所有 Release 资产
+      - name: 下载 Release 资产
         if: steps.check.outputs.skip != 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG: ${{ steps.tag.outputs.tag }}
         run: |
           mkdir -p assets
-
-          # 检查 release 是否存在
           if ! gh release view "${TAG}" --repo "${{ github.repository }}" > /dev/null 2>&1; then
             echo "::warning::Release ${TAG} 不存在,跳过"
             echo "skip=true" >> "$GITHUB_OUTPUT"
             exit 0
           fi
-
-          gh release download "${TAG}" \
-            --repo "${{ github.repository }}" \
-            --dir assets \
-            --clobber
+          gh release download "${TAG}" --repo "${{ github.repository }}" --dir assets --clobber
           echo "下载的文件:"
           ls -lh assets/
 
-      - name: 上传资产到 gitcode Release
+      - name: 同步到 gitcode
         if: steps.check.outputs.skip != 'true'
         env:
           GITCODE_TOKEN: ${{ secrets.GITCODE_TOKEN }}
           TAG: ${{ steps.tag.outputs.tag }}
         run: |
-          if [ -z "$GITCODE_TOKEN" ]; then
-            exit 0
-          fi
-
-          # 检查 assets 目录是否有文件
+          if [ -z "$GITCODE_TOKEN" ]; then exit 0; fi
           if [ -z "$(ls -A assets/ 2>/dev/null)" ]; then
-            echo "::warning::没有可同步的资产,跳过"
+            echo "::warning::没有可同步的资产"
             exit 0
           fi
 
           PROJECT_ID="fuzhengwei%2FWaLiAPI"
           API="https://gitcode.com/api/v4/projects/${PROJECT_ID}"
+          AUTH="-H PRIVATE-TOKEN:${GITCODE_TOKEN}"
 
-          # 1. 查找现有 release
-          RELEASE_RESP=$(curl -s \
-            -H "PRIVATE-TOKEN: ${GITCODE_TOKEN}" \
-            "${API}/releases/${TAG}")
-          RELEASE_ID=$(echo "$RELEASE_RESP" | jq -r '.id // empty')
-
-          # 2. 不存在则创建
-          if [ -z "$RELEASE_ID" ] || [ "$RELEASE_ID" = "null" ]; then
-            echo "创建 gitcode release: $TAG"
-            CREATE_RESP=$(curl -s -X POST \
-              -H "PRIVATE-TOKEN: ${GITCODE_TOKEN}" \
-              -H "Content-Type: application/json" \
-              -d "{\"tag_name\":\"${TAG}\",\"name\":\"WaLiAPI ${TAG}\",\"description\":\"Mirror of GitHub release. 国内用户可从此下载。\"}" \
-              "${API}/releases")
-            RELEASE_ID=$(echo "$CREATE_RESP" | jq -r '.id // empty')
-            echo "创建响应: $CREATE_RESP"
-          fi
-
-          if [ -z "$RELEASE_ID" ] || [ "$RELEASE_ID" = "null" ]; then
-            echo "::error::无法获取 gitcode release id,终止"
+          # 1. 验证 API 可达
+          echo "=== 验证 gitcode API ==="
+          PROJECT_RESP=$(curl -s -w "\n%{http_code}" $AUTH "${API}")
+          HTTP_CODE=$(echo "$PROJECT_RESP" | tail -1)
+          BODY=$(echo "$PROJECT_RESP" | sed '$d')
+          echo "项目 API HTTP: $HTTP_CODE"
+          if [ "$HTTP_CODE" != "200" ]; then
+            echo "::error::gitcode 项目不可访问 (HTTP $HTTP_CODE)"
+            echo "响应: $BODY" | head -c 500
             exit 1
           fi
 
-          echo "gitcode release id: $RELEASE_ID"
+          # 2. 查找现有 release
+          echo "=== 查找 release ${TAG} ==="
+          RELEASE_RESP=$(curl -s -w "\n%{http_code}" $AUTH "${API}/releases/${TAG}")
+          HTTP_CODE=$(echo "$RELEASE_RESP" | tail -1)
+          BODY=$(echo "$RELEASE_RESP" | sed '$d')
+          echo "查找 release HTTP: $HTTP_CODE"
 
-          # 3. 获取已存在的资产列表(去重)
-          EXISTING_LINKS=$(curl -s \
-            -H "PRIVATE-TOKEN: ${GITCODE_TOKEN}" \
-            "${API}/releases/${TAG}/assets/links" | jq -r '.[].name')
+          if [ "$HTTP_CODE" = "200" ]; then
+            echo "release 已存在"
+          elif [ "$HTTP_CODE" = "404" ]; then
+            echo "release 不存在,创建..."
+            CREATE_RESP=$(curl -s -w "\n%{http_code}" \
+              $AUTH \
+              -H "Content-Type: application/json" \
+              -d "{\"tag_name\":\"${TAG}\",\"name\":\"WaLiAPI ${TAG}\",\"description\":\"Mirror of GitHub release. 国内用户可从此下载。\"}" \
+              "${API}/releases")
+            HTTP_CODE=$(echo "$CREATE_RESP" | tail -1)
+            BODY=$(echo "$CREATE_RESP" | sed '$d')
+            echo "创建 release HTTP: $HTTP_CODE"
+            if [ "$HTTP_CODE" != "201" ] && [ "$HTTP_CODE" != "200" ]; then
+              echo "::error::创建 release 失败 (HTTP $HTTP_CODE)"
+              echo "响应: $BODY" | head -c 500
+              exit 1
+            fi
+          else
+            echo "::error::查找 release 失败 (HTTP $HTTP_CODE)"
+            echo "响应: $BODY" | head -c 500
+            exit 1
+          fi
 
-          # 4. 逐个上传资产
+          # 3. 获取已存在的资产链接(去重)
+          echo "=== 检查已有资产 ==="
+          LINKS_RESP=$(curl -s -w "\n%{http_code}" $AUTH "${API}/releases/${TAG}/assets/links")
+          HTTP_CODE=$(echo "$LINKS_RESP" | tail -1)
+          BODY=$(echo "$LINKS_RESP" | sed '$d')
+          if [ "$HTTP_CODE" = "200" ]; then
+            EXISTING_LINKS=$(echo "$BODY" | jq -r '.[].name // empty' 2>/dev/null || echo "")
+            echo "已有资产: ${EXISTING_LINKS:-无}"
+          else
+            echo "获取资产列表 HTTP: $HTTP_CODE, 跳过去重"
+            EXISTING_LINKS=""
+          fi
+
+          # 4. 逐个上传
+          echo "=== 上传资产 ==="
           UPLOADED=0
+          FAILED=0
           shopt -s nullglob
           for f in assets/*; do
             FNAME=$(basename "$f")
-            echo "处理: $FNAME"
+            echo "--- 处理: $FNAME ---"
 
-            # 检查是否已存在
-            if echo "$EXISTING_LINKS" | grep -qFx "$FNAME"; then
+            if [ -n "$EXISTING_LINKS" ] && echo "$EXISTING_LINKS" | grep -qFx "$FNAME"; then
               echo "  → 已存在,跳过"
               UPLOADED=$((UPLOADED + 1))
               continue
             fi
 
-            # 上传文件到 gitcode
-            UPLOAD_RESP=$(curl -s -X POST \
-              -H "PRIVATE-TOKEN: ${GITCODE_TOKEN}" \
+            # 上传文件
+            UPLOAD_RESP=$(curl -s -w "\n%{http_code}" \
+              $AUTH \
               -F "file=@${f}" \
               "${API}/uploads")
-            FILE_URL=$(echo "$UPLOAD_RESP" | jq -r '.url // empty')
+            HTTP_CODE=$(echo "$UPLOAD_RESP" | tail -1)
+            BODY=$(echo "$UPLOAD_RESP" | sed '$d')
+            echo "  上传 HTTP: $HTTP_CODE"
 
-            if [ -z "$FILE_URL" ]; then
-              echo "  → 上传失败: $UPLOAD_RESP"
+            if [ "$HTTP_CODE" != "201" ] && [ "$HTTP_CODE" != "200" ]; then
+              echo "  → 上传失败: $(echo "$BODY" | head -c 200)"
+              FAILED=$((FAILED + 1))
               continue
             fi
 
+            FILE_URL=$(echo "$BODY" | jq -r '.url // empty' 2>/dev/null)
+            if [ -z "$FILE_URL" ]; then
+              echo "  → 无法解析文件 URL: $(echo "$BODY" | head -c 200)"
+              FAILED=$((FAILED + 1))
+              continue
+            fi
+            echo "  文件 URL: $FILE_URL"
+
             # 关联到 release
-            curl -s -X POST \
-              -H "PRIVATE-TOKEN: ${GITCODE_TOKEN}" \
+            LINK_RESP=$(curl -s -w "\n%{http_code}" \
+              $AUTH \
               -H "Content-Type: application/json" \
               -d "{\"name\":\"${FNAME}\",\"url\":\"${FILE_URL}\",\"link_type\":\"other\"}" \
-              "${API}/releases/${TAG}/assets/links" | jq -r '.name // "ok"' | head -1
+              "${API}/releases/${TAG}/assets/links")
+            HTTP_CODE=$(echo "$LINK_RESP" | tail -1)
+            echo "  关联 HTTP: $HTTP_CODE"
 
-            UPLOADED=$((UPLOADED + 1))
+            if [ "$HTTP_CODE" = "201" ] || [ "$HTTP_CODE" = "200" ]; then
+              UPLOADED=$((UPLOADED + 1))
+              echo "  → 成功"
+            else
+              FAILED=$((FAILED + 1))
+              echo "  → 关联失败: $(echo "$LINK_RESP" | sed '$d' | head -c 200)"
+            fi
           done
 
           echo ""
-          echo "✓ gitcode 镜像同步完成: $UPLOADED 个文件"
-          echo "  → https://gitcode.com/fuzhengwei/WaLiAPI/releases/${TAG}"
+          echo "=== 同步结果 ==="
+          echo "✓ 成功: $UPLOADED"
+          if [ "$FAILED" -gt 0 ]; then
+            echo "✗ 失败: $FAILED"
+          fi
+          echo "→ https://gitcode.com/fuzhengwei/WaLiAPI/releases/${TAG}"
