@@ -141,6 +141,22 @@ impl Repository {
         Ok(())
     }
 
+    pub async fn reorder_channels(&self, ordered_ids: &[String]) -> Result<(), sqlx::Error> {
+        let now = now_iso();
+        let mut tx = self.pool.begin().await?;
+        for (i, id) in ordered_ids.iter().enumerate() {
+            let priority = (ordered_ids.len() - i) as i64;
+            sqlx::query("UPDATE channels SET priority = ?, updated_at = ? WHERE id = ?")
+                .bind(priority)
+                .bind(&now)
+                .bind(id)
+                .execute(&mut *tx)
+                .await?;
+        }
+        tx.commit().await?;
+        Ok(())
+    }
+
     // ==================== API Key ====================
 
     pub async fn get_all_api_keys(&self) -> Result<Vec<ApiKey>, sqlx::Error> {

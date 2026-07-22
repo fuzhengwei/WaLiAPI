@@ -70,6 +70,13 @@ pub async fn get_channel(id: String, state: tauri::State<'_, std::sync::Arc<AppS
 }
 
 #[tauri::command]
+pub async fn get_channel_api_key(id: String, state: tauri::State<'_, std::sync::Arc<AppState>>) -> Result<String, String> {
+    let repo = Repository::new(state.db.pool.clone());
+    let channel = repo.get_channel(&id).await.map_err(|e| e.to_string())?;
+    Ok(channel.api_key)
+}
+
+#[tauri::command]
 pub async fn create_channel(input: CreateChannelInput, state: tauri::State<'_, std::sync::Arc<AppState>>) -> Result<ChannelDto, String> {
     let repo = Repository::new(state.db.pool.clone());
     repo.create_channel(&input).await.map_err(|e| e.to_string()).map(to_dto)
@@ -129,4 +136,11 @@ pub async fn test_channel(id: String, state: tauri::State<'_, std::sync::Arc<App
         message: result.message,
         latency_ms: result.latency_ms,
     })
+}
+
+#[tauri::command]
+pub async fn reorder_channels(ordered_ids: Vec<String>, state: tauri::State<'_, std::sync::Arc<AppState>>) -> Result<(), String> {
+    let repo = Repository::new(state.db.pool.clone());
+    repo.reorder_channels(&ordered_ids).await.map_err(|e| e.to_string())?;
+    Ok(())
 }

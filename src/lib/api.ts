@@ -26,12 +26,14 @@ export interface ChannelStats {
 export const channelApi = {
   getAll: () => invoke<Channel[]>("get_channels"),
   get: (id: string) => invoke<Channel>("get_channel", { id }),
+  getApiKey: (id: string) => invoke<string>("get_channel_api_key", { id }),
   create: (input: CreateChannelInput) => invoke<Channel>("create_channel", { input }),
   update: (input: UpdateChannelInput) => invoke<Channel>("update_channel", { input }),
   toggle: (id: string, status: number) => invoke<void>("toggle_channel", { id, status }),
   delete: (id: string) => invoke<void>("delete_channel", { id }),
   test: (id: string) => invoke<TestChannelResult>("test_channel", { id }),
   getStats: () => invoke<ChannelStats[]>("get_channel_stats"),
+  reorder: (orderedIds: string[]) => invoke<void>("reorder_channels", { orderedIds }),
 };
 
 // API Key commands
