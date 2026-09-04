@@ -21,6 +21,10 @@ impl Repository {
         Self { pool }
     }
 
+    pub fn pool(&self) -> &SqlitePool {
+        &self.pool
+    }
+
     // ==================== Channel ====================
 
     pub async fn get_all_channels(&self) -> Result<Vec<Channel>, sqlx::Error> {
@@ -1081,17 +1085,14 @@ impl Repository {
         // and merged (not overwriting) so login metadata like email/plan_type
         // survives.  The DTO surfaces it again as `invalidation_reason`.
         let merged_attributes: Option<String> = if reason.is_some() {
-            let row: Option<(String,)> = sqlx::query_as(
-                "SELECT attributes_json FROM auth_accounts WHERE id = ?",
-            )
-            .bind(id)
-            .fetch_optional(&self.pool)
-            .await?;
+            let row: Option<(String,)> =
+                sqlx::query_as("SELECT attributes_json FROM auth_accounts WHERE id = ?")
+                    .bind(id)
+                    .fetch_optional(&self.pool)
+                    .await?;
             row.map(|(attributes_json,)| {
-                let mut value: serde_json::Value =
-                    serde_json::from_str(&attributes_json).unwrap_or(serde_json::Value::Object(
-                        serde_json::Map::new(),
-                    ));
+                let mut value: serde_json::Value = serde_json::from_str(&attributes_json)
+                    .unwrap_or(serde_json::Value::Object(serde_json::Map::new()));
                 value["invalidation_reason"] = reason.unwrap().into();
                 serde_json::to_string(&value).unwrap_or(attributes_json)
             })
@@ -1445,19 +1446,17 @@ impl Repository {
         .await
         .unwrap_or(0);
 
-        let total_cached_tokens: i64 = sqlx::query_scalar(
-            "SELECT COALESCE(SUM(cached_tokens), 0) FROM request_logs",
-        )
-        .fetch_one(&self.pool)
-        .await
-        .unwrap_or(0);
+        let total_cached_tokens: i64 =
+            sqlx::query_scalar("SELECT COALESCE(SUM(cached_tokens), 0) FROM request_logs")
+                .fetch_one(&self.pool)
+                .await
+                .unwrap_or(0);
 
-        let total_prompt_tokens: i64 = sqlx::query_scalar(
-            "SELECT COALESCE(SUM(prompt_tokens), 0) FROM request_logs",
-        )
-        .fetch_one(&self.pool)
-        .await
-        .unwrap_or(0);
+        let total_prompt_tokens: i64 =
+            sqlx::query_scalar("SELECT COALESCE(SUM(prompt_tokens), 0) FROM request_logs")
+                .fetch_one(&self.pool)
+                .await
+                .unwrap_or(0);
 
         let active_channels: i64 =
             sqlx::query_scalar("SELECT COUNT(*) FROM channels WHERE status = 1")
@@ -1608,7 +1607,9 @@ impl Repository {
             GROUP BY model
             ORDER BY total_tokens DESC
         "#;
-        sqlx::query_as::<_, ModelStats>(sql).fetch_all(&self.pool).await
+        sqlx::query_as::<_, ModelStats>(sql)
+            .fetch_all(&self.pool)
+            .await
     }
 
     /// 按小时粒度统计各模型 Token 趋势
@@ -1632,6 +1633,9 @@ impl Repository {
             GROUP BY hour, model
             ORDER BY hour ASC
         "#;
-        sqlx::query_as::<_, TokenTrendPoint>(sql).bind(&since).fetch_all(&self.pool).await
+        sqlx::query_as::<_, TokenTrendPoint>(sql)
+            .bind(&since)
+            .fetch_all(&self.pool)
+            .await
     }
 }

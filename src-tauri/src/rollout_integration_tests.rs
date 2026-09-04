@@ -432,6 +432,7 @@ fn audited(
         None,
         &SecuritySettings::default(),
         None,
+        vec![],
     )
     .expect("gate passes for a clean body")
 }
@@ -2050,6 +2051,7 @@ async fn security_gate_block_zero_upstream() {
         None,
         &settings,
         None,
+        vec![],
     )
     .expect("gate runs");
     assert_eq!(
@@ -2413,6 +2415,7 @@ async fn security_redacted_forward_body_no_secret() {
         None,
         &settings,
         None,
+        vec![],
     )
     .expect("gate");
     let plan = plan_for(

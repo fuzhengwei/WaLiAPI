@@ -1,3 +1,4 @@
+use super::rules::{self, CustomRule};
 use super::{RiskLevel, SecurityFinding, SecurityScanResult, SecuritySettings};
 use crate::utils::text::truncate_utf8;
 use std::time::{Duration, Instant};
@@ -48,6 +49,7 @@ pub enum BudgetError {
 pub struct ScanContext<'a> {
     settings: &'a SecuritySettings,
     budget: &'a ScanBudget,
+    custom_rules: &'a [CustomRule],
     findings: Vec<SecurityFinding>,
     bytes_visited: usize,
     string_nodes: usize,
@@ -57,10 +59,15 @@ pub struct ScanContext<'a> {
 }
 
 impl<'a> ScanContext<'a> {
-    fn new(settings: &'a SecuritySettings, budget: &'a ScanBudget) -> Self {
+    fn new(
+        settings: &'a SecuritySettings,
+        budget: &'a ScanBudget,
+        custom_rules: &'a [CustomRule],
+    ) -> Self {
         Self {
             settings,
             budget,
+            custom_rules,
             findings: Vec::new(),
             bytes_visited: 0,
             string_nodes: 0,
@@ -113,8 +120,9 @@ pub fn scan_with_budget(
     phase: &str,
     settings: &SecuritySettings,
     budget: &ScanBudget,
+    custom_rules: &[CustomRule],
 ) -> Result<SecurityScanResult, BudgetError> {
-    let mut ctx = ScanContext::new(settings, budget);
+    let mut ctx = ScanContext::new(settings, budget, custom_rules);
     walk_json(value, phase, "$", &mut ctx)?;
     ctx.check_budget()?;
 
@@ -243,19 +251,43 @@ fn scan_text(text: &str, phase: &str, location: &str, ctx: &mut ScanContext) {
         scan_text
     };
 
+    // ── Whitelist short-circuit (per-category exemption) ─────────────
+    // A keyword whitelist exempts the entire text from all built-in scans.
+    let wl_keyword = rules::is_whitelisted("keyword", scan_text, ctx.custom_rules);
+    if wl_keyword {
+        return;
+    }
+    let wl_domain = rules::is_whitelisted("domain", scan_text, ctx.custom_rules);
+    let wl_path = rules::is_whitelisted("path", scan_text, ctx.custom_rules);
+    let wl_tool = rules::is_whitelisted("tool", scan_text, ctx.custom_rules);
+
+    // ── Built-in scans (skipped per-category when whitelisted) ──────
     scan_credentials(scan_text, phase, location, ctx);
-    scan_paths(scan_text, phase, location, ctx);
+    if !wl_path {
+        scan_paths(scan_text, phase, location, ctx);
+    }
     if ctx.settings.scan_unicode {
         scan_unicode(scan_text, phase, location, ctx);
     }
-    if ctx.settings.scan_network {
+    if ctx.settings.scan_network && !wl_domain {
         scan_network(scan_text, phase, location, ctx);
     }
-    if ctx.settings.scan_tools {
+    if ctx.settings.scan_tools && !wl_tool {
         scan_tool_risks(scan_text, phase, location, ctx);
     }
-    scan_tracking_pixel(scan_text, phase, location, ctx);
+    if !wl_domain {
+        scan_tracking_pixel(scan_text, phase, location, ctx);
+    }
     scan_fingerprint_terms(scan_text, phase, location, ctx);
+
+    // ── Custom blacklist rules ──────────────────────────────────────
+    rules::apply_custom_rules(
+        scan_text,
+        phase,
+        location,
+        ctx.custom_rules,
+        &mut ctx.findings,
+    );
 }
 
 fn scan_credentials(text: &str, phase: &str, location: &str, ctx: &mut ScanContext) {
@@ -626,7 +658,6 @@ fn add(
     });
 }
 
-#[allow(dead_code)]
 pub fn add_finding(
     f: &mut Vec<SecurityFinding>,
     phase: &str,
@@ -756,7 +787,7 @@ mod scanner_tests {
                 {"role": "user", "content": "b".repeat(200)}
             ]
         });
-        let err = scan_with_budget(&body, "request", &settings, &budget).unwrap_err();
+        let err = scan_with_budget(&body, "request", &settings, &budget, &[]).unwrap_err();
         match err {
             BudgetError::Exceeded(msg) => assert!(msg.contains("byte budget")),
         }
@@ -773,7 +804,7 @@ mod scanner_tests {
             .map(|i| serde_json::json!({"x": format!("val{}", i)}))
             .collect();
         let body = serde_json::Value::Array(arr);
-        let err = scan_with_budget(&body, "request", &settings, &budget).unwrap_err();
+        let err = scan_with_budget(&body, "request", &settings, &budget, &[]).unwrap_err();
         match err {
             BudgetError::Exceeded(msg) => assert!(msg.contains("string-node")),
         }
@@ -790,7 +821,7 @@ mod scanner_tests {
         for _ in 0..30 {
             v = serde_json::json!({"a": v});
         }
-        let err = scan_with_budget(&v, "request", &settings, &budget).unwrap_err();
+        let err = scan_with_budget(&v, "request", &settings, &budget, &[]).unwrap_err();
         match err {
             BudgetError::Exceeded(msg) => assert!(msg.contains("depth")),
         }
@@ -814,7 +845,7 @@ mod scanner_tests {
             ..Default::default()
         };
         let body = serde_json::json!({"messages": [{"role": "user", "content": "界".repeat(500)}]});
-        let result = scan_with_budget(&body, "request", &settings, &budget).unwrap();
+        let result = scan_with_budget(&body, "request", &settings, &budget, &[]).unwrap();
         assert_eq!(result.action, SecurityAction::Allow);
     }
 
@@ -826,7 +857,7 @@ mod scanner_tests {
             ..Default::default()
         };
         let body = serde_json::json!({"messages": [{"role": "user", "content": "hello world this is a scan".to_string()}]});
-        let result = scan_with_budget(&body, "request", &settings, &budget);
+        let result = scan_with_budget(&body, "request", &settings, &budget, &[]);
         // Either the elapsed check trips immediately, or the scan finishes
         // within the nanos budget (rare); both are acceptable — the budget
         // failure path must never report clean.

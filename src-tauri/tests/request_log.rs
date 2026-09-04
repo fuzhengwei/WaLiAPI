@@ -332,6 +332,7 @@ async fn request_log_sanitized_log_body_is_what_gets_persisted() {
         None,
         &SecuritySettings::default(),
         None,
+        vec![],
     )
     .expect("gate");
     let log_body = serde_json::to_string(&audited.sanitized_log_json).unwrap();

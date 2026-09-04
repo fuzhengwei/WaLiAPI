@@ -84,13 +84,20 @@ pub async fn handle_request(
         .unwrap_or("")
         .to_string();
     let security_settings = security::get_security_settings(settings);
+    let custom_rules = if security_settings.enabled {
+        security::rules::CustomRuleRepository::get_enabled(repo.pool())
+            .await
+            .unwrap_or_default()
+    } else {
+        vec![]
+    };
     // The gate already audited the ORIGINAL protocol JSON at the handler.
     // Re-scanning the (possibly converted) Chat JSON here would be a redundant,
     // competing non-authoritative audit — only do that when the caller had no
     // gate (legacy RAG path).
     let mut security_result = match audit {
         Some(result) => result.clone(),
-        None => security::scan_request(&body, &security_settings),
+        None => security::scan_request(&body, &security_settings, &custom_rules),
     };
 
     // Real redaction: if redact mode is active, sanitize the request body before forwarding
@@ -291,7 +298,8 @@ pub async fn handle_request(
                 }
 
                 // Scan response for risks
-                let resp_security = security::scan_response(&resp_body, &security_settings);
+                let resp_security =
+                    security::scan_response(&resp_body, &security_settings, &custom_rules);
                 let resp_findings_count = resp_security.findings.len();
                 if resp_findings_count > 0 {
                     // Merge response findings into request findings for logging
