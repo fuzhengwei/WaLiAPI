@@ -1,0 +1,34 @@
+-- 029: 为 cached_tokens 的聚合查询补覆盖索引
+--
+-- 症状：仪表盘每次切回都要"加载中" 2 秒以上。三条统计命令合计约 3.2 秒，
+-- 其中 98.9% 的开销来自读取 cached_tokens 这一个列。
+--
+-- 根因（列位置，不是扫描本身）：cached_tokens 由迁移 026 以
+-- `ALTER TABLE ... ADD COLUMN` 加入，列号 cid=39，排在 cid=18 的 request_body
+-- （Agent 流量下平均约 900 KB）之后。SQLite 每行的本地载荷只有一页左右，
+-- request_body 把它撑满后，cid>=19 的列值全部落在 overflow 页链上。于是任何读
+-- cached_tokens 的聚合都必须走完每一行的 overflow 链，等价于把 request_body 的
+-- 字节总量重读一遍；而读 cid<=18 的 prompt_tokens 只碰本地载荷，同样全表扫只要
+-- 几毫秒。
+--
+-- 实测（1.57 GB 真实库副本，取 3 次最小值）：
+--   SUM(cached_tokens) WHERE created_at LIKE ?   782 ms -> 0.1 ms
+--   SUM(cached_tokens) FROM request_logs         812 ms -> 0.1 ms
+--   get_token_trend（含 SUM(cached_tokens)）      827 ms -> 0.5 ms
+--   三条仪表盘命令合计                           3255 ms -> 879 ms
+--   同库对照：SUM(prompt_tokens) 只要 7 ms
+--
+-- 为什么是 (created_at, cached_tokens) 而不是单列 (cached_tokens)：
+--   单列索引只能覆盖无 WHERE 的那条；带 created_at 过滤的查询因索引不含
+--   created_at 仍需回表走 overflow 链，实测 845 ms 无改善。created_at 打头
+--   才能同时服务 range 过滤与覆盖扫描。
+--
+-- 代价：建索引一次性约 0.9 秒（1.57 GB 库）；插入写放大不可测
+--   （0.48 ms/行 -> 0.43 ms/行，噪声级，插入成本由 request_body 主导）。
+--
+-- 未覆盖：get_model_stats 仍约 880 ms。它 GROUP BY model 且需要 5 个数值列，
+--   只有 7 列宽索引才能覆盖，而那种索引挂在每请求一写的日志表上不划算。
+--   它不控制"加载中"（前端只在 stats 为空时渲染占位），故本迁移不处理。
+
+CREATE INDEX IF NOT EXISTS idx_logs_created_cached
+    ON request_logs(created_at, cached_tokens);
