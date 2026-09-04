@@ -128,7 +128,7 @@ fn input_to_text(input: &Value) -> String {
 ///
 /// Falls back to a rough character-based estimate if the tokenizer fails
 /// to initialize (should never happen, but be defensive).
-fn count_tokens(text: &str) -> i64 {
+pub(crate) fn count_tokens(text: &str) -> i64 {
     if text.is_empty() {
         return 0;
     }
