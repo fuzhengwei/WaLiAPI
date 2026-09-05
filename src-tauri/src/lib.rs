@@ -281,6 +281,7 @@ pub fn run() {
             commands::log::delete_logs_before,
             commands::log::delete_all_logs,
             commands::log::get_log_stats,
+            commands::log_repair::repair_stream_cancel_logs,
             commands::stats::get_dashboard_stats,
             commands::stats::get_model_stats,
             commands::stats::get_token_trend,

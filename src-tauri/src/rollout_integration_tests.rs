@@ -1844,6 +1844,188 @@ async fn stream_client_cancel_records_client_cancelled_log() {
     );
 }
 
+/// 499 误报回归：客户端**完整收完**流（含终止帧 `data: [DONE]`）后立刻断开连接。
+///
+/// Agent 类客户端（Node/undici、Codex、Claude Code…）拿到终止帧就 `res.destroy()`，
+/// 不会继续读到 HTTP chunked 的结束块。hyper 于是停止轮询 body，流式生成器在跑到
+/// 「写成功日志」那段代码之前就被 drop，`StreamLogFinalizer::drop` 把这条完全成功的
+/// 流记成 499 + client_cancelled + 0 token + 空响应。
+///
+/// 下面用「读到终止帧就停止轮询并 drop」精确模拟该时机（等价于 hyper 收到客户端 FIN
+/// 之后的行为，实测已在真机上验证：同一模型同一 key，读完即断 → 499，读到 EOF → 200）。
+#[tokio::test]
+async fn stream_client_close_after_terminal_frame_is_logged_as_success() {
+    use futures_util::StreamExt;
+
+    // 上游：[DONE] 之后再延迟 300ms 才发结束块，保证客户端断开时生成器还停在
+    // `upstream.next()` 上等 EOF，而不是已经自然收尾。
+    let sse = MockResponse::sse(vec![
+        b"data: {\"id\":\"c1\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hi\"}}]}\n\n".as_slice(),
+        b"data: {\"id\":\"c1\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":5,\"completion_tokens\":2,\"total_tokens\":7}}\n\n".as_slice(),
+        b"data: [DONE]\n\n".as_slice(),
+    ])
+    .with_delay(300);
+    let mock = MockUpstream::start(move |_| sse.clone()).await;
+    let base = format!("http://{}", mock.addr);
+    let pool = fresh_db().await;
+    let key = api_key();
+    insert_api_key(&pool, &key).await;
+    let ch = channel(
+        "n1",
+        "openai",
+        "openai",
+        &base,
+        &["chat_completions"],
+        &["m"],
+        1,
+        "{}",
+    );
+    insert_channel(&pool, &ch).await;
+
+    let body = json!({"model":"m","messages":[{"role":"user","content":"hi"}],"stream":true});
+    let audit = audited(
+        DownstreamProtocol::ChatCompletions,
+        "/v1/chat/completions",
+        "m",
+        body.clone(),
+        true,
+    );
+    let plan = plan_for(
+        &pool,
+        &key,
+        EndpointKind::ChatCompletions,
+        "m",
+        &flags(true, true, true),
+        &body,
+    )
+    .await
+    .expect("plan");
+    let resp = run_stream(&pool, &key, &audit, plan, "chat").await;
+
+    // 读到终止帧就停：终止帧已经交付，之后连接怎么关都不该影响这条日志。
+    let mut stream = resp.into_body().into_data_stream();
+    let mut got: Vec<u8> = Vec::new();
+    while let Some(Ok(bytes)) = stream.next().await {
+        got.extend_from_slice(&bytes);
+        if String::from_utf8_lossy(&got).contains("data: [DONE]") {
+            break;
+        }
+    }
+    assert!(
+        String::from_utf8_lossy(&got).contains("data: [DONE]"),
+        "必须收到终止帧，实际: {}",
+        String::from_utf8_lossy(&got)
+    );
+    drop(stream);
+
+    // 等 Drop finalizer / 正常收尾落库。
+    tokio::time::sleep(std::time::Duration::from_millis(800)).await;
+
+    let repo = Repository::new(pool.clone());
+    let logs = repo.get_logs(10, 0).await.unwrap();
+    assert_eq!(logs.len(), 1, "一次请求只应落一条日志，实际: {logs:?}");
+    let log = &logs[0];
+    assert_eq!(
+        log.status_code, 200,
+        "完整送达的流不能记成 {}（error={:?}）",
+        log.status_code, log.error_message
+    );
+    assert_eq!(log.client_cancelled, Some(0), "不能标记为客户端取消");
+    assert_eq!(log.total_tokens, 7, "token 用量必须落库");
+    assert!(
+        log.response_choices.as_deref().unwrap_or("").contains("hi"),
+        "响应内容必须落库"
+    );
+}
+
+/// 真·中途取消：状态仍然是 499 + client_cancelled=1（语义不变），但断开前已经产生的
+/// token 用量必须补记进日志。此前 `StreamLogFinalizer::drop` 硬编码 `0,0,0,0`，凡是
+/// 提前断开的请求在用量统计里一律算 0，看板与配额全部偏低。
+#[tokio::test]
+async fn stream_client_cancel_backfills_token_usage() {
+    use futures_util::StreamExt;
+
+    // 多数供应商只在最后一帧回传 usage：客户端在第一段正文之后就断开，上游 usage 还
+    // 没到，此时必须用已下发的正文本地估算，而不是记 0。
+    let sse = MockResponse::sse(vec![
+        b"data: {\"choices\":[{\"delta\":{\"content\":\"first chunk of a fairly long answer\"}}]}\n\n".as_slice(),
+        b"data: {\"choices\":[{\"delta\":{\"content\":\"second chunk of the answer\"}}]}\n\n".as_slice(),
+        b"data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":11,\"completion_tokens\":7,\"total_tokens\":18}}\n\n".as_slice(),
+        b"data: [DONE]\n\n".as_slice(),
+    ])
+    .with_delay(200);
+    let mock = MockUpstream::start(move |_| sse.clone()).await;
+    let base = format!("http://{}", mock.addr);
+    let pool = fresh_db().await;
+    let key = api_key();
+    insert_api_key(&pool, &key).await;
+    let ch = channel(
+        "n1",
+        "openai",
+        "openai",
+        &base,
+        &["chat_completions"],
+        &["m"],
+        1,
+        "{}",
+    );
+    insert_channel(&pool, &ch).await;
+
+    let body = json!({"model":"m","messages":[{"role":"user","content":"hi"}],"stream":true});
+    let audit = audited(
+        DownstreamProtocol::ChatCompletions,
+        "/v1/chat/completions",
+        "m",
+        body.clone(),
+        true,
+    );
+    let plan = plan_for(
+        &pool,
+        &key,
+        EndpointKind::ChatCompletions,
+        "m",
+        &flags(true, true, true),
+        &body,
+    )
+    .await
+    .expect("plan");
+    let resp = run_stream(&pool, &key, &audit, plan, "chat").await;
+
+    // 只读走第一段内容就结束任务：body 被 drop，等价于客户端中途断开。
+    let handle = tokio::spawn(async move {
+        let mut stream = resp.into_body().into_data_stream();
+        let _ = stream.next().await;
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    });
+    tokio::time::sleep(std::time::Duration::from_millis(120)).await;
+    handle.abort();
+    let _ = handle.await;
+    tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+
+    let repo = Repository::new(pool.clone());
+    let logs = repo.get_logs(10, 0).await.unwrap();
+    let cancelled: Vec<_> = logs
+        .iter()
+        .filter(|l| l.status_code == 499 && l.client_cancelled == Some(1))
+        .collect();
+    assert_eq!(cancelled.len(), 1, "取消日志必须恰好一条，实际: {logs:?}");
+    assert_eq!(
+        cancelled[0].error_message.as_deref(),
+        Some("client_cancelled")
+    );
+    assert!(
+        cancelled[0].total_tokens > 0,
+        "断开前已产生的用量必须补记，实际 prompt={} completion={} total={}",
+        cancelled[0].prompt_tokens,
+        cancelled[0].completion_tokens,
+        cancelled[0].total_tokens
+    );
+    assert!(
+        cancelled[0].completion_tokens > 0,
+        "已下发的正文必须折算出 completion tokens"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // SECURITY & PERMISSIONS (all must produce ZERO upstream calls)
 // ---------------------------------------------------------------------------

@@ -1195,9 +1195,64 @@ struct StreamLogFinalizer {
     upstream_type: String,
     started: Instant,
     completed: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    /// 生成器随流推进发布到这里的进度。客户端中途断开时 `Drop` 只能看到这份
+    /// 快照，用它把断开前已经产生的 token 用量补记进 499 行（此前恒为 0）。
+    progress: std::sync::Arc<std::sync::Mutex<Option<StreamCancelProgress>>>,
+}
+
+/// 客户端断开前已经观测到的流式进度，用于 499 行的用量补记。
+#[derive(Clone, Default)]
+struct StreamCancelProgress {
+    /// 上游已回传的 usage（prompt, completion, total, cached）。
+    usage: (i64, i64, i64, i64),
+    /// 已下发给下游的正文；上游没回传 usage 时用它做本地估算。
+    content: String,
 }
 
 impl StreamLogFinalizer {
+    /// 把当前进度发布给 finalizer。只在真正要向下游 yield 字节时调用，因此
+    /// 「有进度」等价于「响应已经开始交付」。
+    fn publish_progress(&self, pump: &StreamPumpCore) {
+        let usage = pump.usage();
+        let content = pump.accumulated_content().to_string();
+        if let Ok(mut slot) = self.progress.lock() {
+            let p = slot.get_or_insert_with(StreamCancelProgress::default);
+            p.usage = usage;
+            p.content = content;
+        }
+    }
+
+    /// 客户端断开：状态仍是 499 + client_cancelled，但用量按断开前已观测到的数据
+    /// 补记（上游回传优先，否则用已下发正文本地估算）。一个字节都没发出去时保持全 0
+    /// —— 那次请求上游可能根本没开始生成。
+    async fn write_cancelled(&self, progress: Option<StreamCancelProgress>) {
+        let mut usage = (0i64, 0i64, 0i64, 0i64);
+        if let Some(p) = progress.as_ref() {
+            usage = p.usage;
+            if usage.0 == 0 && usage.1 == 0 && usage.2 == 0 {
+                let req_body: serde_json::Value = serde_json::from_str(&self.sanitized_log_body)
+                    .unwrap_or(serde_json::Value::Null);
+                let (prompt, completion, total) = super::estimate_usage::estimate_usage(
+                    &req_body,
+                    Some(p.content.as_str()),
+                    &self.model,
+                );
+                usage = (prompt, completion, total, 0);
+            }
+        }
+        self.write(
+            true,
+            false,
+            Some("client_cancelled"),
+            usage.0,
+            usage.1,
+            usage.2,
+            usage.3,
+            None,
+        )
+        .await;
+    }
+
     async fn write(
         &self,
         client_cancelled: bool,
@@ -1307,9 +1362,9 @@ impl Drop for StreamLogFinalizer {
             self.completed
                 .store(true, std::sync::atomic::Ordering::SeqCst);
             let f = self.clone();
+            let progress = f.progress.lock().ok().and_then(|g| g.clone());
             tokio::spawn(async move {
-                f.write(true, false, Some("client_cancelled"), 0, 0, 0, 0, None)
-                    .await;
+                f.write_cancelled(progress).await;
             });
         }
     }
@@ -1362,12 +1417,15 @@ fn stream_response_body(
         upstream_type,
         started: Instant::now(),
         completed: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        progress: std::sync::Arc::new(std::sync::Mutex::new(None)),
     };
     let completed = finalizer.completed.clone();
 
     async_stream::stream! {
         let mut had_error = false;
         let mut error_message: Option<String> = None;
+        // 终止帧 / 错误帧交给下游之前就已经落库时为 true，函数末尾不再重复写日志。
+        let mut finalized = false;
 
         let upstream_bytes = upstream.body;
         tokio::pin!(upstream_bytes);
@@ -1379,6 +1437,19 @@ fn stream_response_body(
         match pump.start() {
             Ok(first) => {
                 if !first.is_empty() {
+                    if !finalized && downstream_terminal_frame(&mode_for_error, &first) {
+                        finalized = true;
+                        write_stream_log(
+                            &finalizer,
+                            &completed,
+                            false,
+                            None,
+                            StreamLogSnapshot::take(&pump),
+                        )
+                        .await;
+                    } else {
+                        finalizer.publish_progress(&pump);
+                    }
                     yield Ok::<_, std::io::Error>(bytes::Bytes::from(first));
                 }
             }
@@ -1393,6 +1464,19 @@ fn stream_response_body(
                 UpstreamItem::Chunk(Some(Ok(bytes))) => match pump.push(&bytes) {
                     Ok(out) => {
                         if !out.is_empty() {
+                            if !finalized && downstream_terminal_frame(&mode_for_error, &out) {
+                                finalized = true;
+                                write_stream_log(
+                                    &finalizer,
+                                    &completed,
+                                    false,
+                                    None,
+                                    StreamLogSnapshot::take(&pump),
+                                )
+                                .await;
+                            } else {
+                                finalizer.publish_progress(&pump);
+                            }
                             yield Ok::<_, std::io::Error>(bytes::Bytes::from(out));
                         }
                     }
@@ -1433,6 +1517,19 @@ fn stream_response_body(
             match pump.finish() {
                 Ok(out) => {
                     if !out.is_empty() {
+                        if !finalized && downstream_terminal_frame(&mode_for_error, &out) {
+                            finalized = true;
+                            write_stream_log(
+                                &finalizer,
+                                &completed,
+                                false,
+                                None,
+                                StreamLogSnapshot::take(&pump),
+                            )
+                            .await;
+                        } else {
+                            finalizer.publish_progress(&pump);
+                        }
                         yield Ok::<_, std::io::Error>(bytes::Bytes::from(out));
                     }
                 }
@@ -1446,39 +1543,140 @@ fn stream_response_body(
         // A downstream error before/after commit must produce a protocol
         // error event (never a retry, never a fake success).
         if had_error {
+            // 与终止帧同理：错误帧发出去后客户端也可能立刻关闭连接，日志必须先落库，
+            // 否则这条 502 会被 Drop 里的 client_cancelled 覆盖成 499。
+            if !finalized {
+                finalized = true;
+                write_stream_log(
+                    &finalizer,
+                    &completed,
+                    true,
+                    error_message.as_deref(),
+                    StreamLogSnapshot::take(&pump),
+                )
+                .await;
+            }
             let msg = error_message.clone().unwrap_or_else(|| "stream error".to_string());
             let ev = format_stream_error(&mode_for_error, &msg);
             yield Ok::<_, std::io::Error>(bytes::Bytes::from(ev));
         }
 
-        let (mut usage_prompt, mut usage_completion, mut usage_total, usage_cached) = pump.usage();
-
-        // Fallback: estimate tokens locally when upstream didn't return usage.
-        // Only estimate for successful streams (no error).
-        if usage_total == 0 && usage_prompt == 0 && usage_completion == 0 && !had_error {
-            let req_body: serde_json::Value = serde_json::from_str(&finalizer.sanitized_log_body).unwrap_or(serde_json::Value::Null);
-            let resp_text = pump.accumulated_content();
-            let (p, c, t) = super::estimate_usage::estimate_usage(&req_body, Some(resp_text), &finalizer.model);
-            usage_prompt = p;
-            usage_completion = c;
-            usage_total = t;
-            if usage_total > 0 {
-                eprintln!("[INFO] stream token usage estimated (upstream didn't return usage): prompt={}, completion={}, total={}", usage_prompt, usage_completion, usage_total);
-            }
-        }
-
-        // Mark the request completed so the Drop finalizer does NOT write a
-        // duplicate client_cancelled row, then write the normal log inline.
-        completed.store(true, std::sync::atomic::Ordering::SeqCst);
-        let response_choices = if !had_error {
-            pump.build_response_choices()
-        } else {
-            None
-        };
-        finalizer
-            .write(false, had_error, error_message.as_deref(), usage_prompt, usage_completion, usage_total, usage_cached, response_choices)
+        // 兜底：上游自然结束、终止帧没被单独识别出来（例如只发到 finish_reason 就 EOF）
+        // 时仍在这里写日志。已经落过库的请求不再重复写。
+        if !finalized {
+            write_stream_log(
+                &finalizer,
+                &completed,
+                had_error,
+                error_message.as_deref(),
+                StreamLogSnapshot::take(&pump),
+            )
             .await;
+        }
     }
+}
+
+/// 落库所需的 pump 侧快照。
+///
+/// 必须在 `await` 之前同步取好：`stream_response_body` 是 `async_stream` 生成器，
+/// 把 `&mut pump` 带过 `await` 会让生成器自引用。调用方只交出这个 owned 结构体，
+/// 跨 `await` 存活的只有 `&finalizer` / `&completed`（与改动前的收尾代码同形）。
+struct StreamLogSnapshot {
+    usage: (i64, i64, i64, i64),
+    response_choices: Option<String>,
+    accumulated_content: String,
+}
+
+impl StreamLogSnapshot {
+    fn take(pump: &StreamPumpCore) -> Self {
+        Self {
+            usage: pump.usage(),
+            response_choices: pump.build_response_choices(),
+            accumulated_content: pump.accumulated_content().to_string(),
+        }
+    }
+}
+
+/// 把一次流式请求的结果写成一条审计日志（成功，或已提交之后的流错误）。
+///
+/// 关键约束：**必须在终止帧交给下游之前调用**。终止帧一旦送达，客户端（Codex /
+/// Claude Code / Node undici 等 Agent）就会立刻关闭连接，hyper 不再轮询本流，
+/// 生成器直接被 drop；此时若日志还没写，`StreamLogFinalizer::drop` 会把一条完整
+/// 成功的流误记成 `499 / client_cancelled / 0 token / 空响应`。
+async fn write_stream_log(
+    finalizer: &StreamLogFinalizer,
+    completed: &std::sync::Arc<std::sync::atomic::AtomicBool>,
+    had_error: bool,
+    error_message: Option<&str>,
+    snapshot: StreamLogSnapshot,
+) {
+    let (mut usage_prompt, mut usage_completion, mut usage_total, usage_cached) = snapshot.usage;
+
+    // Fallback: estimate tokens locally when upstream didn't return usage.
+    // Only estimate for successful streams (no error).
+    if usage_total == 0 && usage_prompt == 0 && usage_completion == 0 && !had_error {
+        let req_body: serde_json::Value =
+            serde_json::from_str(&finalizer.sanitized_log_body).unwrap_or(serde_json::Value::Null);
+        let (p, c, t) = super::estimate_usage::estimate_usage(
+            &req_body,
+            Some(snapshot.accumulated_content.as_str()),
+            &finalizer.model,
+        );
+        usage_prompt = p;
+        usage_completion = c;
+        usage_total = t;
+        if usage_total > 0 {
+            eprintln!("[INFO] stream token usage estimated (upstream didn't return usage): prompt={}, completion={}, total={}", usage_prompt, usage_completion, usage_total);
+        }
+    }
+
+    // Mark the request completed so the Drop finalizer does NOT write a
+    // duplicate client_cancelled row, then write the log.
+    completed.store(true, std::sync::atomic::Ordering::SeqCst);
+    let response_choices = if had_error {
+        None
+    } else {
+        snapshot.response_choices
+    };
+    finalizer
+        .write(
+            false,
+            had_error,
+            error_message,
+            usage_prompt,
+            usage_completion,
+            usage_total,
+            usage_cached,
+            response_choices,
+        )
+        .await;
+}
+
+/// 判断这段下游字节里是否已经出现该协议的终止帧。
+///
+/// 出现即代表响应体已完整交给下游，之后下游怎么关连接都不影响本次请求的成功性。
+/// 逐行精确匹配而不是子串搜索：SSE 的 JSON 载荷里换行一定是 `\n` 转义，正文内容
+/// 不可能伪造出一个行首的终止帧。
+fn downstream_terminal_frame(mode: &str, out: &[u8]) -> bool {
+    let Ok(text) = std::str::from_utf8(out) else {
+        return false;
+    };
+    // 与 `format_stream_error` 使用同一套下游协议判定。
+    let terminal_event = match mode {
+        "anthropic" | "anthropic_count_tokens" => Some("message_stop"),
+        "responses" => Some("response.completed"),
+        _ => None,
+    };
+    text.lines().any(|line| {
+        let line = line.trim_end_matches('\r');
+        if let Some(name) = terminal_event {
+            line.strip_prefix("event:")
+                .is_some_and(|value| value.trim() == name)
+        } else {
+            line.strip_prefix("data:")
+                .is_some_and(|payload| payload.trim() == "[DONE]")
+        }
+    })
 }
 
 /// Walk an error's `source()` chain to its root and return it as a string.

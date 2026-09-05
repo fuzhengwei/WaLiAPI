@@ -448,6 +448,14 @@ async fn dispatch(shared: &SharedState, cmd: &str, args: Value) -> Result<Value,
             to_json(commands::log::delete_logs_before(arg(&args, "beforeDate")?, state).await)
         }
         "delete_all_logs" => to_json(commands::log::delete_all_logs(state).await),
+        // 历史 499 日志一次性修复：默认 dry-run，input.apply=true 才写库。
+        // input 缺省为 {}，让不带参数直接调用也能拿到报告。
+        "repair_stream_cancel_logs" => {
+            let input = args.get("input").cloned().unwrap_or_else(|| json!({}));
+            let input: commands::log_repair::RepairInput =
+                serde_json::from_value(input).map_err(|e| format!("参数 input 无效: {e}"))?;
+            to_json(commands::log_repair::repair_stream_cancel_logs(input, state).await)
+        }
 
         // ── Auth 账号 ──
         "auth_accounts_list" => to_json(commands::auth::auth_accounts_list(state).await),
