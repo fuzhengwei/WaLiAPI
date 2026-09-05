@@ -174,11 +174,17 @@ fn message_input(msg: &Value, p: &str) -> Result<Vec<Value>, UnsupportedFeatures
             }
             Some("thinking") if role == "assistant" => {
                 let text = b.get("thinking").and_then(Value::as_str).ok_or_else(|| bad(FeatureKind::UnknownBlock, format!("{bp}/thinking"), "thinking text is required"))?;
-                // Responses reasoning replay uses `content/reasoning_text`.
-                // `summary` is a presentation summary and does not satisfy
-                // providers that require the original reasoning on the next
-                // thinking-mode turn.
-                out.push(serde_json::json!({"type":"reasoning","content":[{"type":"reasoning_text","text":text}]}));
+                // Responses reasoning replay uses `content/reasoning_text`, but
+                // some upstream Responses-compatible backends (reported by users
+                // on GPT-5.6 routes) also require the legacy/presentation
+                // `summary` field to be present on replayed reasoning items.
+                // Emit both: `content` preserves the original reasoning text for
+                // continuation, while `summary` satisfies stricter validators.
+                out.push(serde_json::json!({
+                    "type":"reasoning",
+                    "content":[{"type":"reasoning_text","text":text}],
+                    "summary":[{"type":"summary_text","text":text}]
+                }));
             }
             Some("redacted_thinking") => {},
             Some(x)=>return Err(bad(FeatureKind::UnknownBlock,format!("{bp}/type"),format!("content type {x:?} has no direct mapping"))),

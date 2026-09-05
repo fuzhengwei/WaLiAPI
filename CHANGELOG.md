@@ -17,6 +17,7 @@
 ### 其他
 
 - ✅ 新增 19 个单元测试覆盖配置恢复、Codex auth.json 检测/重置、流式空闲超时、首帧诊断、Retry-After 解析等场景
+- 📝 **README 贡献者数据同步**：新增 2 位贡献者 Jason（@freakojc，PR #62 #63）和 cham（@Cham1229，PR #64），按最新提交记录更新全体贡献者提交数与代码变更统计
 - 🔧 **版本号统一升级至 0.2.8**（package.json / Cargo.toml / tauri.conf.json / Cargo.lock）
 
 ## v0.2.7 (2026-09-02)

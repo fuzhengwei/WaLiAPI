@@ -40,13 +40,15 @@
 
 | | 贡献者 | GitHub | 提交 | 代码变更 | 主要贡献 |
 |:---:|:---|:---|:---:|:---|:---|
-| 🏆 | **小傅哥** | [@fuzhengwei](https://github.com/fuzhengwei) | 292 | `+79,538 / -16,202` | 项目创建者 · 核心架构 · 多渠道网关 · 协议转换 · 安全审计 · 知识库引擎 · Wiki 知识引擎 · MCP Server · Codex 账号切换 |
+| 🏆 | **小傅哥** | [@fuzhengwei](https://github.com/fuzhengwei) | 297 | `+79,716 / -16,208` | 项目创建者 · 核心架构 · 多渠道网关 · 协议转换 · 安全审计 · 知识库引擎 · Wiki 知识引擎 · MCP Server · Codex 账号切换 |
 | ⚡ | **xian** | [@zsxink](https://github.com/zsxink) | 140 | `+97,192 / -24,477` | Anthropic Messages 协议兼容 · 渠道协议重构（T01-T14）· codec 加固 · SSRF 防护 · SSE 帧重组 · models 接口 · Kimi Code Auth · protocol 模块结构化重构 · Auth 多格式导入 |
 | 🐳 | **Fla1337** | [@Fla1337](https://github.com/Fla1337) | 15 | `+4,978 / -1,143` | Web 管理面板 · Docker / headless 部署 · waliapi-web 二进制 · 多阶段镜像构建 · Web 管理面板用户设置 |
 | 🔧 | **Nelson** | [@Zhengmingming1](https://github.com/Zhengmingming1) | 4 | `+3,086 / -120` | 知识库扫描版 PDF VLM OCR（方案A）· OCR 页级混合识别 · 修复 Claude 渠道协议适配 · OCR/Embedding 模型下拉按用途过滤 · pdfium macOS 打包路径修复 |
-| 🛠 | **chyuan** | [@chyuan-cuihongyuan](https://github.com/chyuan-cuihongyuan) | 5 | `+524 / -103` | 统一上游重试判定决策函数与真值表测试 · 401/403 下游脱敏 · 上游终态错误短路 · 数据库故障误报修复 · Anthropic 内置工具 400 修复 |
-| 🐞 | **xerina** | [@jiangnuonnuo](https://github.com/jiangnuonnuo) | 4 | `+257 / -82` | Wiki Unicode 文本切片 panic 进程崩溃修复 · 新增字符边界安全切片工具（utils/text.rs）· RAG/Wiki 设置保存后状态未即时更新修复（PR #60）|
 | 🔧 | **mw** | [@maowei0427](https://github.com/maowei0427) | 10 | `+1,228 / -244` | 日志响应内容记录 · Trace ID 追踪 · 详情页体验优化 · 知识库 embedding 批次配置 |
+| 🛠 | **chyuan** | [@chyuan-cuihongyuan](https://github.com/chyuan-cuihongyuan) | 5 | `+524 / -103` | 统一上游重试判定决策函数与真值表测试 · 401/403 下游脱敏 · 上游终态错误短路 · 数据库故障误报修复 · Anthropic 内置工具 400 修复 |
+| 🐛 | **Jason** | [@freakojc](https://github.com/freakojc) | 3 | `+1,708 / -32` | 流式日志 499 误记修复 + Token 用量恢复（PR #62）· 仪表盘 cached_tokens 聚合覆盖索引消除 2 秒加载（PR #63）|
+| 🐞 | **xerina** | [@jiangnuonnuo](https://github.com/jiangnuonnuo) | 4 | `+257 / -82` | Wiki Unicode 文本切片 panic 进程崩溃修复 · 新增字符边界安全切片工具（utils/text.rs）· RAG/Wiki 设置保存后状态未即时更新修复（PR #60）|
+| 🔧 | **cham** | [@Cham1229](https://github.com/Cham1229) | 1 | `+444 / -111` | 自定义安全规则接入运行时安全扫描管道——规则加载·白名单短路·黑名单匹配·端到端集成测试（PR #64）|
 | 🐛 | **cyd** | [@cydmacro](https://github.com/cydmacro) | 2 | `+105 / -9` | Codex 工具调用参数一次性下发，修复部分客户端截断 · Codex Responses 请求 strip `prompt_cache_options` 兼容修复（PR #59）|
 | 🐛 | **breezewonders** | [@breezewonders-dev](https://github.com/breezewonders-dev) | 1 | `+14 / -0` | Chat-to-Responses 转换 store 字段归一化修复 |
 | 🐛 | **lianggq** | [@GQingL](https://github.com/GQingL) | 1 | `+91 / -9` | 日志日期筛选修复 · macOS 渠道删除按钮修复 |
@@ -637,8 +639,11 @@ WaLiAPI/
 #### 其他
 
 - ✅ 新增 19 个单元测试覆盖配置恢复、Codex auth.json 检测/重置、流式空闲超时、首帧诊断、Retry-After 解析等场景
-- 📝 **README 贡献者数据同步**：按最新提交记录更新贡献者提交数与代码变更统计
+- 📝 **README 贡献者数据同步**：新增 2 位贡献者 Jason（@freakojc，PR #62 #63）和 cham（@Cham1229，PR #64），按最新提交记录更新全体贡献者提交数与代码变更统计
 - 🔧 **版本号统一升级至 0.2.8**（package.json / Cargo.toml / tauri.conf.json / Cargo.lock）
+
+<details>
+<summary>📜 查看历史版本</summary>
 
 ### v0.2.7 (2026-09-02)
 
@@ -713,9 +718,6 @@ WaLiAPI/
 - 🔧 **边框样式优化**：优化界面边框视觉样式
 
 - 🔧 **版本号统一升级至 0.2.5**（package.json / Cargo.toml / tauri.conf.json / Cargo.lock）
-
-<details>
-<summary>📜 查看历史版本</summary>
 
 ### v0.2.4 (2026-08-28)
 
