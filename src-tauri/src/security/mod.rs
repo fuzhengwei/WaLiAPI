@@ -150,7 +150,8 @@ pub fn get_security_settings(settings: &crate::settings_store::SettingsStore) ->
         scan_tools: settings.get_bool("security.scan_tools", defaults.scan_tools),
         scan_network: settings.get_bool("security.scan_network", defaults.scan_network),
         redact_secrets: settings.get_bool("security.redact_secrets", defaults.redact_secrets),
-        block_on_critical: settings.get_bool("security.block_on_critical", defaults.block_on_critical),
+        block_on_critical: settings
+            .get_bool("security.block_on_critical", defaults.block_on_critical),
         max_scan_bytes: settings.get_u64("security.max_scan_bytes", defaults.max_scan_bytes as u64)
             as usize,
     }
@@ -205,42 +206,55 @@ pub fn decide_action(result: &mut SecurityScanResult, settings: &SecuritySetting
     }
 }
 
-pub fn scan_request(body: &serde_json::Value, settings: &SecuritySettings) -> SecurityScanResult {
+pub fn scan_request(
+    body: &serde_json::Value,
+    settings: &SecuritySettings,
+    custom_rules: &[rules::CustomRule],
+) -> SecurityScanResult {
     if !settings.enabled || !settings.scan_request {
         return SecurityScanResult::default();
     }
-    let mut result =
-        scanner::scan_with_budget(body, "request", settings, &scanner::ScanBudget::default())
-            .unwrap_or_else(|err| {
-                // Over-budget must fail closed as a high-risk block, never clean.
-                let mut blocked = SecurityScanResult::default();
-                blocked.risk_level = RiskLevel::Critical;
-                blocked.risk_score = 100;
-                blocked.action = SecurityAction::Block;
-                blocked.blocked_reason = Some(blocked.summary.clone());
-                blocked.summary = match err {
-                    scanner::BudgetError::Exceeded(msg) => msg,
-                };
-                blocked.blocked_reason = Some(blocked.summary.clone());
-                blocked.findings.push(SecurityFinding {
-                    phase: "request".to_string(),
-                    category: "budget".to_string(),
-                    rule_id: "budget.scan_exceeded".to_string(),
-                    severity: RiskLevel::Critical,
-                    title: "安全扫描预算超限".to_string(),
-                    description: "整个请求的扫描预算被超过，请求被 fail-closed 拒绝。".to_string(),
-                    location: "$".to_string(),
-                    evidence_masked: "budget exceeded".to_string(),
-                });
-                blocked
-            });
+    let mut result = scanner::scan_with_budget(
+        body,
+        "request",
+        settings,
+        &scanner::ScanBudget::default(),
+        custom_rules,
+    )
+    .unwrap_or_else(|err| {
+        // Over-budget must fail closed as a high-risk block, never clean.
+        let mut blocked = SecurityScanResult::default();
+        blocked.risk_level = RiskLevel::Critical;
+        blocked.risk_score = 100;
+        blocked.action = SecurityAction::Block;
+        blocked.blocked_reason = Some(blocked.summary.clone());
+        blocked.summary = match err {
+            scanner::BudgetError::Exceeded(msg) => msg,
+        };
+        blocked.blocked_reason = Some(blocked.summary.clone());
+        blocked.findings.push(SecurityFinding {
+            phase: "request".to_string(),
+            category: "budget".to_string(),
+            rule_id: "budget.scan_exceeded".to_string(),
+            severity: RiskLevel::Critical,
+            title: "安全扫描预算超限".to_string(),
+            description: "整个请求的扫描预算被超过，请求被 fail-closed 拒绝。".to_string(),
+            location: "$".to_string(),
+            evidence_masked: "budget exceeded".to_string(),
+        });
+        blocked
+    });
     decide_action(&mut result, settings);
     result
 }
 
 /// Scan an upstream response for risks (sensitive info, tracking, etc.)
 /// Uses a response-side budget with a looser default (responses may be large).
-pub fn scan_response(body: &serde_json::Value, settings: &SecuritySettings) -> SecurityScanResult {
+pub fn scan_response(
+    body: &serde_json::Value,
+    settings: &SecuritySettings,
+    custom_rules: &[rules::CustomRule],
+) -> SecurityScanResult {
     if !settings.enabled || !settings.scan_response {
         return SecurityScanResult::default();
     }
@@ -251,18 +265,16 @@ pub fn scan_response(body: &serde_json::Value, settings: &SecuritySettings) -> S
         max_elapsed: Some(std::time::Duration::from_millis(800)),
         max_text_bytes_per_string: Some(64 * 1024),
     };
-    let mut result =
-        scanner::scan_with_budget(body, "response", settings, &budget).unwrap_or_else(|err| {
-            match err {
-                scanner::BudgetError::Exceeded(msg) => {
-                    let mut blocked = SecurityScanResult::default();
-                    blocked.risk_level = RiskLevel::Critical;
-                    blocked.risk_score = 100;
-                    blocked.action = SecurityAction::Block;
-                    blocked.summary = msg;
-                    blocked.blocked_reason = Some(blocked.summary.clone());
-                    blocked
-                }
+    let mut result = scanner::scan_with_budget(body, "response", settings, &budget, custom_rules)
+        .unwrap_or_else(|err| match err {
+            scanner::BudgetError::Exceeded(msg) => {
+                let mut blocked = SecurityScanResult::default();
+                blocked.risk_level = RiskLevel::Critical;
+                blocked.risk_score = 100;
+                blocked.action = SecurityAction::Block;
+                blocked.summary = msg;
+                blocked.blocked_reason = Some(blocked.summary.clone());
+                blocked
             }
         });
     decide_action(&mut result, settings);

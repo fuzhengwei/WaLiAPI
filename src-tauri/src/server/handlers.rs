@@ -35,7 +35,7 @@ fn is_key_lookup_storage_error(err: &sqlx::Error) -> bool {
 /// verbatim); boxing it would ripple through every handler call site for no
 /// measurable gain, so the lint is scoped.
 #[allow(clippy::result_large_err)]
-fn audit_original(
+async fn audit_original(
     protocol: security::gate::DownstreamProtocol,
     endpoint: &str,
     original_json: serde_json::Value,
@@ -53,6 +53,13 @@ fn audit_original(
         .and_then(|s| s.as_bool())
         .unwrap_or(false);
     let settings = security::get_security_settings(&shared.state.settings);
+    let custom_rules = if settings.enabled {
+        security::rules::CustomRuleRepository::get_enabled(&shared.state.db.pool)
+            .await
+            .unwrap_or_default()
+    } else {
+        vec![]
+    };
     match security::gate::gate_original(
         protocol,
         endpoint,
@@ -63,6 +70,7 @@ fn audit_original(
         trace_id,
         &settings,
         None,
+        custom_rules,
     ) {
         Ok(audited) => Ok(audited),
         Err(security::gate::SecurityGateError::ApprovalRequired { message }) => Err((
@@ -510,7 +518,9 @@ pub async fn handle_chat_completions(
         None,
         trace_id.clone(),
         &shared,
-    ) {
+    )
+    .await
+    {
         Ok(audited) => audited,
         Err(response) => return response,
     };
@@ -872,9 +882,8 @@ async fn handle_stream(
                             // channels; the tail returns this status (an
                             // upstream 401/403 is masked to 502; last_error
                             // above keeps the real response text).
-                            last_error_status = Some(
-                                StatusCode::from_u16(downstream_status).unwrap_or(status),
-                            );
+                            last_error_status =
+                                Some(StatusCode::from_u16(downstream_status).unwrap_or(status));
                             break;
                         }
                     }
@@ -1415,7 +1424,9 @@ impl NativeSseUsageParser {
         match value.get("type").and_then(|value| value.as_str()) {
             Some("message_start") => {
                 self.input = value.pointer("/message/usage").map(anthropic_input_usage);
-                self.cached = value.pointer("/message/usage/cache_read_input_tokens").and_then(|v| v.as_i64());
+                self.cached = value
+                    .pointer("/message/usage/cache_read_input_tokens")
+                    .and_then(|v| v.as_i64());
             }
             Some("message_delta") => {
                 self.output = value
@@ -1428,8 +1439,13 @@ impl NativeSseUsageParser {
     }
 
     fn finish(self) -> Option<(i64, i64, i64)> {
-        (!self.malformed_or_oversized && self.stopped)
-            .then(|| (self.input.unwrap_or(0), self.output.unwrap_or(0), self.cached.unwrap_or(0)))
+        (!self.malformed_or_oversized && self.stopped).then(|| {
+            (
+                self.input.unwrap_or(0),
+                self.output.unwrap_or(0),
+                self.cached.unwrap_or(0),
+            )
+        })
     }
 }
 
@@ -1822,7 +1838,9 @@ pub async fn handle_messages(
         query.clone(),
         None,
         &shared,
-    ) {
+    )
+    .await
+    {
         Ok(audited) => audited,
         Err(response) => return response,
     };
@@ -2300,7 +2318,9 @@ pub async fn handle_messages_count_tokens(
         query.clone(),
         None,
         &shared,
-    ) {
+    )
+    .await
+    {
         Ok(audited) => audited,
         Err(response) => return response,
     };
@@ -2478,7 +2498,9 @@ pub async fn handle_responses(
         None,
         trace_id.clone(),
         &shared,
-    ) {
+    )
+    .await
+    {
         Ok(audited) => audited,
         Err(response) => return response,
     };
@@ -2791,9 +2813,8 @@ async fn handle_responses_stream(
                             // channels; the tail returns this status (an
                             // upstream 401/403 is masked to 502; last_error
                             // above keeps the real response text).
-                            last_error_status = Some(
-                                StatusCode::from_u16(downstream_status).unwrap_or(status),
-                            );
+                            last_error_status =
+                                Some(StatusCode::from_u16(downstream_status).unwrap_or(status));
                             break;
                         }
                     }
@@ -3160,7 +3181,9 @@ pub async fn handle_embeddings(
         None,
         trace_id.clone(),
         &shared,
-    ) {
+    )
+    .await
+    {
         Ok(audited) => audited,
         Err(response) => return response,
     };
@@ -3893,6 +3916,7 @@ mod anthropic_handler_tests {
                 None,
                 &settings,
                 None,
+                vec![],
             )
             .unwrap();
             assert_eq!(audited.envelope.downstream_protocol, protocol);
@@ -3918,6 +3942,7 @@ mod anthropic_handler_tests {
             None,
             &crate::security::SecuritySettings::default(),
             None,
+            vec![],
         )
         .unwrap();
         let raw_str = serde_json::to_string(&raw).unwrap();

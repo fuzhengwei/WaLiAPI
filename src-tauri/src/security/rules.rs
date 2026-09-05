@@ -456,7 +456,6 @@ impl CustomRuleRepository {
 
 // ─── Rule matching helpers ──────────────────────────────────────────────────
 
-#[allow(dead_code)]
 pub fn apply_custom_rules(
     text: &str,
     phase: &str,
@@ -496,7 +495,6 @@ pub fn apply_custom_rules(
     }
 }
 
-#[allow(dead_code)]
 pub fn is_whitelisted(category: &str, value: &str, custom_rules: &[CustomRule]) -> bool {
     let lower = value.to_ascii_lowercase();
     custom_rules.iter().any(|r| {
@@ -507,7 +505,6 @@ pub fn is_whitelisted(category: &str, value: &str, custom_rules: &[CustomRule]) 
     })
 }
 
-#[allow(dead_code)]
 fn parse_severity(s: &str) -> RiskLevel {
     match s {
         "info" => RiskLevel::Info,

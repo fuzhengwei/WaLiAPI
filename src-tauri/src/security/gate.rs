@@ -28,6 +28,7 @@
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+use super::rules::CustomRule;
 use super::scanner::ScanBudget;
 use super::{redact, scanner, SecurityScanResult, SecuritySettings};
 
@@ -136,6 +137,8 @@ pub struct SecurityGateInput {
     pub settings: SecuritySettings,
     /// Overrides scanner budget defaults.  `None` → [`ScanBudget::default`].
     pub budget: Option<ScanBudget>,
+    /// User-defined custom rules (blacklist/whitelist) loaded from the database.
+    pub custom_rules: Vec<CustomRule>,
 }
 
 /// Output of the security gate.
@@ -234,15 +237,20 @@ pub fn audit_request(input: SecurityGateInput) -> Result<SecurityGateOutput, Sec
         (SecurityScanResult::default(), features)
     } else {
         // Full-tree scan with cumulative budgets over the ORIGINAL protocol JSON.
-        let mut result =
-            match scanner::scan_with_budget(&input.original_json, "request", settings, &budget) {
-                Ok(result) => result,
-                Err(scanner::BudgetError::Exceeded(reason)) => {
-                    // Fail-closed: never reported as clean.  The caller short-circuits
-                    // to `security_scan_budget_exceeded` and never contacts upstream.
-                    return Err(SecurityGateError::BudgetExceeded { message: reason });
-                }
-            };
+        let mut result = match scanner::scan_with_budget(
+            &input.original_json,
+            "request",
+            settings,
+            &budget,
+            &input.custom_rules,
+        ) {
+            Ok(result) => result,
+            Err(scanner::BudgetError::Exceeded(reason)) => {
+                // Fail-closed: never reported as clean.  The caller short-circuits
+                // to `security_scan_budget_exceeded` and never contacts upstream.
+                return Err(SecurityGateError::BudgetExceeded { message: reason });
+            }
+        };
 
         super::decide_action(&mut result, settings);
 
@@ -312,6 +320,7 @@ pub fn audit_envelope(
     envelope: RequestEnvelope,
     settings: &SecuritySettings,
     budget: Option<ScanBudget>,
+    custom_rules: Vec<CustomRule>,
 ) -> Result<AuditedRequest, SecurityGateError> {
     let safe_forward_headers = envelope.safe_forward_headers.clone();
     let output = audit_request(SecurityGateInput {
@@ -325,6 +334,7 @@ pub fn audit_envelope(
         trace_id: envelope.trace_id.clone(),
         settings: settings.clone(),
         budget,
+        custom_rules,
     })?;
     Ok(AuditedRequest {
         envelope,
@@ -345,6 +355,7 @@ pub fn audit_envelope(
 /// this match, so a newly-enabled Images/Audio handler cannot forward model
 /// content without the audit.  Every handler entry point must route through
 /// [`gate_original`], which delegates here.
+#[allow(clippy::too_many_arguments)]
 pub fn gate_dispatch(
     protocol: DownstreamProtocol,
     endpoint: &str,
@@ -355,6 +366,7 @@ pub fn gate_dispatch(
     trace_id: Option<String>,
     settings: &SecuritySettings,
     budget: Option<ScanBudget>,
+    custom_rules: Vec<CustomRule>,
 ) -> Result<AuditedRequest, SecurityGateError> {
     match protocol {
         // Compiler-enforced checklist: ALL variants, no wildcard arm.  Forgetting
@@ -378,7 +390,7 @@ pub fn gate_dispatch(
                 stream,
                 trace_id,
             };
-            audit_envelope(envelope, settings, budget)
+            audit_envelope(envelope, settings, budget, custom_rules)
         }
     }
 }
@@ -391,6 +403,7 @@ pub fn gate_dispatch(
 ///
 /// Delegates to [`gate_dispatch`] so the exhaustive-variant guard above applies
 /// to every handler path.
+#[allow(clippy::too_many_arguments)]
 pub fn gate_original(
     protocol: DownstreamProtocol,
     endpoint: &str,
@@ -401,6 +414,7 @@ pub fn gate_original(
     trace_id: Option<String>,
     settings: &SecuritySettings,
     budget: Option<ScanBudget>,
+    custom_rules: Vec<CustomRule>,
 ) -> Result<AuditedRequest, SecurityGateError> {
     gate_dispatch(
         protocol,
@@ -412,6 +426,7 @@ pub fn gate_original(
         trace_id,
         settings,
         budget,
+        custom_rules,
     )
 }
 
@@ -453,11 +468,12 @@ pub fn audit_delta_strings(
             .map(|s| serde_json::Value::String(s.clone()))
             .collect(),
     );
-    let mut result = scanner::scan_with_budget(&delta_tree, &phase, settings, &budget).map_err(
-        |scanner::BudgetError::Exceeded(reason)| SecurityGateError::BudgetExceeded {
-            message: reason,
-        },
-    )?;
+    let mut result = scanner::scan_with_budget(&delta_tree, &phase, settings, &budget, &[])
+        .map_err(
+            |scanner::BudgetError::Exceeded(reason)| SecurityGateError::BudgetExceeded {
+                message: reason,
+            },
+        )?;
     super::decide_action(&mut result, settings);
     Ok(result)
 }
@@ -494,6 +510,7 @@ mod gate_tests {
             trace_id: None,
             settings: default_settings(),
             budget: None,
+            custom_rules: vec![],
         })
     }
 
@@ -524,6 +541,7 @@ mod gate_tests {
             trace_id: None,
             settings,
             budget: None,
+            custom_rules: vec![],
         })
         .unwrap_err();
         assert!(matches!(&err, SecurityGateError::ApprovalRequired { .. }));
@@ -553,6 +571,7 @@ mod gate_tests {
             trace_id: None,
             settings,
             budget: Some(budget),
+            custom_rules: vec![],
         })
         .unwrap_err();
         assert_eq!(err.code(), "security_scan_budget_exceeded");
@@ -576,6 +595,7 @@ mod gate_tests {
             trace_id: None,
             settings,
             budget: None,
+            custom_rules: vec![],
         })
         .unwrap();
         let forward_str = serde_json::to_string(&out.forward_json).unwrap();
@@ -600,6 +620,7 @@ mod gate_tests {
             trace_id: None,
             settings,
             budget: None,
+            custom_rules: vec![],
         })
         .unwrap();
         // Forward keeps original content under audit mode...
@@ -704,6 +725,7 @@ mod gate_tests {
             trace_id: None,
             settings,
             budget: None,
+            custom_rules: vec![],
         })
         .unwrap();
         assert!(!out.budget_exceeded);
@@ -734,6 +756,7 @@ mod gate_tests {
             trace_id: None,
             settings: settings(),
             budget: None,
+            custom_rules: vec![],
         })
         .unwrap_err();
         assert!(matches!(&err, SecurityGateError::ApprovalRequired { .. }));
@@ -756,6 +779,7 @@ mod gate_tests {
             trace_id: None,
             settings: default_settings(),
             budget: Some(budget),
+            custom_rules: vec![],
         })
         .unwrap_err();
         assert_eq!(err.code(), "security_scan_budget_exceeded");
@@ -846,6 +870,7 @@ mod gate_tests {
                 None,
                 &settings,
                 None,
+                vec![],
             )
             .unwrap();
             assert_eq!(audited.envelope.downstream_protocol, protocol);
