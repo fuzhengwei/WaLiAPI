@@ -1,6 +1,7 @@
 use crate::db::repository::Repository;
 use crate::AppState;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::fs;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -367,32 +368,283 @@ fn get_waliapi_key(state: &Arc<AppState>) -> Result<String, String> {
 
 // ── 各应用配置写入逻辑 ──
 
-fn write_claude_code(
+/// 先读取并验证，再创建备份并原子替换。这样格式错误或认证冲突不会留下新的
+/// 备份/缺失标记，更不会触碰用户的原文件。
+fn write_claude_code_transactional(
     config_dir: &PathBuf,
     waliapi_url: &str,
     waliapi_key: &str,
     model: &str,
 ) -> Result<(), String> {
     let settings_path = config_dir.join("settings.json");
-    let mut settings: serde_json::Value = if settings_path.exists() {
-        read_json_file(&settings_path).unwrap_or_else(|_| serde_json::json!({}))
+    let original = if settings_path.exists() {
+        Some(fs::read(&settings_path).map_err(|e| format!("读取配置失败: {e}"))?)
     } else {
-        serde_json::json!({})
+        None
+    };
+    let mut settings: serde_json::Value = match &original {
+        Some(bytes) => serde_json::from_slice(bytes).map_err(|e| format!("解析 JSON 失败: {e}"))?,
+        None => serde_json::json!({}),
     };
 
-    if let Some(obj) = settings.as_object_mut() {
-        obj.insert(
-            "env".to_string(),
-            serde_json::json!({
-                "ANTHROPIC_BASE_URL": waliapi_url,
-                "ANTHROPIC_API_KEY": waliapi_key,
-                "ANTHROPIC_MODEL": model
-            }),
-        );
-        obj.insert("_waliapi".to_string(), serde_json::json!(true));
+    apply_waliapi_claude_code_settings(&mut settings, waliapi_url, waliapi_key, model)?;
+    let json = to_pretty_json(&settings).map_err(|e| format!("序列化 JSON 失败: {e}"))?;
+
+    // 只有所有校验均通过后才接触恢复资料；已有备份永远代表首次应用前的原始字节。
+    let backup = backup_path(&settings_path);
+    let absent = absent_marker_path(&settings_path);
+    let created_backup = original.is_some() && !backup.exists();
+    let created_absent_marker = original.is_none() && !absent.exists();
+    if created_backup {
+        atomic_write(&backup, original.as_ref().expect("checked above"))?;
+    }
+    if created_absent_marker {
+        if let Err(error) = atomic_write(&absent, b"") {
+            if created_backup {
+                let _ = fs::remove_file(&backup);
+            }
+            return Err(error);
+        }
     }
 
-    write_json_file(&settings_path, &settings)
+    if let Err(error) = atomic_write(&settings_path, json.as_bytes()) {
+        // 本次失败不能改变恢复资料的可见状态。
+        if created_backup {
+            let _ = fs::remove_file(&backup);
+        }
+        if created_absent_marker {
+            let _ = fs::remove_file(&absent);
+        }
+        return Err(error);
+    }
+    Ok(())
+}
+
+/// Claude Code 对不在内置目录中的模型会按 200K 上下文处理。参考 Codex 的
+/// GPT-5.6 目录，已知 gpt-5.6 系列在 Claude Code 网关场景应声明为 372K。
+const CLAUDE_CODE_GPT_56_CONTEXT_TOKENS: &str = "372000";
+const CLAUDE_CODE_GPT_56_AUTO_COMPACT_TOKENS: &str = "360000";
+const WALIAPI_CLAUDE_SETTINGS_META: &str = "_waliapi_claude_code";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ClaudeCodeModelCompatibility {
+    context_tokens: Option<&'static str>,
+    auto_compact_tokens: Option<&'static str>,
+    behaves_as: Option<&'static str>,
+    source: &'static str,
+    confidence: &'static str,
+}
+
+fn claude_code_model_compatibility(model: &str) -> ClaudeCodeModelCompatibility {
+    // 渠道列表有时以 `gpt-5.6-luna[1m]` 标示上游变体；兼容声明仍使用已
+    // 确认的 GPT-5.6 注册表项，未知模型绝不根据名称臆造窗口。
+    let model = model.trim().to_ascii_lowercase();
+    let model = model.split('[').next().unwrap_or(&model);
+    if model.starts_with("gpt-5.6") {
+        ClaudeCodeModelCompatibility {
+            context_tokens: Some(CLAUDE_CODE_GPT_56_CONTEXT_TOKENS),
+            auto_compact_tokens: Some(CLAUDE_CODE_GPT_56_AUTO_COMPACT_TOKENS),
+            behaves_as: Some("claude-opus-4-8"),
+            source: "verified-gpt-5.6-model-metadata",
+            confidence: "verified",
+        }
+    } else {
+        ClaudeCodeModelCompatibility {
+            context_tokens: None,
+            auto_compact_tokens: None,
+            behaves_as: None,
+            source: "none",
+            confidence: "unknown",
+        }
+    }
+}
+
+fn waliapi_managed_string_array(
+    settings: &serde_json::Map<String, serde_json::Value>,
+    key: &str,
+) -> Vec<String> {
+    settings
+        .get(WALIAPI_CLAUDE_SETTINGS_META)
+        .and_then(|value| value.get(key))
+        .and_then(serde_json::Value::as_array)
+        .map(|values| {
+            values
+                .iter()
+                .filter_map(serde_json::Value::as_str)
+                .map(ToOwned::to_owned)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn secret_fingerprint(value: &str) -> String {
+    Sha256::digest(value.as_bytes())
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect()
+}
+
+fn is_legacy_waliapi_settings(root: &serde_json::Map<String, serde_json::Value>) -> bool {
+    root.get("_waliapi").and_then(serde_json::Value::as_bool) == Some(true)
+        && !root.contains_key(WALIAPI_CLAUDE_SETTINGS_META)
+}
+
+/// 将 WaLiAPI 所有的字段投影到 Claude Code settings。settings.json 同时属于
+/// Claude Code 和用户，绝不能为了更新网关而整体替换 env 或 modelPicker。
+fn apply_waliapi_claude_code_settings(
+    settings: &mut serde_json::Value,
+    waliapi_url: &str,
+    waliapi_key: &str,
+    model: &str,
+) -> Result<(), String> {
+    let root = settings.as_object_mut().ok_or_else(|| {
+        "Claude Code settings.json 必须是 JSON 对象，已取消写入以保护原配置".to_string()
+    })?;
+
+    let previously_managed_env = waliapi_managed_string_array(root, "managedEnvKeys");
+    let previously_managed_picker_models = waliapi_managed_string_array(root, "modelPickerModels");
+    let previous_auth_fingerprint = root
+        .get(WALIAPI_CLAUDE_SETTINGS_META)
+        .and_then(|m| m.get("managedAuthFingerprint"))
+        .and_then(|f| f.as_str())
+        .map(ToOwned::to_owned);
+    let legacy_settings = is_legacy_waliapi_settings(root);
+
+    let env = root
+        .entry("env".to_string())
+        .or_insert_with(|| serde_json::json!({}))
+        .as_object_mut()
+        .ok_or_else(|| {
+            "Claude Code settings.json 的 env 必须是 JSON 对象，已取消写入以保护原配置".to_string()
+        })?;
+
+    // Claude Code 网关统一使用真实数据面密钥作为 Bearer token。旧版本写入的
+    // API_KEY 仅在值等于本次选择的密钥、或已记录为受管字段时迁移；未知凭据必须
+    // 阻止写入，避免覆盖用户自己的 Anthropic 配置。
+    for key in ["ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"] {
+        if let Some(value) = env.get(key) {
+            let is_target_key = value.as_str() == Some(waliapi_key);
+            let is_managed = previously_managed_env.iter().any(|managed| managed == key);
+            if !is_target_key
+                && !is_managed
+            {
+                return Err(format!(
+                    "Claude Code 已存在非 WaLiAPI 管理的 {key}；为保护现有凭证未写入。请先在 settings.json 中移除或手动选择一种认证方式"
+                ));
+            }
+            if key == "ANTHROPIC_API_KEY" && is_managed && !is_target_key {
+                let fingerprint_matches = previous_auth_fingerprint
+                    .as_deref()
+                    .zip(value.as_str())
+                    .is_some_and(|(expected, actual)| secret_fingerprint(actual) == expected);
+                if !fingerprint_matches {
+                    return Err("Claude Code 已修改受管的 ANTHROPIC_API_KEY；为保护现有凭证未写入".to_string());
+                }
+            }
+        }
+    }
+
+    // 仅替换本次网关需要的字段；其余用户环境变量（包括企业代理和自定义模型）原样保留。
+    env.insert(
+        "ANTHROPIC_BASE_URL".to_string(),
+        serde_json::Value::String(waliapi_url.trim().trim_end_matches('/').to_string()),
+    );
+    env.insert(
+        "ANTHROPIC_AUTH_TOKEN".to_string(),
+        serde_json::Value::String(waliapi_key.to_string()),
+    );
+    env.remove("ANTHROPIC_API_KEY");
+    // 受管模型环境变量不应覆盖 Claude Code 的 /model 持久化选择。仅删除由
+    // WaLiAPI 以前写入的值或 legacy 配置中的值；用户自行设置的覆盖原样保留。
+    if previously_managed_env.iter().any(|managed| managed == "ANTHROPIC_MODEL")
+        || legacy_settings
+    {
+        env.remove("ANTHROPIC_MODEL");
+    }
+
+    let mut managed_env_keys = vec![
+        "ANTHROPIC_BASE_URL".to_string(),
+        "ANTHROPIC_AUTH_TOKEN".to_string(),
+    ];
+    let compatibility = claude_code_model_compatibility(model);
+    if let (Some(max_context), Some(auto_compact)) = (
+        compatibility.context_tokens,
+        compatibility.auto_compact_tokens,
+    ) {
+        for (key, value) in [
+            ("CLAUDE_CODE_MAX_CONTEXT_TOKENS", max_context),
+            ("CLAUDE_CODE_AUTO_COMPACT_WINDOW", auto_compact),
+        ] {
+            if !env.contains_key(key) {
+                env.insert(
+                    key.to_string(),
+                    serde_json::Value::String(value.to_string()),
+                );
+                managed_env_keys.push(key.to_string());
+            }
+        }
+    }
+
+    let mut managed_picker_models = Vec::new();
+    if !model.trim().to_ascii_lowercase().starts_with("claude-")
+        && compatibility.behaves_as.is_some()
+    {
+        let picker = root
+            .entry("modelPicker".to_string())
+            .or_insert_with(|| serde_json::json!({ "options": [] }))
+            .as_object_mut()
+            .ok_or_else(|| {
+                "Claude Code settings.json 的 modelPicker 必须是 JSON 对象，已取消写入以保护原配置"
+                    .to_string()
+            })?;
+        let options = picker
+            .get_mut("options")
+            .and_then(serde_json::Value::as_array_mut)
+            .ok_or_else(|| "Claude Code settings.json 的 modelPicker.options 必须是数组，已取消写入以保护原配置".to_string())?;
+
+        // 仅删除此前由 WaLiAPI 加入的行，随后为当前模型写入一条最小兼容行。
+        options.retain(|option| {
+            let option_model = option.get("model").and_then(serde_json::Value::as_str);
+            !option_model.is_some_and(|option_model| {
+                previously_managed_picker_models
+                    .iter()
+                    .any(|managed| managed == option_model)
+            })
+        });
+
+        if !options.iter().any(|option| {
+            option.get("model").and_then(serde_json::Value::as_str) == Some(model.trim())
+        }) {
+            // Claude Code 2.1.266 已正式支持该形状。behavesAs 仅用于客户端的
+            // prompt/capability/effort 处理，请求中的 model 仍保持用户选择的值。
+            options.push(serde_json::json!({
+                "model": model.trim(),
+                "label": model.trim(),
+                "description": "由 WaLiAPI 网关提供",
+                "behavesAs": compatibility.behaves_as.expect("checked above")
+            }));
+            managed_picker_models.push(model.trim().to_string());
+        }
+    }
+
+    root.insert("model".to_string(), serde_json::Value::String(model.trim().to_string()));
+    root.insert("_waliapi".to_string(), serde_json::json!(true));
+    root.insert(
+        WALIAPI_CLAUDE_SETTINGS_META.to_string(),
+        serde_json::json!({
+            "version": 3,
+            "managedEnvKeys": managed_env_keys,
+            "modelPickerModels": managed_picker_models,
+            "managedTopLevelFields": ["model"],
+            "managedAuthFingerprint": secret_fingerprint(waliapi_key),
+            "modelCompatibility": {
+                "model": model.trim(),
+                "source": compatibility.source,
+                "confidence": compatibility.confidence,
+            },
+        }),
+    );
+    Ok(())
 }
 
 fn write_codex(
@@ -838,7 +1090,18 @@ fn detect_applied(config_path: &PathBuf, app_name: &str) -> bool {
                 Ok(v) => v,
                 Err(_) => return false,
             };
-            v.get("_waliapi").and_then(|v| v.as_bool()).unwrap_or(false)
+            if app_name == "claude-code" {
+                let managed = v.get(WALIAPI_CLAUDE_SETTINGS_META)
+                    .and_then(|m| m.get("version"))
+                    .and_then(|n| n.as_u64())
+                    .is_some_and(|version| version >= 3);
+                let env = v.get("env").and_then(|e| e.as_object());
+                managed && v.get("_waliapi").and_then(|x| x.as_bool()) == Some(true)
+                    && env.and_then(|e| e.get("ANTHROPIC_AUTH_TOKEN")).and_then(|x| x.as_str()).is_some_and(|s| !s.is_empty())
+                    && env.and_then(|e| e.get("ANTHROPIC_API_KEY")).is_none()
+            } else {
+                v.get("_waliapi").and_then(|v| v.as_bool()).unwrap_or(false)
+            }
         }
         "codex" => content.contains("WaLiAPI") || content.contains("waliapi"),
         "gemini-cli" => content.contains("WaLiAPI"),
@@ -964,7 +1227,10 @@ pub async fn apply_app_config_impl(
 
     // 仅在「未应用」状态下备份：避免重复写入时把已被修改的配置当成原始配置覆盖备份，
     // 否则「恢复原配置」会恢复成 waliapi 配置，永远切不回去。
-    if detect_applied(&config_path, app_name) {
+    if app_name == "claude-code" {
+        // Claude Code 在事务写入器中完成读取、校验、首次备份和原子替换；
+        // 外层不能提前创建备份，否则冲突失败会误消费原始备份。
+    } else if detect_applied(&config_path, app_name) {
         // 已处于网关配置状态，保留最初的备份，直接重写即可
     } else if config_path.exists() {
         let _ = backup_config(&config_path);
@@ -976,7 +1242,9 @@ pub async fn apply_app_config_impl(
     }
 
     let result = match app_name {
-        "claude-code" => write_claude_code(&config_dir, &waliapi_url, &api_key, &model),
+        "claude-code" => {
+            write_claude_code_transactional(&config_dir, &waliapi_url, &api_key, &model)
+        }
         "codex" => write_codex(&config_dir, &waliapi_url, &api_key, &model),
         "gemini-cli" => write_gemini_cli(&config_dir, &waliapi_url, &api_key, &model),
         "claude-desktop" => write_claude_desktop(&config_dir, &waliapi_url, &api_key, &model),
@@ -989,7 +1257,12 @@ pub async fn apply_app_config_impl(
 
     match result {
         Ok(()) => {
-            let msg = if app_name == "walicode" {
+            let msg = if app_name == "claude-code" {
+                format!(
+                    "WaLiAPI 网关配置已写入 {}。Claude Code 的 API Key 网关不要求 Anthropic 账户登录或执行 /login，请重启 Claude Code 生效",
+                    config_path.display()
+                )
+            } else if app_name == "walicode" {
                 format!(
                     "配置已写入。请重启 WaLiCode 使配置生效（WaLiCode 会使用本地缓存覆盖旧配置）"
                 )
@@ -1003,7 +1276,9 @@ pub async fn apply_app_config_impl(
             })
         }
         Err(e) => {
-            let _ = restore_config(&config_path);
+            if app_name != "claude-code" {
+                let _ = restore_config(&config_path);
+            }
             Ok(ApplyResult {
                 success: false,
                 message: e,
@@ -1280,5 +1555,183 @@ mod tests {
         let result = reset_codex_auth_in(&dir).unwrap();
         assert!(!result.success);
         assert!(result.message.contains("codex login"));
+    }
+
+    #[test]
+    fn claude_code_projection_preserves_user_fields_and_merges_env() {
+        let mut settings = serde_json::json!({
+            "permissions": {"allow": ["Bash"]},
+            "env": {"CUSTOM_PROXY": "http://proxy", "ANTHROPIC_MODEL": "old"},
+            "modelPicker": {"options": [{"model": "user-model", "label": "User model"}]}
+        });
+
+        apply_waliapi_claude_code_settings(
+            &mut settings,
+            "http://127.0.0.1:8777///",
+            "sk-waliapi-test",
+            "gpt-5.6-luna[1m]",
+        )
+        .unwrap();
+
+        assert_eq!(settings["permissions"]["allow"][0], "Bash");
+        assert_eq!(settings["env"]["CUSTOM_PROXY"], "http://proxy");
+        assert_eq!(
+            settings["env"]["ANTHROPIC_BASE_URL"],
+            "http://127.0.0.1:8777"
+        );
+        assert_eq!(settings["env"]["ANTHROPIC_AUTH_TOKEN"], "sk-waliapi-test");
+        assert!(settings["env"]["ANTHROPIC_API_KEY"].is_null());
+        assert_eq!(settings["model"], "gpt-5.6-luna[1m]");
+        assert_eq!(settings["env"]["CLAUDE_CODE_MAX_CONTEXT_TOKENS"], "372000");
+        assert_eq!(settings["env"]["CLAUDE_CODE_AUTO_COMPACT_WINDOW"], "360000");
+        assert_eq!(settings["modelPicker"]["options"][0]["model"], "user-model");
+    }
+
+    #[test]
+    fn claude_code_projection_respects_user_context_and_known_claude_model() {
+        let mut settings = serde_json::json!({
+            "env": {
+                "CLAUDE_CODE_MAX_CONTEXT_TOKENS": "123456",
+                "CLAUDE_CODE_AUTO_COMPACT_WINDOW": "120000"
+            },
+            "modelPicker": {"options": [{"model": "user-model"}]}
+        });
+
+        apply_waliapi_claude_code_settings(
+            &mut settings,
+            "http://gateway/",
+            "key",
+            "claude-sonnet-4-6",
+        )
+        .unwrap();
+
+        assert_eq!(settings["env"]["CLAUDE_CODE_MAX_CONTEXT_TOKENS"], "123456");
+        assert_eq!(settings["env"]["CLAUDE_CODE_AUTO_COMPACT_WINDOW"], "120000");
+        assert_eq!(
+            settings["modelPicker"]["options"].as_array().unwrap().len(),
+            1
+        );
+    }
+
+    #[test]
+    fn claude_code_unknown_model_does_not_guess_context_or_capabilities() {
+        let mut settings = serde_json::json!({"env": {}});
+
+        apply_waliapi_claude_code_settings(
+            &mut settings,
+            "http://gateway",
+            "key",
+            "vendor-private-model",
+        )
+        .unwrap();
+
+        assert!(settings["env"]["CLAUDE_CODE_MAX_CONTEXT_TOKENS"].is_null());
+        assert!(settings.get("modelPicker").is_none());
+        assert_eq!(
+            settings[WALIAPI_CLAUDE_SETTINGS_META]["modelCompatibility"]["confidence"],
+            "unknown"
+        );
+    }
+
+    #[test]
+    fn claude_code_projection_rejects_unowned_auth_without_mutation() {
+        let mut settings = serde_json::json!({
+            "env": {"ANTHROPIC_AUTH_TOKEN": "user-secret", "CUSTOM": "keep"}
+        });
+        let original = settings.clone();
+
+        let error = apply_waliapi_claude_code_settings(
+            &mut settings,
+            "http://gateway",
+            "key",
+            "custom-model",
+        )
+        .unwrap_err();
+
+        assert!(error.contains("ANTHROPIC_AUTH_TOKEN"));
+        assert_eq!(settings, original);
+    }
+
+    #[test]
+    fn claude_code_legacy_api_key_is_migrated_only_when_matching_selected_key() {
+        let mut settings = serde_json::json!({
+            "_waliapi": true,
+            "env": {"ANTHROPIC_API_KEY": "key"},
+            "modelPicker": {"options": [{"model": "user-model"}]}
+        });
+        apply_waliapi_claude_code_settings(&mut settings, "http://gateway", "key", "model").unwrap();
+        assert_eq!(settings["env"]["ANTHROPIC_AUTH_TOKEN"], "key");
+        assert!(settings["env"]["ANTHROPIC_API_KEY"].is_null());
+        assert_eq!(settings["model"], "model");
+        assert_eq!(settings[WALIAPI_CLAUDE_SETTINGS_META]["version"], 3);
+    }
+
+    #[test]
+    fn claude_code_legacy_unknown_api_key_is_rejected_without_mutation() {
+        let mut settings = serde_json::json!({
+            "_waliapi": true,
+            "env": {"ANTHROPIC_API_KEY": "user-secret"}
+        });
+        let original = settings.clone();
+        assert!(apply_waliapi_claude_code_settings(&mut settings, "http://gateway", "key", "model").is_err());
+        assert_eq!(settings, original);
+    }
+
+    #[test]
+    fn claude_code_user_rewrite_of_managed_api_key_is_rejected() {
+        let mut settings = serde_json::json!({
+            "env": {"ANTHROPIC_API_KEY": "user-edited"},
+            WALIAPI_CLAUDE_SETTINGS_META: {
+                "version": 3,
+                "managedEnvKeys": ["ANTHROPIC_API_KEY"],
+                "managedAuthFingerprint": secret_fingerprint("old-key")
+            }
+        });
+        let original = settings.clone();
+        assert!(apply_waliapi_claude_code_settings(&mut settings, "http://gateway", "new-key", "model").is_err());
+        assert_eq!(settings, original);
+    }
+
+    #[test]
+    fn claude_code_marker_alone_is_not_detected_as_applied() {
+        let dir = temp_dir("claude-marker-only");
+        let path = dir.join("settings.json");
+        fs::write(&path, br#"{"_waliapi":true}"#).unwrap();
+        assert!(!detect_applied(&path, "claude-code"));
+    }
+
+    #[test]
+    fn claude_code_transaction_preserves_original_backup_across_repeated_apply_and_restore() {
+        let dir = temp_dir("claude-transaction");
+        let path = dir.join("settings.json");
+        let original = br#"{"env":{"CUSTOM":"keep"},"permissions":{"allow":["Bash"]}}"#;
+        fs::write(&path, original).unwrap();
+
+        write_claude_code_transactional(&dir, "http://gateway/", "key-1", "custom-model").unwrap();
+        let backup = backup_path(&path);
+        assert_eq!(fs::read(&backup).unwrap(), original);
+
+        write_claude_code_transactional(&dir, "http://gateway/", "key-2", "claude-opus-4-6")
+            .unwrap();
+        assert_eq!(fs::read(&backup).unwrap(), original);
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&fs::read(&path).unwrap()).unwrap()["env"]
+                ["ANTHROPIC_AUTH_TOKEN"],
+            "key-2"
+        );
+
+        restore_config(&path).unwrap();
+        assert_eq!(fs::read(&path).unwrap(), original);
+    }
+
+    #[test]
+    fn claude_code_transaction_rejects_invalid_json_without_creating_backup() {
+        let dir = temp_dir("claude-invalid");
+        let path = dir.join("settings.json");
+        fs::write(&path, b"not-json").unwrap();
+
+        assert!(write_claude_code_transactional(&dir, "http://gateway", "key", "model").is_err());
+        assert_eq!(fs::read(&path).unwrap(), b"not-json");
+        assert!(!backup_path(&path).exists());
     }
 }

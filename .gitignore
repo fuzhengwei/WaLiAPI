@@ -54,3 +54,5 @@ src-tauri/resources/pdfium/*.so
 # 测试产物（Playwright 等）
 test-results/
 playwright-report/
+# OpenSpec 本地变更规划，不随代码提交
+/openspec/

@@ -5,7 +5,7 @@
 //! reuses these login/import/refresh primitives.
 
 use std::{
-    fs::{self, File, OpenOptions},
+    fs::{self, OpenOptions},
     io::{self, Write},
     path::{Path, PathBuf},
     sync::{
@@ -14,6 +14,9 @@ use std::{
     },
     time::Duration,
 };
+
+#[cfg(unix)]
+use std::fs::File;
 
 use axum::{
     extract::{Query, State},
@@ -1187,7 +1190,7 @@ where
         temporary.sync_all()?;
         set_private_permissions(&temporary_path)?;
         rename(&temporary_path, path)?;
-        File::open(parent)?.sync_all()?;
+        sync_parent_directory(parent)?;
         Ok(())
     })();
     if write_result.is_err() {
@@ -1198,6 +1201,20 @@ where
         path: path.to_owned(),
         backup_path,
     })
+}
+
+/// 将目录项持久化到磁盘。
+///
+/// Unix 可以打开目录并调用 `sync_all`；Windows 不支持对目录句柄执行同样
+/// 的操作，原子替换本身仍由 `rename` 保证，因此 Windows 这里不额外同步目录。
+#[cfg(unix)]
+fn sync_parent_directory(parent: &Path) -> io::Result<()> {
+    File::open(parent)?.sync_all()
+}
+
+#[cfg(not(unix))]
+fn sync_parent_directory(_: &Path) -> io::Result<()> {
+    Ok(())
 }
 
 #[cfg(unix)]

@@ -452,7 +452,7 @@ export function AppConfigPanel({ appName }: { appName: string }) {
               {resultKind === "apply" && appliedResult.success && (
                 <div className="mt-2 flex items-start gap-1.5 rounded-lg bg-blue-50 px-2.5 py-1.5 text-xs text-blue-600">
                   <Lightbulb size={13} className="mt-0.5 shrink-0" />
-                  <span>建议重启 {appInfo.label} 以避免缓存导致仍使用旧模型。重启后可在「日志」页面查看实际调用的模型。</span>
+                  <span>{appName === "claude-code" ? "配置已写入，尚未代表客户端对话验证成功。请重启 Claude Code 后发送一条短消息；若出现 Not logged in 或发送失败，请按网关日志中的认证/上游错误排查。" : `建议重启 ${appInfo.label} 以避免缓存导致仍使用旧模型。重启后可在「日志」页面查看实际调用的模型。`}</span>
                 </div>
               )}
               {appliedResult.success && appliedResult.authWarning && appName === "codex" && (

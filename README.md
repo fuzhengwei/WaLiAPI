@@ -97,6 +97,20 @@ WaLiAPI 提供两种部署方式：**桌面端安装**（适合个人开发者�
 
 在「应用配置」页面选择已安装的 AI 编程工具，一键写入网关地址和密钥，无需手动编辑配置文件。
 
+其中 Claude Code 使用的是 WaLiAPI 数据面 Bearer 网关（写入单一
+`ANTHROPIC_AUTH_TOKEN`，值为所选真实密钥；不会写入 `ANTHROPIC_API_KEY`）：应用配置会增量更新
+`~/.claude/settings.json`，保留已有环境变量、权限和模型选择，并在首次写入前
+保留可恢复的原文件备份。重复应用不会覆盖该备份；点击恢复即可回到写入前的
+原始内容，若文件原本不存在则会删除本次创建的文件。
+
+Claude Code 的网关密钥不等于 Anthropic 账号登录状态；配置写入后请重启客户端并发送一条消息验证。
+发送失败或出现「Not logged in」应按故障排查，不能忽略。只有
+需要使用 Anthropic 账号直连时才应登录。对于 Claude Code 目录未知的非 Claude
+模型，WaLiAPI 只会在已有可信模型元数据时写入上下文窗口；没有可信窗口时保留
+Claude Code 默认值，不会把未知模型擅自声明为 1M。需要自定义窗口时，请在
+`settings.json` 中明确设置 `CLAUDE_CODE_MAX_CONTEXT_TOKENS` 与不大于它的
+`CLAUDE_CODE_AUTO_COMPACT_WINDOW`，用户值会优先于自动兼容值。
+
 ### 方式二：Docker 部署（推荐云服务器/团队使用）
 
 WaLiAPI 提供 Docker 镜像，适合部署到 Linux 云服务器长期运行。镜像采用多阶段构建：Node/pnpm 编译前端，Rust 编译服务端二进制，运行时使用非 root 用户；SQLite 数据持久化在 `/data`。
