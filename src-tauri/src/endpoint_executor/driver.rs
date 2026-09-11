@@ -218,7 +218,9 @@ async fn record_channel_mode_outcome(
         crate::core::attempt::AttemptResult::Success(_) => {
             // 被动反哺（C-04）：真实请求传输成功 → 立即恢复渠道的主动探测
             // 健康标记（与 mode_health 的成功清除正交，各管各的表）。
-            repo.mark_probe_ok(channel_id);
+            // 必须 .await：mark_probe_ok 是 async fn，不 await 的 future 会被直接丢弃，
+            // 函数体一次都不执行（编译器已报 unused_must_use），等于这个反哺机制失效。
+            repo.mark_probe_ok(channel_id).await;
             repo.record_channel_mode_success(channel_id, endpoint, is_stream)
                 .await
         }
