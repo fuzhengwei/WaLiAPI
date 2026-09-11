@@ -1334,9 +1334,12 @@ async fn handle_tool_call(
                 .map_err(|e| e.to_string())?;
 
             // Delete file from disk
-            if let Some(path) = &doc.file_path {
-                std::fs::remove_file(path).ok();
-            }
+            crate::services::knowledge::upload::remove_managed_file(
+                &shared.state.data_dir,
+                &doc.kb_id,
+                &doc.source_type,
+                doc.file_path.as_deref(),
+            )?;
             // 级联删除 OCR 页级缓存（以内容哈希为键）
             crate::services::knowledge::ocr::cache::remove_cache(
                 &shared.state.data_dir,

@@ -65,6 +65,16 @@ impl KbRepository {
             q.push(", description = ").push_bind(desc);
         }
         if let Some(model) = &input.embedding_model {
+            // 同一 UPDATE 中的表达式均读取旧值；重复保存相同模型不使缓存失效。
+            for (column, changed) in [
+                ("embedding_revision", "embedding_revision + 1"),
+                ("embedding_dim", "0"),
+                ("index_status", "'stale'"),
+            ] {
+                q.push(format!(", {column} = CASE WHEN COALESCE(embedding_model, 'text-embedding-3-small') != "))
+                    .push_bind(model)
+                    .push(format!(" THEN {changed} ELSE {column} END"));
+            }
             q.push(", embedding_model = ").push_bind(model);
         }
         if let Some(ch) = &input.embedding_channel_id {
@@ -156,17 +166,6 @@ impl KbRepository {
         let now = now_iso();
         sqlx::query("UPDATE kb_knowledge_bases SET index_status = ?, updated_at = ? WHERE id = ?")
             .bind(status)
-            .bind(&now)
-            .bind(kb_id)
-            .execute(&self.pool)
-            .await?;
-        Ok(())
-    }
-
-    pub async fn update_kb_embedding_dim(&self, kb_id: &str, dim: i64) -> Result<(), sqlx::Error> {
-        let now = now_iso();
-        sqlx::query("UPDATE kb_knowledge_bases SET embedding_dim = ?, updated_at = ? WHERE id = ?")
-            .bind(dim)
             .bind(&now)
             .bind(kb_id)
             .execute(&self.pool)
@@ -343,6 +342,14 @@ impl KbRepository {
     // ==================== Chunk ====================
 
     pub async fn create_chunk(&self, chunk: &ChunkInsert) -> Result<(), sqlx::Error> {
+        let mut connection = self.pool.acquire().await?;
+        Self::insert_chunk(&mut connection, chunk).await
+    }
+
+    async fn insert_chunk(
+        connection: &mut sqlx::SqliteConnection,
+        chunk: &ChunkInsert,
+    ) -> Result<(), sqlx::Error> {
         // 从 metadata JSON 中提取 symbol_name / symbol_kind
         let meta: serde_json::Value = serde_json::from_str(&chunk.metadata).unwrap_or_default();
         let symbol_name = meta.get("symbol_name").and_then(|v| v.as_str());
@@ -365,27 +372,65 @@ impl KbRepository {
         .bind(symbol_kind)
         .bind(&chunk.content_hash)
         .bind(&chunk.created_at)
-        .execute(&self.pool)
+        .execute(connection)
         .await?;
         Ok(())
     }
 
-    /// 该文档现存 chunk 的 (content_hash → embedding) 映射，供重处理时
-    /// 复用未变内容块的向量（仅含 content_hash 与 embedding 均非空的行）。
+    /// 新切片全部准备好后一次替换；失败时事务回滚，旧文档仍可检索。
+    pub async fn replace_document_chunks(
+        &self,
+        doc_id: &str,
+        kb_id: &str,
+        chunks: &[ChunkInsert],
+        ocr_info: Option<(i64, &str)>,
+    ) -> Result<(), sqlx::Error> {
+        let mut tx = self.pool.begin().await?;
+        sqlx::query("DELETE FROM kb_chunks WHERE doc_id = ?")
+            .bind(doc_id)
+            .execute(&mut *tx)
+            .await?;
+        for chunk in chunks {
+            Self::insert_chunk(&mut tx, chunk).await?;
+        }
+        let now = now_iso();
+        let total_tokens: i64 = chunks.iter().map(|chunk| chunk.token_count).sum();
+        sqlx::query("UPDATE kb_documents SET chunk_count = ?, token_count = ?, status = 'ready', error_message = NULL, updated_at = ? WHERE id = ? AND kb_id = ?")
+            .bind(chunks.len() as i64).bind(total_tokens).bind(&now).bind(doc_id).bind(kb_id)
+            .execute(&mut *tx).await?;
+        if let Some((pages, failed_pages)) = ocr_info {
+            sqlx::query("UPDATE kb_documents SET ocr_engine = 'vlm', page_count = ?, ocr_failed_pages = ? WHERE id = ?")
+                .bind(pages).bind(failed_pages).bind(doc_id).execute(&mut *tx).await?;
+        }
+        let dim = chunks.first().map(|chunk| chunk.embedding_dim).unwrap_or(0);
+        let revision = chunks.first()
+            .and_then(|chunk| serde_json::from_str::<serde_json::Value>(&chunk.metadata).ok())
+            .and_then(|metadata| metadata.get("embedding_revision").and_then(serde_json::Value::as_i64))
+            .unwrap_or(0);
+        sqlx::query("UPDATE kb_knowledge_bases SET doc_count = (SELECT COUNT(*) FROM kb_documents WHERE kb_id = ?), chunk_count = (SELECT COUNT(*) FROM kb_chunks WHERE kb_id = ?), total_tokens = (SELECT COALESCE(SUM(token_count), 0) FROM kb_chunks WHERE kb_id = ?), embedding_dim = CASE WHEN embedding_dim = 0 AND embedding_revision = ? THEN ? ELSE embedding_dim END, updated_at = ? WHERE id = ?")
+            .bind(kb_id).bind(kb_id).bind(kb_id).bind(revision).bind(dim).bind(&now).bind(kb_id)
+            .execute(&mut *tx).await?;
+        tx.commit().await
+    }
+
+    /// 缓存键同时包含配置版本和内容哈希，防止同维度模型切换时复用旧向量。
+    /// 将版本保留在键中，也能拒绝读取缓存之后才发生的配置变更。
     pub async fn get_chunk_hashes_by_doc(
         &self,
         doc_id: &str,
     ) -> Result<std::collections::HashMap<String, Vec<u8>>, sqlx::Error> {
-        let rows: Vec<(Option<String>, Vec<u8>)> = sqlx::query_as(
-            "SELECT content_hash, embedding FROM kb_chunks \
-             WHERE doc_id = ? AND content_hash IS NOT NULL AND embedding IS NOT NULL",
+        let rows: Vec<(String, Vec<u8>, i64)> = sqlx::query_as(
+            "SELECT c.content_hash, c.embedding, COALESCE(json_extract(c.metadata, '$.embedding_revision'), 0)
+             FROM kb_chunks c JOIN kb_knowledge_bases kb ON c.kb_id = kb.id
+             WHERE c.doc_id = ? AND c.content_hash IS NOT NULL AND c.embedding IS NOT NULL
+               AND COALESCE(json_extract(c.metadata, '$.embedding_revision'), 0) = kb.embedding_revision",
         )
         .bind(doc_id)
         .fetch_all(&self.pool)
         .await?;
         Ok(rows
             .into_iter()
-            .filter_map(|(h, e)| h.map(|h| (h, e)))
+            .map(|(hash, embedding, revision)| (format!("{revision}:{hash}"), embedding))
             .collect())
     }
 
@@ -398,7 +443,9 @@ impl KbRepository {
         sqlx::query_as(
             "SELECT c.id, c.embedding FROM kb_chunks c \
              JOIN kb_documents d ON c.doc_id = d.id \
-             WHERE c.doc_id = ? AND c.embedding IS NOT NULL AND d.status = 'ready'",
+             JOIN kb_knowledge_bases kb ON c.kb_id = kb.id \
+             WHERE c.doc_id = ? AND c.embedding IS NOT NULL AND d.status = 'ready' \
+               AND COALESCE(json_extract(c.metadata, '$.embedding_revision'), 0) = kb.embedding_revision",
         )
         .bind(doc_id)
         .fetch_all(&self.pool)
@@ -421,7 +468,9 @@ impl KbRepository {
             "SELECT c.id, c.content, c.metadata, c.embedding, d.filename, c.doc_id
              FROM kb_chunks c
              JOIN kb_documents d ON c.doc_id = d.id
+             JOIN kb_knowledge_bases kb ON c.kb_id = kb.id
              WHERE c.kb_id = ? AND c.embedding IS NOT NULL AND d.status = 'ready'
+               AND COALESCE(json_extract(c.metadata, '$.embedding_revision'), 0) = kb.embedding_revision
              ORDER BY c.id",
         )
         .bind(kb_id)
@@ -437,7 +486,9 @@ impl KbRepository {
             "SELECT c.id, c.content, c.metadata, c.embedding, c.embedding_dim, d.filename, c.doc_id
              FROM kb_chunks c
              JOIN kb_documents d ON c.doc_id = d.id
-             WHERE c.kb_id = ? AND c.embedding IS NOT NULL AND d.status = 'ready'",
+             JOIN kb_knowledge_bases kb ON c.kb_id = kb.id
+             WHERE c.kb_id = ? AND c.embedding IS NOT NULL AND d.status = 'ready'
+               AND COALESCE(json_extract(c.metadata, '$.embedding_revision'), 0) = kb.embedding_revision",
         )
         .bind(kb_id)
         .fetch_all(&self.pool)

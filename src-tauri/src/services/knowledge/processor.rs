@@ -80,8 +80,7 @@ pub async fn process_document(
     .await
 }
 
-/// 同 `process_document`，但复用映射由调用方提供——`reindex_document`
-/// 先删旧 chunk 再重处理，必须在删除**前**捕获映射（删除后哈希就没了）。
+/// 同 `process_document`，但复用映射由调用方提供；准备成功前保留旧切片。
 #[allow(clippy::too_many_arguments)]
 pub async fn process_document_with_reuse(
     pool: &SqlitePool,
@@ -97,10 +96,18 @@ pub async fn process_document_with_reuse(
 ) -> Result<(), String> {
     let repo = KbRepository::new(pool.clone());
 
-    // Update status to processing
-    repo.update_document_status(doc_id, "processing", None)
+    let was_ready = repo
+        .get_document(doc_id)
         .await
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| e.to_string())?
+        .status
+        == "ready";
+    // 已就绪文档重建期间继续提供旧内容，首次摄入才进入 processing。
+    if !was_ready {
+        repo.update_document_status(doc_id, "processing", None)
+            .await
+            .map_err(|e| e.to_string())?;
+    }
 
     emit_progress(events, doc_id, kb_id, filename, "processing", 0, "开始处理");
 
@@ -121,7 +128,11 @@ pub async fn process_document_with_reuse(
     if let Err(ref e) = result {
         let err_msg = format!("文档「{}」处理失败: {}", filename, e);
         let _ = repo
-            .update_document_status(doc_id, "failed", Some(&err_msg))
+            .update_document_status(
+                doc_id,
+                if was_ready { "ready" } else { "failed" },
+                Some(&err_msg),
+            )
             .await;
         events.emit(
             "kb-document-error",
@@ -310,27 +321,17 @@ async fn process_document_inner(
     };
 
     if chunks.is_empty() {
-        // 分块后为空状态改为失败,且失败信息给客户端提示
-        events.emit(
-            "kb-document-error",
-            serde_json::json!({
-                "doc_id": doc_id,
-                "kb_id": kb_id,
-                "filename": filename,
-                "error": "分块后为空，无法继续处理".to_string(),
-            }),
-        );
-        repo.update_document_status(doc_id, "failed", None)
-            .await
-            .map_err(|e| e.to_string())?;
-        return Ok(());
+        return Err("分块后为空，无法继续处理".to_string());
     }
 
-    let total_chunks = chunks.len() as i64;
-    let total_tokens: i64 = chunks.iter().map(|c| c.token_count as i64).sum();
-
     // 3. Embed chunks in batches（内容未变的块复用既有向量，C-06/R1）
-    let emb_model = embedding_model.unwrap_or(DEFAULT_EMBEDDING_MODEL);
+    let emb_model = kb
+        .embedding_model
+        .as_deref()
+        .unwrap_or(DEFAULT_EMBEDDING_MODEL);
+    if embedding_model.unwrap_or(DEFAULT_EMBEDDING_MODEL) != emb_model {
+        return Err("处理期间嵌入模型配置已变更，请重新处理文档".to_string());
+    }
     let main_repo = Repository::new(pool.clone());
 
     // Detect expected embedding dimension from KB config
@@ -353,7 +354,11 @@ async fn process_document_inner(
         .iter()
         .map(|c| hex::encode(sha2::Sha256::digest(c.content.as_bytes())))
         .collect();
-    let (mut to_embed, reused) = split_chunks_for_embedding(&chunk_hashes, reuse_embeddings);
+    let cache_keys: Vec<String> = chunk_hashes
+        .iter()
+        .map(|hash| format!("{}:{hash}", kb.embedding_revision))
+        .collect();
+    let (mut to_embed, reused) = split_chunks_for_embedding(&cache_keys, reuse_embeddings);
 
     let mut all_embeddings: Vec<Vec<f32>> = vec![Vec::new(); chunks.len()];
     let mut reused_count = 0usize;
@@ -416,19 +421,9 @@ async fn process_document_inner(
         );
     }
 
-    // Auto-detect and update KB embedding dimension if not set
-    if expected_dim.is_none() && !all_embeddings.is_empty() {
-        let detected_dim = all_embeddings[0].len() as i64;
-        tracing::info!(
-            "Auto-detected embedding dim {} for KB {}",
-            detected_dim,
-            kb_id
-        );
-        repo.update_kb_embedding_dim(kb_id, detected_dim).await.ok();
-    }
-
     // 4. Store chunks with embeddings
     let chunks_total = chunks.len();
+    let mut prepared_chunks = Vec::with_capacity(chunks_total);
     for (i, chunk) in chunks.iter().enumerate() {
         // Storing progress: 80% ~ 95%
         if i % 10 == 0 || i == chunks_total - 1 {
@@ -444,6 +439,8 @@ async fn process_document_inner(
             );
         }
         let embedding_bytes = retriever::encode_embedding(&all_embeddings[i]);
+        let mut metadata = serde_json::to_value(&chunk.metadata).map_err(|e| e.to_string())?;
+        metadata["embedding_revision"] = serde_json::json!(kb.embedding_revision);
         let chunk_insert = ChunkInsert {
             id: uuid::Uuid::new_v4().to_string(),
             doc_id: doc_id.to_string(),
@@ -453,13 +450,11 @@ async fn process_document_inner(
             token_count: chunk.token_count as i64,
             embedding: embedding_bytes,
             embedding_dim: all_embeddings[i].len() as i64,
-            metadata: serde_json::to_string(&chunk.metadata).unwrap_or_else(|_| "{}".to_string()),
+            metadata: metadata.to_string(),
             content_hash: Some(chunk_hashes[i].clone()),
             created_at: now_iso(),
         };
-        repo.create_chunk(&chunk_insert)
-            .await
-            .map_err(|e| e.to_string())?;
+        prepared_chunks.push(chunk_insert);
     }
 
     // 5. Update document and KB counts
@@ -472,21 +467,14 @@ async fn process_document_inner(
         98,
         "更新统计",
     );
-    repo.update_document_counts(doc_id, total_chunks, total_tokens)
-        .await
-        .map_err(|e| e.to_string())?;
-    // OCR 文档回填识别信息（引擎/页数/失败页码）
-    if let Some(outcome) = &ocr_outcome {
-        let failed_json =
-            serde_json::to_string(&outcome.failed_pages).unwrap_or_else(|_| "[]".to_string());
-        repo.update_document_ocr_info(doc_id, "vlm", outcome.page_count as i64, &failed_json)
-            .await
-            .map_err(|e| e.to_string())?;
-    }
-    repo.update_document_status(doc_id, "ready", None)
-        .await
-        .map_err(|e| e.to_string())?;
-    repo.update_kb_counts(kb_id)
+    let failed_pages = ocr_outcome.as_ref().map(|outcome| {
+        serde_json::to_string(&outcome.failed_pages).unwrap_or_else(|_| "[]".to_string())
+    });
+    let ocr_info = ocr_outcome
+        .as_ref()
+        .zip(failed_pages.as_deref())
+        .map(|(outcome, failed)| (outcome.page_count as i64, failed));
+    repo.replace_document_chunks(doc_id, kb_id, &prepared_chunks, ocr_info)
         .await
         .map_err(|e| e.to_string())?;
 
@@ -543,7 +531,7 @@ async fn process_document_inner(
     Ok(())
 }
 
-/// Reindex a document (delete old chunks, reprocess)
+/// 重建文档：先读取/准备新内容，成功后原子替换旧切片。
 pub async fn reindex_document(
     pool: &SqlitePool,
     events: &EventSink,
@@ -553,20 +541,6 @@ pub async fn reindex_document(
 ) -> Result<(), String> {
     let repo = KbRepository::new(pool.clone());
     let doc = repo.get_document(doc_id).await.map_err(|e| e.to_string())?;
-
-    // 哈希复用映射必须在删除前捕获——删除后旧 chunk 的哈希就没了
-    let reuse = match repo.get_chunk_hashes_by_doc(doc_id).await {
-        Ok(m) => m,
-        Err(e) => {
-            tracing::warn!("Failed to load chunk hashes before reindex: {}", e);
-            std::collections::HashMap::new()
-        }
-    };
-
-    // Delete existing chunks
-    repo.delete_chunks_by_doc(doc_id)
-        .await
-        .map_err(|e| e.to_string())?;
 
     // Read file content from path
     let content = if let Some(path) = &doc.file_path {
@@ -578,7 +552,7 @@ pub async fn reindex_document(
     // Get KB for embedding model
     let kb = repo.get_kb(&doc.kb_id).await.map_err(|e| e.to_string())?;
 
-    process_document_with_reuse(
+    process_document(
         pool,
         events,
         &doc.kb_id,
@@ -588,7 +562,6 @@ pub async fn reindex_document(
         kb.embedding_model.as_deref(),
         settings,
         data_dir,
-        reuse,
     )
     .await
 }
@@ -643,5 +616,146 @@ mod tests {
 
         assert!(to_embed.is_empty());
         assert_eq!(reused.len(), 2);
+    }
+    async fn reindex_fixture() -> (
+        SqlitePool,
+        EventSink,
+        SettingsStore,
+        std::path::PathBuf,
+        String,
+        String,
+    ) {
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        sqlx::migrate!("./migrations").run(&pool).await.unwrap();
+        let dir = std::env::temp_dir().join(format!("kb-reindex-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("source.txt");
+        let content = "alpha old document content";
+        std::fs::write(&file, content).unwrap();
+        let repo = KbRepository::new(pool.clone());
+        let kb = repo
+            .create_kb(
+                &serde_json::from_value(
+                    serde_json::json!({"name":"reindex", "embedding_model":"embed-test"}),
+                )
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        let hash = hex::encode(sha2::Sha256::digest(content.as_bytes()));
+        let doc = repo
+            .create_document(
+                &kb.id,
+                "source.txt",
+                file.to_str(),
+                "txt",
+                content.len() as i64,
+                &hash,
+            )
+            .await
+            .unwrap();
+        repo.create_chunk(&ChunkInsert {
+            id: "old-chunk".into(),
+            doc_id: doc.id.clone(),
+            kb_id: kb.id.clone(),
+            chunk_index: 0,
+            content: content.into(),
+            token_count: 6,
+            embedding: retriever::encode_embedding(&[1.0, 0.0]),
+            embedding_dim: 2,
+            metadata: "{}".into(),
+            content_hash: Some(hash),
+            created_at: now_iso(),
+        })
+        .await
+        .unwrap();
+        repo.update_document_counts(&doc.id, 1, 6).await.unwrap();
+        repo.update_document_status(&doc.id, "ready", None)
+            .await
+            .unwrap();
+        repo.update_kb_counts(&kb.id).await.unwrap();
+        let (tx, _) = tokio::sync::broadcast::channel(64);
+        let events = EventSink::headless(tx);
+        let settings = SettingsStore::file(dir.join("settings.json"));
+        (pool, events, settings, dir, kb.id, doc.id)
+    }
+
+    #[tokio::test]
+    async fn reindex_read_and_embedding_failures_preserve_ready_document() {
+        let (pool, events, settings, dir, kb_id, doc_id) = reindex_fixture().await;
+        let source = dir.join("source.txt");
+        std::fs::remove_file(&source).unwrap();
+        assert!(reindex_document(&pool, &events, &doc_id, &settings, &dir)
+            .await
+            .is_err());
+        // 内容变化使旧哈希不能复用；无渠道模拟向量化失败。
+        std::fs::write(&source, "new content requires an embedding request").unwrap();
+        assert!(reindex_document(&pool, &events, &doc_id, &settings, &dir)
+            .await
+            .is_err());
+        let repo = KbRepository::new(pool.clone());
+        let chunks = repo.get_chunks_by_kb(&kb_id).await.unwrap();
+        assert_eq!(chunks.len(), 1);
+        assert_eq!(chunks[0].0, "old-chunk");
+        assert_eq!(chunks[0].1, "alpha old document content");
+        let doc = repo.get_document(&doc_id).await.unwrap();
+        assert_eq!(doc.status, "ready");
+        assert_eq!((doc.chunk_count, doc.token_count), (1, 6));
+        assert_eq!(repo.get_kb(&kb_id).await.unwrap().chunk_count, 1);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn reindex_success_atomically_replaces_old_chunks() {
+        let (pool, events, settings, dir, kb_id, doc_id) = reindex_fixture().await;
+        reindex_document(&pool, &events, &doc_id, &settings, &dir)
+            .await
+            .unwrap();
+        let repo = KbRepository::new(pool.clone());
+        let chunks = repo.get_chunks_by_kb(&kb_id).await.unwrap();
+        assert_eq!(chunks.len(), 1);
+        assert_ne!(chunks[0].0, "old-chunk");
+        assert_eq!(chunks[0].1, "alpha old document content");
+        assert_eq!(retriever::decode_embedding(&chunks[0].3), vec![1.0, 0.0]);
+        assert_eq!(repo.get_document(&doc_id).await.unwrap().status, "ready");
+        assert_eq!(repo.get_kb(&kb_id).await.unwrap().chunk_count, 1);
+        // 等待后台小索引任务结束，避免测试退出抢先关闭 runtime。
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        retriever::drop_index(&pool, &kb_id).await.unwrap();
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn replacement_insert_error_rolls_back_chunks_and_counts() {
+        let (pool, _, _, dir, kb_id, doc_id) = reindex_fixture().await;
+        let repo = KbRepository::new(pool.clone());
+        let chunk = || ChunkInsert {
+            id: "duplicate-new-id".into(),
+            doc_id: doc_id.clone(),
+            kb_id: kb_id.clone(),
+            chunk_index: 0,
+            content: "new".into(),
+            token_count: 1,
+            embedding: retriever::encode_embedding(&[0.0, 1.0]),
+            embedding_dim: 2,
+            metadata: "{}".into(),
+            content_hash: None,
+            created_at: now_iso(),
+        };
+        assert!(repo
+            .replace_document_chunks(&doc_id, &kb_id, &[chunk(), chunk()], None)
+            .await
+            .is_err());
+        let chunks = repo.get_chunks_by_kb(&kb_id).await.unwrap();
+        assert_eq!(chunks.len(), 1);
+        assert_eq!(chunks[0].0, "old-chunk");
+        let doc = repo.get_document(&doc_id).await.unwrap();
+        assert_eq!((doc.chunk_count, doc.token_count), (1, 6));
+        assert_eq!(repo.get_kb(&kb_id).await.unwrap().chunk_count, 1);
+        std::fs::remove_dir_all(dir).unwrap();
     }
 }

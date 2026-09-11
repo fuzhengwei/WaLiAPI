@@ -79,6 +79,39 @@ pub fn storage_path(
     Ok(path)
 }
 
+/// 只清理应用拥有的上传副本；目录/Git/URL 来源路径不属于应用。
+pub fn remove_managed_file(
+    data_dir: &Path,
+    kb_id: &str,
+    source_type: &str,
+    file_path: Option<&str>,
+) -> Result<(), String> {
+    if source_type != "upload" {
+        return Ok(());
+    }
+    let Some(file_path) = file_path else {
+        return Ok(());
+    };
+    validate_kb_id(kb_id)?;
+    let path = Path::new(file_path);
+    let canonical = match path.canonicalize() {
+        Ok(path) => path,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(format!("无法确认上传文件路径: {e}")),
+    };
+    let root = data_dir.canonicalize().map_err(|e| e.to_string())?;
+    let managed = root.join("kb_files").join(kb_id);
+    // 旧数据可能指向源文件，符号链接也不能使清理越过受管目录。
+    if canonical.parent() != Some(managed.as_path()) {
+        return Ok(());
+    }
+    match std::fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(format!("删除上传副本失败: {e}")),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -165,5 +198,37 @@ mod tests {
         assert!(storage_path(data_dir, "..", DOC_ID, "a.pdf").is_err());
         assert!(storage_path(data_dir, "a/b", DOC_ID, "a.pdf").is_err());
         assert!(storage_path(data_dir, "", DOC_ID, "a.pdf").is_err());
+    }
+    #[test]
+    fn removal_preserves_sources_and_only_cleans_owned_uploads() {
+        let dir = std::env::temp_dir().join(format!("kb-delete-{}", uuid::Uuid::new_v4()));
+        let managed = dir.join("kb_files/kb-test");
+        std::fs::create_dir_all(&managed).unwrap();
+        let original = dir.join("original.txt");
+        std::fs::write(&original, "user source").unwrap();
+        for source_type in ["local_dir", "git", "url", "upload"] {
+            remove_managed_file(&dir, "kb-test", source_type, original.to_str()).unwrap();
+            assert!(
+                original.exists(),
+                "must preserve original for {source_type}"
+            );
+        }
+        let uploaded = managed.join("upload.txt");
+        std::fs::write(&uploaded, "owned copy").unwrap();
+        remove_managed_file(&dir, "kb-test", "local_dir", uploaded.to_str()).unwrap();
+        assert!(
+            uploaded.exists(),
+            "source ownership matters even inside the data directory"
+        );
+        remove_managed_file(&dir, "kb-test", "upload", uploaded.to_str()).unwrap();
+        assert!(!uploaded.exists());
+        remove_managed_file(&dir, "kb-test", "upload", uploaded.to_str()).unwrap();
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(&original, &uploaded).unwrap();
+            remove_managed_file(&dir, "kb-test", "upload", uploaded.to_str()).unwrap();
+            assert!(original.exists());
+        }
+        std::fs::remove_dir_all(dir).unwrap();
     }
 }

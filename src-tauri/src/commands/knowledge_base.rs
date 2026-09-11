@@ -58,9 +58,12 @@ pub async fn delete_kb_document(
 ) -> Result<(), String> {
     let repo = KbRepository::new(state.db.pool.clone());
     if let Ok(doc) = repo.get_document(&doc_id).await {
-        if let Some(path) = &doc.file_path {
-            std::fs::remove_file(path).ok();
-        }
+        crate::services::knowledge::upload::remove_managed_file(
+            &state.data_dir,
+            &doc.kb_id,
+            &doc.source_type,
+            doc.file_path.as_deref(),
+        )?;
         // 级联删除 OCR 页级缓存（以内容哈希为键）
         crate::services::knowledge::ocr::cache::remove_cache(&state.data_dir, &doc.content_hash);
     }
