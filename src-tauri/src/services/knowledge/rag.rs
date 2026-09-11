@@ -223,7 +223,7 @@ pub async fn ask_with_config(
     let model_limit = retriever::get_model_context_limit(chat_model);
     let context_limit = (model_limit as f64 * 0.7) as usize; // Reserve 30% for response
 
-    let (final_prompt, context_used) = if estimated_tokens > context_limit {
+    let (final_prompt, context_results) = if estimated_tokens > context_limit {
         // Stage 1: Trim context (remove lowest-scoring chunks)
         let trimmed = trim_context(&results, &query, history, context_limit);
         if retriever::estimate_tokens(&trimmed.0) > context_limit {
@@ -239,22 +239,22 @@ pub async fn ask_with_config(
                     "注意：由于 token 限制，无法附上 RAG 上下文。\n\n问题: {}",
                     query
                 );
-                (bare, false)
+                (bare, vec![])
             } else {
-                (no_history, true)
+                (no_history, results.clone())
             }
         } else {
             trimmed
         }
     } else {
-        (prompt, true)
+        (prompt, results.clone())
     };
 
     tracing::info!(
         "RAG prompt: estimated {} tokens, limit {}, context_used: {}",
-        estimated_tokens,
+        retriever::estimate_tokens(&final_prompt),
         context_limit,
-        context_used
+        !context_results.is_empty()
     );
 
     // 6. Call LLM via proxy（系统提示词走模板表：激活版本优先，回退编译期默认）
@@ -299,7 +299,8 @@ pub async fn ask_with_config(
                 total_tokens: u.total_tokens,
             });
 
-            let sources: Vec<SourceInfo> = results
+            // 来源只来自最终发送给模型的切片，裁掉的检索命中仅保留在检索详情。
+            let sources: Vec<SourceInfo> = context_results
                 .iter()
                 .map(|r| SourceInfo {
                     filename: r.filename.clone(),
@@ -451,39 +452,92 @@ fn trim_context(
     query: &str,
     history: &[ConversationMessage],
     target_tokens: usize,
-) -> (String, bool) {
-    // Sort by score ascending (remove lowest first)
-    let mut indexed: Vec<(usize, &super::models::SearchResult)> =
-        results.iter().enumerate().collect();
+) -> (String, Vec<super::models::SearchResult>) {
+    // 按低分顺序移除，但保留剩余切片原来的展示顺序。
+    let mut indexed: Vec<_> = results.iter().enumerate().collect();
     indexed.sort_by(|a, b| {
         a.1.score
             .partial_cmp(&b.1.score)
             .unwrap_or(std::cmp::Ordering::Equal)
     });
-
     let mut removed = std::collections::HashSet::new();
-    let mut current_estimate =
-        retriever::estimate_tokens(&build_rag_prompt(&build_context(results), query, history));
-
-    for (idx, r) in &indexed {
-        if current_estimate <= target_tokens {
+    let mut remaining = results.to_vec();
+    let mut prompt = build_rag_prompt(&build_context(&remaining), query, history);
+    for (idx, _) in indexed {
+        if retriever::estimate_tokens(&prompt) <= target_tokens {
             break;
         }
-        removed.insert(*idx);
-        current_estimate = current_estimate.saturating_sub(retriever::estimate_tokens(&r.content));
+        removed.insert(idx);
+        remaining = results
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| !removed.contains(i))
+            .map(|(_, r)| r.clone())
+            .collect();
+        // 连同文档标题和符号信息重新计算，不能只减正文估算值而多删来源。
+        prompt = build_rag_prompt(&build_context(&remaining), query, history);
+    }
+    (prompt, remaining)
+}
+
+#[cfg(test)]
+mod context_tests {
+    use super::*;
+
+    fn result(id: &str, score: f32, content: &str) -> super::super::models::SearchResult {
+        super::super::models::SearchResult {
+            chunk_id: id.into(),
+            doc_id: id.into(),
+            filename: format!("{id}.txt"),
+            score,
+            content: content.into(),
+            metadata: serde_json::json!({}),
+        }
     }
 
-    // Rebuild context without removed chunks
-    let remaining: Vec<_> = results
-        .iter()
-        .enumerate()
-        .filter(|(i, _)| !removed.contains(i))
-        .map(|(_, r)| r.clone())
-        .collect();
+    #[test]
+    fn trimming_returns_exactly_the_chunks_kept_in_the_prompt() {
+        let results = vec![
+            result("best", 0.9, "high relevance"),
+            result("low", 0.1, &"x".repeat(1000)),
+        ];
+        let budget = retriever::estimate_tokens(&build_rag_prompt(
+            &build_context(&results[..1]),
+            "query",
+            &[],
+        ));
+        let (prompt, used) = trim_context(&results, "query", &[], budget);
+        assert_eq!(used.len(), 1);
+        assert_eq!(used[0].chunk_id, "best");
+        assert!(prompt.contains("best.txt"));
+        assert!(!prompt.contains("low.txt"));
+        assert!(retriever::estimate_tokens(&prompt) <= budget);
+        let (_, all) = trim_context(&results, "query", &[], usize::MAX);
+        assert_eq!(all.len(), 2);
+        let (empty_prompt, none) = trim_context(&results, "query", &[], 1);
+        assert!(none.is_empty());
+        assert!(!empty_prompt.contains("best.txt"));
+        assert!(!empty_prompt.contains("low.txt"));
+    }
 
-    let new_context = build_context(&remaining);
-    let new_prompt = build_rag_prompt(&new_context, query, history);
-    (new_prompt, !removed.is_empty())
+    #[test]
+    fn trimming_counts_document_headers_and_preserves_display_order() {
+        let mut results = vec![
+            result("first", 0.8, "first"),
+            result("low", 0.1, "low"),
+            result("best", 0.9, "best"),
+        ];
+        results[1].metadata = serde_json::json!({"symbol_name": "s".repeat(2000)});
+        let keep = vec![results[0].clone(), results[2].clone()];
+        let budget =
+            retriever::estimate_tokens(&build_rag_prompt(&build_context(&keep), "query", &[]));
+        let (prompt, used) = trim_context(&results, "query", &[], budget);
+        assert_eq!(
+            used.iter().map(|r| r.chunk_id.as_str()).collect::<Vec<_>>(),
+            ["first", "best"]
+        );
+        assert!(retriever::estimate_tokens(&prompt) <= budget);
+    }
 }
 
 /// Deep Research: multi-round iterative retrieval and analysis
