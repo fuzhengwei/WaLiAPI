@@ -483,6 +483,25 @@ async fn dispatch(shared: &SharedState, cmd: &str, args: Value) -> Result<Value,
         }
 
         // ── API 密钥 ──
+        "get_api_key_knowledge_access" => {
+            to_json(commands::api_key::get_api_key_knowledge_access(state, arg(&args, "id")?).await)
+        }
+        "set_api_key_knowledge_access" => to_json(
+            commands::api_key::set_api_key_knowledge_access(
+                state,
+                arg(&args, "id")?,
+                arg(&args, "kbIds")?,
+            )
+            .await,
+        ),
+        "test_api_key_knowledge_access" => to_json(
+            commands::api_key::test_api_key_knowledge_access(
+                state,
+                arg(&args, "id")?,
+                arg(&args, "kbId")?,
+            )
+            .await,
+        ),
         "get_api_keys" => to_json(commands::api_key::get_api_keys(state).await),
         "get_api_key_full" => {
             to_json(commands::api_key::get_api_key_full(state, arg(&args, "id")?).await)

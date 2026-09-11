@@ -3,6 +3,7 @@ pub mod admin_auth;
 pub mod admin_routes;
 pub mod event_bridge;
 pub mod handlers;
+pub mod knowledge_access;
 pub mod request_id;
 pub mod router;
 pub mod static_assets;
