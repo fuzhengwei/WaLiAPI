@@ -175,7 +175,7 @@ mod tests {
 
     /// 构造最小可用的 AppState（临时目录真实 SQLite + 真实迁移），让 build_router
     /// 中的处理器可以真正执行（列表查询、JSON-RPC 分发）。
-    async fn test_state() -> Arc<AppState> {
+    pub(super) async fn test_state() -> Arc<AppState> {
         let data_dir =
             std::env::temp_dir().join(format!("waliapi-router-test-{}", uuid::Uuid::new_v4()));
         let db = Arc::new(crate::db::Database::new_with_path(&data_dir).await);
@@ -203,7 +203,11 @@ mod tests {
         })
     }
 
-    fn test_shared(state: &Arc<AppState>, admin: Option<&str>, mcp: Option<&str>) -> SharedState {
+    pub(super) fn test_shared(
+        state: &Arc<AppState>,
+        admin: Option<&str>,
+        mcp: Option<&str>,
+    ) -> SharedState {
         SharedState {
             state: state.clone(),
             state_static: mock_state_handle(state),
@@ -214,7 +218,7 @@ mod tests {
         }
     }
 
-    fn request(method: &str, uri: &str, bearer: Option<&str>) -> Request<Body> {
+    pub(super) fn request(method: &str, uri: &str, bearer: Option<&str>) -> Request<Body> {
         let mut builder = Request::builder().method(method).uri(uri);
         if let Some(token) = bearer {
             builder = builder.header("authorization", format!("Bearer {token}"));
@@ -222,7 +226,12 @@ mod tests {
         builder.body(Body::empty()).unwrap()
     }
 
-    fn json_request(method: &str, uri: &str, bearer: Option<&str>, body: &str) -> Request<Body> {
+    pub(super) fn json_request(
+        method: &str,
+        uri: &str,
+        bearer: Option<&str>,
+        body: &str,
+    ) -> Request<Body> {
         let mut builder = Request::builder()
             .method(method)
             .uri(uri)
@@ -959,3 +968,7 @@ mod tests {
         assert!(res.headers().get("Retry-After").is_some());
     }
 }
+
+#[cfg(test)]
+#[path = "knowledge_access_tests.rs"]
+mod knowledge_access_tests;
