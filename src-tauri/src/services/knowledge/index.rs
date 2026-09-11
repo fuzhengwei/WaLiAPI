@@ -419,8 +419,25 @@ impl HnswIndex {
 
     /// Save to file.
     pub fn save(&self, path: &Path) -> Result<(), String> {
-        let data = self.to_bytes();
-        std::fs::write(path, &data).map_err(|e| format!("Failed to write index file: {}", e))
+        use std::io::Write;
+        let data = serialize(self).map_err(|e| format!("Failed to serialize index: {e}"))?;
+        let temporary = path.with_extension(format!("{}.tmp", uuid::Uuid::new_v4()));
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temporary)
+            .map_err(|e| format!("Failed to create index file: {e}"))?;
+        let result = (|| -> std::io::Result<()> {
+            file.write_all(&data)?;
+            file.sync_all()?;
+            drop(file);
+            // 同目录原子替换：检索只能读到完整的旧文件或新文件。
+            std::fs::rename(&temporary, path)
+        })();
+        if result.is_err() {
+            let _ = std::fs::remove_file(&temporary);
+        }
+        result.map_err(|e| format!("Failed to save index file: {e}"))
     }
 
     /// Load from file.

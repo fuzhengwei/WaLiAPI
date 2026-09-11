@@ -4,6 +4,24 @@ use super::repository::KbRepository;
 use crate::server::event_bridge::EventSink;
 use sqlx::SqlitePool;
 use std::path::PathBuf;
+use std::sync::{Arc, Mutex, OnceLock, Weak};
+
+/// 同一知识库的完整读改写串行；弱引用避免删除过的知识库永久占用锁表。
+fn index_write_lock(kb_id: &str) -> Arc<tokio::sync::Mutex<()>> {
+    type LockMap = std::collections::HashMap<String, Weak<tokio::sync::Mutex<()>>>;
+    static LOCKS: OnceLock<Mutex<LockMap>> = OnceLock::new();
+    let mut locks = LOCKS
+        .get_or_init(|| Mutex::new(std::collections::HashMap::new()))
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    locks.retain(|_, lock| lock.strong_count() > 0);
+    if let Some(lock) = locks.get(kb_id).and_then(Weak::upgrade) {
+        return lock;
+    }
+    let lock = Arc::new(tokio::sync::Mutex::new(()));
+    locks.insert(kb_id.to_string(), Arc::downgrade(&lock));
+    lock
+}
 
 /// Default HNSW parameters
 const DEFAULT_M: usize = 16;
@@ -273,6 +291,7 @@ pub async fn index_delta(
     doc_id: &str,
     events: &EventSink,
 ) -> Result<(), String> {
+    let _guard = index_write_lock(kb_id).lock_owned().await;
     let repo = KbRepository::new(pool.clone());
     let path = index_path(kb_id);
 
@@ -291,7 +310,7 @@ pub async fn index_delta(
                 kb_id,
                 doc_id
             );
-            return build_index(pool, kb_id, events).await;
+            return build_index_locked(pool, kb_id, events).await;
         }
     };
 
@@ -356,6 +375,16 @@ pub async fn index_delta(
 /// Build HNSW index for a KB from all its chunks.
 /// Emits `kb-index-progress` Tauri events with percentage.
 pub async fn build_index(pool: &SqlitePool, kb_id: &str, events: &EventSink) -> Result<(), String> {
+    let _guard = index_write_lock(kb_id).lock_owned().await;
+    build_index_locked(pool, kb_id, events).await
+}
+
+/// 调用方已持有该库写锁；delta 的全量回退不能重复加锁。
+async fn build_index_locked(
+    pool: &SqlitePool,
+    kb_id: &str,
+    events: &EventSink,
+) -> Result<(), String> {
     let repo = KbRepository::new(pool.clone());
 
     let chunks = repo
@@ -471,6 +500,7 @@ pub async fn build_index(pool: &SqlitePool, kb_id: &str, events: &EventSink) -> 
 
 /// Drop the HNSW index for a KB.
 pub async fn drop_index(pool: &SqlitePool, kb_id: &str) -> Result<(), String> {
+    let _guard = index_write_lock(kb_id).lock_owned().await;
     let repo = KbRepository::new(pool.clone());
 
     // Delete index file
@@ -1147,6 +1177,69 @@ mod index_delta_tests {
         assert_eq!(rebuilt.doc_node_ids("doc-a").len(), 2);
 
         std::fs::remove_file(index_path(&kb_id)).ok();
+    }
+    #[tokio::test]
+    async fn concurrent_deltas_preserve_every_ready_document() {
+        let pool = delta_pool().await;
+        let events = sink();
+        let kb_id = format!("kb-concurrent-{}", uuid::Uuid::new_v4());
+        seed_kb(&pool, &kb_id).await;
+        seed_doc(&pool, &kb_id, "baseline").await;
+        add_chunk(&pool, &kb_id, "baseline", "baseline-chunk", 0.1).await;
+        build_index(&pool, &kb_id, &events).await.unwrap();
+        let docs: Vec<String> = (0..24).map(|i| format!("doc-{i}")).collect();
+        for (i, doc_id) in docs.iter().enumerate() {
+            seed_doc(&pool, &kb_id, doc_id).await;
+            add_chunk(&pool, &kb_id, doc_id, &format!("chunk-{i}"), i as f32 + 1.0).await;
+        }
+        let updates = docs
+            .iter()
+            .map(|doc_id| index_delta(&pool, &kb_id, doc_id, &events));
+        for result in futures_util::future::join_all(updates).await {
+            result.unwrap();
+        }
+        let index = HnswIndex::load(&index_path(&kb_id)).unwrap();
+        assert_eq!(index.len(), 25);
+        for i in 0..24 {
+            assert!(index.contains_live(&format!("chunk-{i}")));
+        }
+        let meta = KbRepository::new(pool.clone())
+            .get_index_meta(&kb_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(meta.chunk_count, 25);
+        assert_eq!(meta.status, "ready");
+        drop_index(&pool, &kb_id).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn drop_waits_for_the_same_write_lock_as_build_and_delta() {
+        let pool = delta_pool().await;
+        let events = sink();
+        let kb_id = format!("kb-drop-lock-{}", uuid::Uuid::new_v4());
+        seed_kb(&pool, &kb_id).await;
+        seed_doc(&pool, &kb_id, "baseline").await;
+        add_chunk(&pool, &kb_id, "baseline", "baseline-chunk", 0.1).await;
+        // 索引不存在的 delta 回退全量构建，不能重复加锁导致死锁。
+        tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            index_delta(&pool, &kb_id, "baseline", &events),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        let guard = index_write_lock(&kb_id).lock_owned().await;
+        let mut dropping = Box::pin(drop_index(&pool, &kb_id));
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(20), &mut dropping)
+                .await
+                .is_err()
+        );
+        assert!(index_path(&kb_id).exists());
+        drop(guard);
+        dropping.await.unwrap();
+        assert!(!index_path(&kb_id).exists());
     }
 }
 
