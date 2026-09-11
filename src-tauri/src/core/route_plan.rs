@@ -612,7 +612,7 @@ pub fn authorize_request(api_key: &ApiKey, model: &str) -> Result<(), PlanError>
     Ok(())
 }
 
-fn is_expired(iso: &str) -> bool {
+pub(crate) fn is_expired(iso: &str) -> bool {
     use chrono::{DateTime, NaiveDateTime, Utc};
     if let Ok(dt) = DateTime::parse_from_rfc3339(iso) {
         return dt.with_timezone(&Utc) < Utc::now();

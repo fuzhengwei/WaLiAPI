@@ -242,6 +242,90 @@ async fn maybe_route_plan(
     }
 }
 
+/// 知识库 API Key 调用直接进入完整路由授权，不使用内部身份或在授权前命中语义缓存。
+pub(crate) async fn handle_knowledge_model(
+    shared: &SharedState,
+    headers: &HeaderMap,
+    body: serde_json::Value,
+    endpoint: EndpointKind,
+) -> Response {
+    let repo = std::sync::Arc::new(Repository::new(shared.state.db.pool.clone()));
+    let token = headers
+        .get("authorization")
+        .and_then(|h| h.to_str().ok())
+        .and_then(|h| h.strip_prefix("Bearer "))
+        .unwrap_or("");
+    let key = match repo.get_api_key_by_key(token).await {
+        Ok(key) => key,
+        Err(error) if is_key_lookup_storage_error(&error) => {
+            return (StatusCode::INTERNAL_SERVER_ERROR, "Key lookup failed").into_response()
+        }
+        Err(_) => return (StatusCode::UNAUTHORIZED, "Invalid API key").into_response(),
+    };
+    if key.quota_limit > 0 && key.quota_used >= key.quota_limit {
+        return (StatusCode::TOO_MANY_REQUESTS, "API key quota exceeded").into_response();
+    }
+    let (protocol, path, mode) = if endpoint == EndpointKind::Embeddings {
+        (
+            security::gate::DownstreamProtocol::Embeddings,
+            "/v1/embeddings",
+            "embedding",
+        )
+    } else {
+        (
+            security::gate::DownstreamProtocol::ChatCompletions,
+            "/v1/chat/completions",
+            "chat",
+        )
+    };
+    let trace_id = Some(crate::server::request_id::resolve(headers));
+    let audited = match audit_original(protocol, path, body, None, trace_id.clone(), shared).await {
+        Ok(audited) => audited,
+        Err(response) => return response,
+    };
+    if matches!(audited.audit_result.action, security::SecurityAction::Block) {
+        log_security_block(
+            &repo,
+            &key.id,
+            &key.name,
+            audited.envelope.model.clone(),
+            mode,
+            false,
+            &audited.sanitized_log_json,
+            &audited.audit_result,
+            trace_id.clone(),
+        )
+        .await;
+        return (
+            StatusCode::UNAVAILABLE_FOR_LEGAL_REASONS,
+            "Security policy blocked the request",
+        )
+            .into_response();
+    }
+    let log_body = audited.sanitized_log_json.to_string();
+    match maybe_route_plan(
+        shared,
+        &repo,
+        &key,
+        &audited,
+        endpoint,
+        false,
+        mode,
+        &[],
+        &log_body,
+        trace_id,
+    )
+    .await
+    {
+        Ok(Some(response)) | Err(response) => response,
+        Ok(None) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "Knowledge request requires authorized routing",
+        )
+            .into_response(),
+    }
+}
+
 /// The auth rollout is deliberately request-scoped: Auth accounts turn on the
 /// mixed planner for this request only, while an all-Channel request continues
 /// to use the legacy path until the global flag is enabled.

@@ -3,10 +3,11 @@
 //! 凭证域划分：
 //! - `/v1/*` 数据面：后台创建的 `sk-waliapi-*` 密钥（handlers 内校验）；
 //! - `/admin/api/*` Web 管理面板：用户名/密码会话（`admin_routes.rs`）；
-//! - KB/Wiki REST（`/api/kb/*`、`/api/wiki/*`）：`WALIAPI_ADMIN_TOKEN`；
+//! - RAG 查询：后台创建并授予知识库权限的 API Key；
+//! - KB/Wiki 管理 REST（`/api/kb/*`、`/api/wiki/*`）：`WALIAPI_ADMIN_TOKEN`；
 //! - MCP（`/mcp*`）：`WALIAPI_MCP_TOKEN`（独立凭证，MCP 客户端不获得管理面权限）。
 //!
-//! token 未配置时对应端点一律返回 401（fail-closed），避免无感知的未认证暴露。
+//! 普通 API Key 可查询显式授权的 RAG；未认证访问仍返回 401，管理端凭据保持兼容。
 
 use std::sync::Arc;
 
@@ -85,7 +86,7 @@ impl ServiceTokens {
         }
         Some(format!(
             "服务绑定在非回环地址 {host}，但未配置：\n  - {}\n\
-             缺失 token 的端点已自动关闭（一律返回 401），不会被未认证访问；\n\
+             缺失 token 的旧管理入口不可用；已授权的 API Key 仍可查询 RAG，匿名访问返回 401；\n\
              但 /v1 数据面（仅 sk-waliapi-* 密钥保护）与 Web 管理面板（登录会话保护）\
              将直接暴露给该网络上的所有主机。\n\
              请设置上述环境变量，或改绑 127.0.0.1 并由反向代理（Caddy/Nginx + HTTPS）对外提供服务。",
@@ -93,14 +94,14 @@ impl ServiceTokens {
         ))
     }
 
-    /// 因缺少 token 而被关闭（fail-closed）的端点描述，供回环绑定时的提示日志。
+    /// 缺少环境变量 token 的旧管理入口；不影响已授权的 API Key 查询。
     pub fn disabled_endpoints(&self) -> Vec<&'static str> {
         let mut endpoints = Vec::new();
         if self.admin.is_none() {
-            endpoints.push("KB/Wiki REST（/api/kb、/api/wiki）");
+            endpoints.push("KB/Wiki REST 管理权限");
         }
         if self.mcp.is_none() {
-            endpoints.push("MCP（/mcp）");
+            endpoints.push("MCP 管理工具及旧版 SSE");
         }
         endpoints
     }
@@ -149,18 +150,25 @@ fn authorized(headers: &HeaderMap, expected: &str) -> bool {
         .unwrap_or(false)
 }
 
-/// KB/Wiki REST 端点守卫：要求 `Authorization: Bearer <WALIAPI_ADMIN_TOKEN>`。
-/// token 未配置时一律 401（端点整体关闭），而不是无鉴权放行。
+/// KB/Wiki 管理接受 ADMIN token；普通 API Key 仅可进入授权的 RAG 查询路由。
 pub async fn require_admin(
     State(shared): State<SharedState>,
     headers: HeaderMap,
     request: Request<Body>,
     next: Next,
 ) -> Response {
-    guard(&shared.admin_token, &headers, request, next).await
+    if shared
+        .admin_token
+        .as_deref()
+        .is_some_and(|token| authorized(&headers, token))
+    {
+        next.run(request).await
+    } else {
+        super::knowledge_access::require_read_access(shared, request, next).await
+    }
 }
 
-/// MCP 端点守卫：要求 `Authorization: Bearer <WALIAPI_MCP_TOKEN>`。
+/// MCP 端点守卫：兼容 MCP token，API Key 仅提供无会话查询工具。
 /// 独立于管理员 token，避免 MCP 客户端获得渠道/密钥/设置管理权限。
 pub async fn require_mcp(
     State(shared): State<SharedState>,
@@ -168,19 +176,35 @@ pub async fn require_mcp(
     request: Request<Body>,
     next: Next,
 ) -> Response {
-    guard(&shared.mcp_token, &headers, request, next).await
-}
-
-async fn guard(
-    token: &Option<Arc<str>>,
-    headers: &HeaderMap,
-    request: Request<Body>,
-    next: Next,
-) -> Response {
-    match token.as_deref() {
-        Some(token) if authorized(headers, token) => next.run(request).await,
-        _ => (StatusCode::UNAUTHORIZED, "unauthorized").into_response(),
+    if shared
+        .mcp_token
+        .as_deref()
+        .is_some_and(|token| authorized(&headers, token))
+    {
+        return next.run(request).await;
     }
+    let access = match super::knowledge_access::authenticate(&shared, &headers).await {
+        Ok(access) => access,
+        Err(error) => return error.into_response(),
+    };
+    // API Key 使用无会话的 HTTP POST，不能进入旧版共享 SSE 会话。
+    if request.method() != axum::http::Method::POST {
+        return (
+            StatusCode::METHOD_NOT_ALLOWED,
+            "API Key MCP access uses stateless HTTP POST /mcp",
+        )
+            .into_response();
+    }
+    if !matches!(request.uri().path(), "/mcp" | "/mcp/") || request.uri().query().is_some() {
+        return (
+            StatusCode::FORBIDDEN,
+            "API Key cannot access legacy MCP sessions",
+        )
+            .into_response();
+    }
+    let mut request = request;
+    request.extensions_mut().insert(access);
+    next.run(request).await
 }
 
 #[cfg(test)]
@@ -260,7 +284,7 @@ mod tests {
         assert!(ServiceTokens::default().disabled_endpoints().len() == 2);
         assert_eq!(
             tokens(Some(ADMIN), None).disabled_endpoints(),
-            vec!["MCP（/mcp）"]
+            vec!["MCP 管理工具及旧版 SSE"]
         );
         assert!(tokens(Some(ADMIN), Some(MCP))
             .disabled_endpoints()

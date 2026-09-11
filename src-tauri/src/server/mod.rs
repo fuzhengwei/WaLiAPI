@@ -37,7 +37,7 @@ pub async fn start_server(
         if !disabled.is_empty() {
             tracing::info!(
                 "[服务端点鉴权] 未配置 WALIAPI_ADMIN_TOKEN / WALIAPI_MCP_TOKEN，\
-                 {} 已关闭（一律返回 401）。设置上述环境变量以启用。",
+                 {} 不可用。RAG 查询可在密钥页面授权 API Key，无需环境变量 token。",
                 disabled.join("、")
             );
         }
