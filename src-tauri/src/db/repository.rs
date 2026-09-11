@@ -53,9 +53,19 @@ impl Repository {
         .await
     }
 
-    /// 记录一次主动探测结果：更新渠道探测三列 + 写 is_probe=1 日志行
-    /// （统计口径排除，避免污染用户用量）。直接 SQL 最小列集，不走
-    /// create_log 漏斗（探测行无正文、不受明细级别影响）。
+    /// 记录一次主动探测结果：更新渠道探测三列（调度排序依据，每轮都写）；
+    /// 审计日志只反映**状态发生翻转的那条边**，且恢复不新增行：
+    /// - 正常 → 异常：新增一行 `mode='probe'`、`status_code=502`
+    /// - 异常 → 正常：就地标记那条失败行为已恢复（见 [`Self::mark_probe_recovered`]）
+    /// - 持续正常 / 持续故障：不写
+    ///
+    /// 为什么成功探测不写：探测行不携带请求/响应正文，统计口径又一律 `is_probe = 0` 排除，
+    /// 所以成功探测行没有任何读取方，留在审计日志里只会淹没真实流量 —— 默认 300 秒一轮
+    /// × 每个启用渠道，实测某库最近 40 行里 31 行是这类噪音（占全库 31.5%）。
+    /// 为什么恢复也不补一行：恢复是失败事件的**后续状态**，不是一次新请求；为它写一行
+    /// 200 会让列表里重新出现“看起来像成功探测”的条目，与上面的目标直接冲突。
+    /// 标记只改既有列（mode + upstream_model），状态码保持 502，不篡改审计历史。
+    /// 直接 SQL 最小列集，不走 create_log 漏斗（探测行无正文、不受明细级别影响）。
     pub async fn record_channel_probe(
         &self,
         channel_id: &str,
@@ -63,6 +73,16 @@ impl Repository {
         outcome: crate::health_probe::ProbeOutcome,
         now: &str,
     ) -> Result<(), sqlx::Error> {
+        // 先取上一轮状态再更新，才能认出状态翻转。
+        // COALESCE 把“从未探测”按健康处理：首次探测就失败也算一次新异常。
+        let previous_ok: i64 = sqlx::query_scalar::<_, i64>(
+            "SELECT COALESCE(last_probe_ok, 1) FROM channels WHERE id = ?",
+        )
+        .bind(channel_id)
+        .fetch_optional(&self.pool)
+        .await?
+        .unwrap_or(1);
+
         sqlx::query(
             "UPDATE channels SET last_probe_at = ?, last_probe_ok = ?, probe_latency_ms = ?, \
              updated_at = ? WHERE id = ?",
@@ -74,23 +94,78 @@ impl Repository {
         .bind(channel_id)
         .execute(&self.pool)
         .await?;
-        sqlx::query(
-            "INSERT INTO request_logs (id, seq, channel_id, channel_name, model, mode, \
-             status_code, duration_ms, is_stream, is_retry, created_at, risk_level, \
-             security_action, upstream_type, is_probe) \
-             VALUES (?, (SELECT COALESCE(MAX(seq), 0) + 1 FROM request_logs), ?, ?, ?, 'probe', \
-             ?, ?, 0, 0, ?, 'low', 'audit', 'channel', 1)",
+
+        // 只有状态翻转才动日志，且**恢复绝不新增行**：
+        //   正常 → 异常：新增一行 mode='probe' / 502（故障事件）
+        //   异常 → 正常：就地标记该渠道最近一条待标记的故障行，不新增行
+        //   稳态（持续正常、持续故障）：什么都不做
+        match (previous_ok == 0, outcome.ok) {
+            (false, false) => {
+                sqlx::query(
+                    "INSERT INTO request_logs (id, seq, channel_id, channel_name, model, mode, \
+                     status_code, duration_ms, is_stream, is_retry, created_at, risk_level, \
+                     security_action, upstream_type, is_probe) \
+                     VALUES (?, (SELECT COALESCE(MAX(seq), 0) + 1 FROM request_logs), ?, ?, ?, \
+                     'probe', 502, ?, 0, 0, ?, 'low', 'audit', 'channel', 1)",
+                )
+                .bind(crate::utils::id::new_id())
+                .bind(channel_id)
+                .bind(channel_name)
+                .bind(channel_name)
+                .bind(outcome.latency_ms)
+                .bind(now)
+                .execute(&self.pool)
+                .await?;
+            }
+            (true, true) => {
+                self.mark_probe_recovered(channel_id).await?;
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    /// 把某渠道最近一条“尚未标记恢复”的探测失败行**就地标记**为已恢复。
+    ///
+    /// 只改两个既有列：`mode` 由 'probe' 变 'probe_recovered'（机器可读标记），
+    /// `upstream_model` 写标记文案（前端模型列本就渲染 `model → upstream_model`，
+    /// 于是列表里直接显示 `渠道名 → 已恢复`）。**状态码保持 502** —— 那一刻确实
+    /// 失败了，不篡改审计历史；也不新增任何行。
+    /// 标记后该行不再匹配 `mode='probe'`，所以再故障→写新行、再恢复→标记新行，天然幂等。
+    async fn mark_probe_recovered(&self, channel_id: &str) -> Result<(), sqlx::Error> {
+        const MARK: &str = "已恢复";
+        let result = sqlx::query(
+            "UPDATE request_logs SET mode = 'probe_recovered', upstream_model = ? \
+             WHERE id = (SELECT id FROM request_logs WHERE channel_id = ? AND is_probe = 1 \
+                         AND mode = 'probe' AND status_code = 502 \
+                         ORDER BY seq DESC LIMIT 1)",
         )
-        .bind(crate::utils::id::new_id())
+        .bind(MARK)
         .bind(channel_id)
-        .bind(channel_name)
-        .bind(channel_name)
-        .bind(if outcome.ok { 200 } else { 502 })
-        .bind(outcome.latency_ms)
-        .bind(now)
         .execute(&self.pool)
         .await?;
+        if result.rows_affected() == 0 {
+            // 没有待标记的故障行（故障发生在老版本、或已被启动清理删掉）。
+            // 按“零新增行”的要求什么都不做，不为恢复事件补写日志。
+            tracing::debug!("[探测] 渠道 {channel_id} 已恢复，但库中没有待标记的探测失败行");
+        }
         Ok(())
+    }
+
+    /// 启动期一次性清理：删掉历史上写入的“成功形态”探测行。
+    ///
+    /// 覆盖两种来源：0.3.1 及更早每轮探测都写一行的“探测成功”；以及中间版本为“渠道已恢复”
+    /// 补写的 200 行（该设计已改为就地标记失败行，不再新增行）。新语义下任何 `is_probe = 1`
+    /// 且 2xx 的行都不该存在，所以条件就是这一条 —— 真实审计记录（`is_probe = 0`）与探测
+    /// 失败行（502，含已标记恢复的）一律不动。
+    pub async fn purge_successful_probe_logs(&self) -> Result<u64, sqlx::Error> {
+        let result = sqlx::query(
+            "DELETE FROM request_logs \
+             WHERE is_probe = 1 AND status_code >= 200 AND status_code < 300",
+        )
+        .execute(&self.pool)
+        .await?;
+        Ok(result.rows_affected())
     }
 
     /// 被动反哺：真实请求成功后立即恢复该渠道的探测健康标记

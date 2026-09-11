@@ -392,7 +392,9 @@ pub async fn handle_request(
 
                 // 被动反哺（C-04）：真实请求成功 → 恢复该渠道的主动探测健康标记
                 // （best-effort，与日志/配额递增同级的旁路更新）。
-                repo.mark_probe_ok(&channel.id);
+                // 必须 .await：mark_probe_ok 是 async fn，不 await 的 future 会被直接
+                // 丢弃、函数体一次都不执行（编译器报 unused_must_use）。
+                repo.mark_probe_ok(&channel.id).await;
 
                 return Ok(ProxyResult {
                     status,
