@@ -1,5 +1,5 @@
 import { useEffect, useState, useMemo } from "react";
-import { apiKeyApi, channelApi, authApi } from "../lib/api";
+import { apiKeyApi, channelApi, authApi, kbApi, type KnowledgeBase } from "../lib/api";
 import type { ApiKey, CreateApiKeyInput, ApiKeyStats, Channel, AuthAccount } from "../types";
 import { formatTime } from "../lib/constants";
 import { Plus, Key, Trash2, Power, X, Check, Copy, CalendarClock, Database, Activity, Clock, Zap, ChevronDown, ChevronRight, Pencil, AlertTriangle } from "lucide-react";
@@ -57,6 +57,7 @@ export function ApiKeysPage() {
   const [keys, setKeys] = useState<ApiKey[]>([]);
   const [stats, setStats] = useState<Record<string, ApiKeyStats>>({});
   const [showForm, setShowForm] = useState(false);
+  const [knowledgeKey, setKnowledgeKey] = useState<ApiKey | null>(null);
   const [editKey, setEditKey] = useState<ApiKey | null>(null);
   const [copied, setCopied] = useState<string | null>(null);
   const [deleteTarget, setDeleteTarget] = useState<ApiKey | null>(null);
@@ -255,6 +256,9 @@ export function ApiKeysPage() {
                   <button onClick={() => handleToggle(k)} className="action-secondary px-3 py-2" title={k.status === 1 ? "禁用" : "启用"}>
                     <Power size={16} className={k.status === 1 ? "text-emerald-300" : "text-zinc-400"} />
                   </button>
+                  <button onClick={() => setKnowledgeKey(k)} className="action-secondary px-3 py-2" title="知识库查询权限" aria-label={`配置 ${k.name} 的知识库查询权限`}>
+                    <Database size={16} />
+                  </button>
                   <button onClick={() => setEditKey(k)} className="action-secondary px-3 py-2" title="编辑">
                     <Pencil size={16} />
                   </button>
@@ -283,12 +287,62 @@ export function ApiKeysPage() {
         />
       )}
 
+      {knowledgeKey && <KnowledgeAccessDialog apiKey={knowledgeKey} onClose={() => setKnowledgeKey(null)} />}
       <DeleteConfirmDialog
         target={deleteTarget}
         onClose={() => setDeleteTarget(null)}
         onConfirm={handleDelete}
         deleting={deleting}
       />
+    </div>
+  );
+}
+
+function KnowledgeAccessDialog({ apiKey, onClose }: { apiKey: ApiKey; onClose: () => void }) {
+  const [kbs, setKbs] = useState<KnowledgeBase[]>([]);
+  const [selected, setSelected] = useState<string[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState("");
+  useEffect(() => {
+    let cancelled = false;
+    Promise.all([kbApi.getAll(), apiKeyApi.getKnowledgeAccess(apiKey.id)]).then(([bases, ids]) => {
+      if (!cancelled) { setKbs(bases); setSelected(ids); setLoading(false); }
+    }).catch(e => { if (!cancelled) setError(String(e)); });
+    return () => { cancelled = true; };
+  }, [apiKey.id]);
+  const save = async () => {
+    setSaving(true); setError("");
+    try { await apiKeyApi.setKnowledgeAccess(apiKey.id, selected); onClose(); }
+    catch (e) { setError(String(e)); }
+    finally { setSaving(false); }
+  };
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/30">
+      <div role="dialog" aria-modal="true" aria-labelledby="knowledge-access-title" className="w-full max-w-lg rounded-2xl bg-white p-6 shadow-xl">
+        <div className="mb-3 flex items-center justify-between">
+          <h2 id="knowledge-access-title" className="font-semibold">知识库查询权限 · {apiKey.name}</h2>
+          <button onClick={onClose} disabled={saving} aria-label="关闭"><X size={18} /></button>
+        </div>
+        <p className="mb-4 text-sm text-slate-500">允许该 Key 通过 REST / MCP 查询勾选的 RAG。未勾选即无权限；不能上传、删除或修改知识库。MCP 还需开启该库的 MCP 开关。</p>
+        <p className="mb-4 text-xs text-slate-500">向量检索和问答沿用该 Key 的模型、渠道权限及额度，请同时放行知识库使用的 Embedding 模型和答题模型。</p>
+        <div className="max-h-72 space-y-2 overflow-y-auto">
+          {loading && !error && <p>正在加载…</p>}
+          {!loading && kbs.length === 0 && <p className="text-sm text-slate-500">请先在“服务 → RAG”创建知识库。</p>}
+          {kbs.map(kb => (
+            <label key={kb.id} className="flex items-center gap-3 rounded-xl border border-slate-200 p-3">
+              <input type="checkbox" checked={selected.includes(kb.id)} disabled={saving}
+                onChange={e => setSelected(ids => e.target.checked ? [...ids, kb.id] : ids.filter(id => id !== kb.id))} />
+              <span className="text-sm">{kb.name}<span className="ml-2 text-xs text-slate-400">{kb.embedding_model || "默认 Embedding"}</span></span>
+            </label>
+          ))}
+        </div>
+        {error && <p role="alert" className="mt-3 text-sm text-red-600">{error}</p>}
+        <div className="mt-5 flex justify-end gap-2">
+          <button onClick={onClose} disabled={saving} className="action-secondary">取消</button>
+          <button onClick={save} disabled={loading || saving} className="action-primary disabled:opacity-50">{saving ? "保存中…" : "保存权限"}</button>
+        </div>
+      </div>
     </div>
   );
 }
