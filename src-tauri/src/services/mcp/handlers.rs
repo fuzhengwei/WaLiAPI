@@ -1,4 +1,5 @@
 use crate::db::repository::Repository;
+use crate::server::knowledge_access::{self, KnowledgeAccess};
 use crate::server::router::SharedState;
 use crate::services::knowledge::{embedder, rag, repository::KbRepository, retriever};
 use crate::services::wiki::{
@@ -10,6 +11,7 @@ use axum::{
     extract::{Query, State},
     http::{header, StatusCode},
     response::{IntoResponse, Json, Response},
+    Extension,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -542,6 +544,162 @@ pub(crate) fn get_tools() -> Vec<serde_json::Value> {
 
 // ── Core JSON-RPC dispatch ────────────────────────────────────────
 
+const QUERY_TOOLS: &[&str] = &[
+    "list_knowledge_bases",
+    "search_knowledge_base",
+    "ask_knowledge_base",
+    "read_document",
+    "get_knowledge_base_stats",
+];
+
+async fn dispatch_scoped(
+    shared: &SharedState,
+    access: &KnowledgeAccess,
+    req: &McpRequest,
+) -> McpResponse {
+    if req.jsonrpc != "2.0" {
+        return McpResponse::error(req.id.clone(), -32600, "Expected JSON-RPC 2.0".into());
+    }
+    match req.method.as_str() {
+        "initialize" => McpResponse::success(
+            req.id.clone(),
+            serde_json::json!({
+                "protocolVersion": "2025-03-26", "capabilities": {"tools": {}},
+                "serverInfo": {"name": "WaLiAPI Knowledge Base", "version": env!("CARGO_PKG_VERSION")},
+                "instructions": "仅可查询已授权且已开启 MCP 的知识库。先 list_knowledge_bases 获取 kb_id；问答需指定已授权的 model。"
+            }),
+        ),
+        "tools/list" => {
+            let tools: Vec<_> = get_tools()
+                .into_iter()
+                .filter(|tool| QUERY_TOOLS.contains(&tool["name"].as_str().unwrap_or("")))
+                .map(|mut tool| {
+                    let name = tool["name"].as_str().unwrap_or("").to_string();
+                    tool["description"] = serde_json::json!(match name.as_str() {
+                        "list_knowledge_bases" => "列出已授权且开启 MCP 的 RAG。",
+                        "search_knowledge_base" => "检索指定知识库，支持向量、关键词和混合检索。",
+                        "ask_knowledge_base" => "使用已授权的模型回答问题，返回答案与来源。",
+                        "read_document" => "按切片顺序读取指定文档的已摄入正文。",
+                        _ => "获取指定知识库的文档、切片和 Token 统计。",
+                    });
+                    if name != "list_knowledge_bases" {
+                        tool["inputSchema"]["properties"]["kb_id"]["description"] = serde_json::json!("已授权且开启 MCP 的知识库 ID，必填。");
+                        let required = tool["inputSchema"]["required"]
+                            .as_array_mut()
+                            .expect("tool schema required");
+                        if !required.iter().any(|v| v == "kb_id") {
+                            required.push(serde_json::json!("kb_id"));
+                        }
+                        if name == "ask_knowledge_base" {
+                            required.push(serde_json::json!("model"));
+                            tool["inputSchema"]["properties"]["model"]["description"] = serde_json::json!("已授权的生成模型，必填。");
+                        }
+                    }
+                    tool
+                })
+                .collect();
+            McpResponse::success(req.id.clone(), serde_json::json!({"tools": tools}))
+        }
+        "tools/call" => {
+            let name = req.params["name"].as_str().unwrap_or("");
+            if !QUERY_TOOLS.contains(&name) {
+                return McpResponse::error(
+                    req.id.clone(),
+                    -32601,
+                    "Tool is not available to this API key".into(),
+                );
+            }
+            match scoped_tool_call(shared, access, name, &req.params["arguments"]).await {
+                Ok(value) => McpResponse::success(
+                    req.id.clone(),
+                    serde_json::json!({
+                        "content": [{"type": "text", "text": value.to_string()}], "isError": false
+                    }),
+                ),
+                Err(error) => McpResponse::success(
+                    req.id.clone(),
+                    serde_json::json!({
+                        "content": [{"type": "text", "text": format!("HTTP {}: {}", error.status.as_u16(), error.message)}], "isError": true
+                    }),
+                ),
+            }
+        }
+        "ping" | "notifications/initialized" => {
+            McpResponse::success(req.id.clone(), serde_json::json!({}))
+        }
+        _ => McpResponse::error(req.id.clone(), -32601, "Unknown method".into()),
+    }
+}
+
+async fn scoped_tool_call(
+    shared: &SharedState,
+    access: &KnowledgeAccess,
+    name: &str,
+    args: &serde_json::Value,
+) -> Result<serde_json::Value, crate::services::knowledge::model_client::QueryError> {
+    use crate::services::knowledge::{model_client::QueryError, models::AskInput};
+    let repo = KbRepository::new(shared.state.db.pool.clone());
+    if name == "list_knowledge_bases" {
+        let kbs = repo.get_all_kbs().await.map_err(|e| e.to_string())?;
+        let kbs: Vec<_> = kbs.iter().filter(|kb| kb.status == 1 && kb.mcp_enabled == 1 && access.kb_ids.contains(&kb.id))
+            .map(|kb| serde_json::json!({"id": kb.id, "name": kb.name, "doc_count": kb.doc_count, "chunk_count": kb.chunk_count})).collect();
+        return Ok(serde_json::json!(kbs));
+    }
+    let kb_id = args["kb_id"].as_str().unwrap_or("");
+    let kb = access.require_kb(shared, kb_id, true).await?;
+    match name {
+        "ask_knowledge_base" | "search_knowledge_base" => {
+            let mut input = args.clone();
+            if name == "search_knowledge_base" {
+                input["question"] = args["query"].clone();
+            }
+            if name == "ask_knowledge_base" && args["model"].as_str().is_none_or(str::is_empty) {
+                return Err(QueryError::new(
+                    StatusCode::BAD_REQUEST,
+                    "model is required",
+                ));
+            }
+            let input: AskInput = serde_json::from_value(input)
+                .map_err(|e| QueryError::new(StatusCode::BAD_REQUEST, e.to_string()))?;
+            if name == "ask_knowledge_base" {
+                Ok(serde_json::json!(
+                    knowledge_access::ask(shared, access, input, true).await?
+                ))
+            } else {
+                Ok(serde_json::json!(
+                    knowledge_access::search(shared, access, input, true).await?
+                ))
+            }
+        }
+        "read_document" => {
+            let doc_id = args["doc_id"]
+                .as_str()
+                .ok_or_else(|| QueryError::new(StatusCode::BAD_REQUEST, "doc_id is required"))?;
+            let doc = repo
+                .get_document(doc_id)
+                .await
+                .map_err(|_| QueryError::new(StatusCode::NOT_FOUND, "Document not found"))?;
+            if doc.kb_id != kb_id {
+                return Err(QueryError::new(StatusCode::NOT_FOUND, "Document not found"));
+            }
+            // 只读取该文档已经摄入的正文，不开放服务端任意文件路径。
+            let chunks: Vec<String> = sqlx::query_scalar(
+                "SELECT content FROM kb_chunks WHERE kb_id = ? AND doc_id = ? ORDER BY chunk_index",
+            )
+            .bind(kb_id)
+            .bind(doc_id)
+            .fetch_all(&shared.state.db.pool)
+            .await
+            .map_err(|e| e.to_string())?;
+            Ok(serde_json::json!({"filename": doc.filename, "content": chunks.join("\n\n")}))
+        }
+        "get_knowledge_base_stats" => Ok(
+            serde_json::json!({"id": kb.id, "name": kb.name, "doc_count": kb.doc_count, "chunk_count": kb.chunk_count, "total_tokens": kb.total_tokens}),
+        ),
+        _ => Err(QueryError::new(StatusCode::FORBIDDEN, "Tool access denied")),
+    }
+}
+
 /// Main MCP JSON-RPC handler — async dispatch
 async fn dispatch_jsonrpc_async(shared: &SharedState, req: &McpRequest) -> McpResponse {
     match req.method.as_str() {
@@ -692,6 +850,7 @@ pub struct McpQueryParams {
 pub async fn handle_mcp(
     State(shared): State<SharedState>,
     Query(params): Query<McpQueryParams>,
+    access: Option<Extension<KnowledgeAccess>>,
     body: axum::body::Bytes,
 ) -> Response {
     let body_str = String::from_utf8_lossy(&body);
@@ -707,7 +866,11 @@ pub async fn handle_mcp(
     // Check if this is a notification (no id → no response)
     let is_notification = req.id.is_none();
 
-    let response = dispatch_jsonrpc_async(&shared, &req).await;
+    let response = if let Some(Extension(access)) = access {
+        dispatch_scoped(&shared, &access, &req).await
+    } else {
+        dispatch_jsonrpc_async(&shared, &req).await
+    };
 
     // If session_id is provided, push response through SSE stream
     if let Some(session_id) = &params.session_id {

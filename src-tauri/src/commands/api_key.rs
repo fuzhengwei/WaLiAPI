@@ -184,3 +184,82 @@ pub async fn get_api_key_stats_impl(
     let repo = Repository::new(state.db.pool.clone());
     repo.get_api_key_stats().await.map_err(|e| e.to_string())
 }
+
+#[tauri::command]
+pub async fn get_api_key_knowledge_access(
+    state: tauri::State<'_, std::sync::Arc<AppState>>,
+    id: String,
+) -> Result<Vec<String>, String> {
+    crate::server::knowledge_access::get_grants(&state.db.pool, &id)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn set_api_key_knowledge_access(
+    state: tauri::State<'_, std::sync::Arc<AppState>>,
+    id: String,
+    kb_ids: Vec<String>,
+) -> Result<(), String> {
+    crate::server::knowledge_access::set_grants(&state.db.pool, &id, &kb_ids)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[derive(Serialize)]
+pub struct KnowledgeConnectionTest {
+    rest_status: u16,
+    rest_ok: bool,
+    mcp_status: u16,
+    mcp_ok: bool,
+}
+
+/// 经实际监听端口验证授权，不调用模型，也不回传密钥。
+#[tauri::command]
+pub async fn test_api_key_knowledge_access(
+    state: tauri::State<'_, std::sync::Arc<AppState>>,
+    id: String,
+    kb_id: String,
+) -> Result<KnowledgeConnectionTest, String> {
+    if !state
+        .server_running
+        .load(std::sync::atomic::Ordering::SeqCst)
+    {
+        return Err("请先启动 WaLiAPI 服务".into());
+    }
+    let key = Repository::new(state.db.pool.clone())
+        .get_api_key_by_id(&id)
+        .await
+        .map_err(|_| "密钥不存在")?;
+    let port = *state.server_port.read().await;
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(5))
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .map_err(|_| "无法创建连接测试")?;
+    let mut url =
+        url::Url::parse(&format!("http://127.0.0.1:{port}/api/kb/")).map_err(|_| "服务地址无效")?;
+    url.path_segments_mut()
+        .map_err(|_| "服务地址无效")?
+        .pop_if_empty()
+        .push(&kb_id);
+    let rest = client
+        .get(url)
+        .bearer_auth(&key.key)
+        .send()
+        .await
+        .map_err(|_| "无法连接本机 WaLiAPI 服务")?;
+    let rest_status = rest.status().as_u16();
+    let rest_body = rest.json::<serde_json::Value>().await.unwrap_or_default();
+    let mcp = client.post(format!("http://127.0.0.1:{port}/mcp")).bearer_auth(&key.key)
+        .json(&serde_json::json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"get_knowledge_base_stats","arguments":{"kb_id":kb_id}}}))
+        .send().await.map_err(|_| "无法连接本机 MCP 服务")?;
+    let mcp_status = mcp.status().as_u16();
+    let mcp_body = mcp.json::<serde_json::Value>().await.unwrap_or_default();
+    Ok(KnowledgeConnectionTest {
+        rest_status,
+        rest_ok: rest_status == 200 && rest_body["id"] == kb_id,
+        mcp_status,
+        mcp_ok: mcp_status == 200 && mcp_body["result"]["isError"] == false,
+    })
+}

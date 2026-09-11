@@ -152,8 +152,8 @@ curl http://127.0.0.1:8777/health
 | `WALIAPI_SERVER_HOST` | 监听地址 | `0.0.0.0`（Docker）/ `127.0.0.1`（桌面） |
 | `WALIAPI_SERVER_PORT` | 监听端口 | `8777` |
 | `WALIAPI_DATA_DIR` | 数据目录（SQLite + 知识库索引） | `/data` |
-| `WALIAPI_ADMIN_TOKEN` | KB/Wiki REST（`/api/kb`、`/api/wiki`）认证令牌（≥32 字符，Bearer） | 未配置则这些端点关闭（401） |
-| `WALIAPI_MCP_TOKEN` | MCP 端点认证令牌（≥32 字符，Bearer，须与 ADMIN 不同） | 未配置则端点关闭（401） |
+| `WALIAPI_ADMIN_TOKEN` | KB/Wiki REST（`/api/kb`、`/api/wiki`）认证令牌（≥32 字符，Bearer） | 未配置则管理操作不可用；已授权的 API Key 可查询 RAG |
+| `WALIAPI_MCP_TOKEN` | MCP 端点认证令牌（≥32 字符，Bearer，须与 ADMIN 不同） | 未配置则管理工具 / SSE 不可用；已授权的 API Key 可通过 POST 查询 RAG |
 | `WALIAPI_PUBLIC_URL` | 公网访问地址（生成客户端配置时使用） | — |
 
 Web 管理面板的前端静态资源已内嵌进 `waliapi-web` 二进制（rust-embed），无需单独的静态资源目录。
@@ -164,17 +164,23 @@ Compose 默认只发布到宿主机 `127.0.0.1`（可用 `WALIAPI_BIND` / `WALIA
 
 #### 认证体系
 
-Web 管理面、服务端点（KB/Wiki/MCP）和 `/v1` 数据面使用互不通用的凭证域：
+后台会话、管理 Token 和 API Key 的权限分别管理：
 
 - **Web 管理面板**：管理员用户名/密码登录会话（首次启动自动生成初始密码，存于数据目录 `INITIAL_PASSWORD` 文件）
-- **KB/Wiki REST**（`/api/kb`、`/api/wiki`）：`WALIAPI_ADMIN_TOKEN`（`Authorization: Bearer <token>`；未配置则端点关闭，一律 401）
-- **外部 Agent MCP**（`/mcp`）：`WALIAPI_MCP_TOKEN`（`Authorization: Bearer <token>`，权限隔离；未配置则端点关闭）
+- **RAG 查询**：在“密钥 → 知识库查询权限”勾选允许访问的 RAG，使用同一个 API Key 调用 REST / MCP；无需设置环境变量 Token。旧 Key 默认没有知识库权限。
+- **KB/Wiki REST 管理操作**：`WALIAPI_ADMIN_TOKEN`（`Authorization: Bearer <token>`）；不接受普通 API Key。
+- **MCP**（`/mcp`）：已授权 API Key 可用无会话 HTTP POST 调用 5 个 RAG 查询工具，目标库还须开启 MCP；管理工具、Wiki 和旧版 SSE 继续使用 `WALIAPI_MCP_TOKEN`。
 - **数据面 API**（`/v1/*`）：后台创建的 `sk-waliapi-*` 密钥
 
 ```bash
-# KB/Wiki REST 调用示例
-curl -H "Authorization: Bearer $WALIAPI_ADMIN_TOKEN" http://127.0.0.1:8777/api/kb
+# 将已授权的 API Key 保存到 WALIAPI_API_KEY 环境变量
+curl -H "Authorization: Bearer $WALIAPI_API_KEY" http://127.0.0.1:8777/api/kb
+curl http://127.0.0.1:8777/api/kb/ask \
+  -H "Authorization: Bearer $WALIAPI_API_KEY" -H "Content-Type: application/json" \
+  -d '{"kb_id":"你的知识库 ID","question":"你的问题","model":"已授权的生成模型"}'
 ```
+
+RAG 的“服务 → MCP”页可选择已授权 Key 测试 REST / MCP 连接；测试不调用模型。查询必须指定 `kb_id`，`top_k` 为 1–50，向量检索与问答的全部模型调用沿用该 Key 的模型、渠道限制和额度，Embedding 也会记录在该 Key 的日志中。API Key 暂不支持 `deep_research`，也不能读取或写入共享会话历史。
 
 宽松 CORS 只作用于数据面 `/v1/*` 路由；KB/Wiki/MCP 服务路由与管理面板不附带跨域允许头，任意网页无法跨域读取知识资产。反向代理只负责 TLS 和转发，不得移除或绕过认证头。绑定非回环地址而缺少上述 token 时，启动日志会输出醒目告警。
 
@@ -633,13 +639,15 @@ WaLiAPI/
 
 WaLiAPI 定位为**本地 / 内网优先**的 LLM 网关。公网部署前请先阅读本节，并确认边界假设与你的部署环境一致。
 
-**凭证域（互不通用）**：
+**凭证与权限**：
 
 | 用途 | 凭证 | 说明 |
 |:---|:---|:---|
 | 数据面 `/v1/*` | `sk-waliapi-*` 网关密钥 | 供下游客户端调用网关 |
-| Web 管理面 + KB/Wiki REST | `WALIAPI_ADMIN_TOKEN`（≥32 字符） | 首次启动生成随机管理员密码（stdout + 数据目录 `INITIAL_PASSWORD` 文件，首次登录成功后文件即删除）；登录失败限速（指数退避）、会话 Cookie 为 HttpOnly、改密后吊销全部旧会话 |
-| MCP 端点 | `WALIAPI_MCP_TOKEN`（≥32 字符，须与管理 token 不同） | Streamable HTTP + SSE |
+| Web 管理面 | 管理员登录会话（独立于服务端 Token） | 首次启动生成随机管理员密码（stdout + 数据目录 `INITIAL_PASSWORD` 文件，首次登录成功后文件即删除）；登录失败限速（指数退避）、会话 Cookie 为 HttpOnly、改密后吊销全部旧会话 |
+| KB/Wiki 管理 REST | `WALIAPI_ADMIN_TOKEN`（≥32 字符） | 上传、修改、删除等管理操作 |
+| RAG REST / MCP 查询 | 已授权知识库的 API Key | MCP 仅无会话 HTTP POST，不能访问管理工具 |
+| MCP 管理工具 / Wiki / SSE | `WALIAPI_MCP_TOKEN`（≥32 字符，须与管理 token 不同） | 保留原有接入方式 |
 
 **明文密钥存储（知情声明）**：上游渠道密钥与网关 API Key 以**明文**存储在本地 SQLite 数据目录中——数据目录的文件系统权限就是安全边界，本项目不提供静态加密。渠道导出文件包含明文密钥（界面有明示警告），请仅在受控环境操作。网关密钥在管理界面仅显示掩码，复制等显式动作才按需取回全量。
 

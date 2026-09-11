@@ -1,3 +1,4 @@
+import { KnowledgeConnectionPanel } from "../components/KnowledgeConnectionPanel";
 import { useEffect, useState, useCallback, useRef, useMemo } from "react";
 import { useLocation } from "react-router-dom";
 import {
@@ -256,7 +257,7 @@ function McpSection() {
             </div>
           </div>
           <div className="rounded-lg bg-amber-50 border border-amber-100 px-3 py-2 text-xs text-amber-700">
-            ⚠️ MCP 端点仅接受 JSON-RPC POST 请求，浏览器直接打开会返回 405。请使用 curl 或 MCP 客户端调用。
+            RAG 查询使用在“密钥”页授权的 API Key，通过 HTTP POST /mcp 接入。管理工具、Wiki 和旧版 SSE 使用 WALIAPI_MCP_TOKEN；MCP 开关不代表已经授权。
           </div>
         </div>
       </div>
@@ -296,6 +297,7 @@ function McpSection() {
           <h3 className="text-sm font-semibold text-slate-900">调用示例</h3>
         </div>
         <pre className="overflow-x-auto rounded-xl bg-slate-50 border border-slate-200 p-4 text-xs"><code className="text-slate-800">{`curl -X POST ${mcpEndpoint} \\
+  -H "Authorization: Bearer $WALIAPI_API_KEY" \\
   -H "Content-Type: application/json" \\
   -d '{
     "jsonrpc": "2.0",
@@ -2858,10 +2860,10 @@ function McpTab({ kb }: { kb: KnowledgeBase }) {
   };
 
   const mcpTools = [
-    { name: "search_knowledge_base", desc: "语义检索 RAG，返回匹配文本片段和相似度评分", required: ["query"] },
-    { name: "list_knowledge_bases", desc: "列出所有已暴露的 RAG（ID/名称/文档数）", required: [] },
-    { name: "ask_knowledge_base", desc: "RAG 问答，基于检索内容生成回答并返回来源引用", required: ["question"] },
-    { name: "read_document", desc: "读取指定文档的完整内容", required: ["kb_id", "doc_id"] },
+    { name: "search_knowledge_base", desc: "语义检索 RAG，返回匹配文本片段和相似度评分", required: ["query", "kb_id"] },
+    { name: "list_knowledge_bases", desc: "列出已授权且开启 MCP 的 RAG（ID/名称/文档数）", required: [] },
+    { name: "ask_knowledge_base", desc: "RAG 问答，基于检索内容生成回答并返回来源引用", required: ["question", "kb_id", "model"] },
+    { name: "read_document", desc: "读取指定文档的已摄入正文", required: ["kb_id", "doc_id"] },
     { name: "get_knowledge_base_stats", desc: "获取 RAG 统计信息（文档数/切片数/token数）", required: ["kb_id"] },
   ];
 
@@ -2873,9 +2875,9 @@ function McpTab({ kb }: { kb: KnowledgeBase }) {
           <Terminal size={18} className="text-slate-700" />
           <h3 className="text-sm font-semibold text-slate-900">MCP 对接</h3>
           {kb.mcp_enabled === 1 ? (
-            <span className="ml-auto rounded-full bg-emerald-50 px-2 py-0.5 text-xs font-medium text-emerald-600">已暴露</span>
+            <span className="ml-auto rounded-full bg-emerald-50 px-2 py-0.5 text-xs font-medium text-emerald-600">MCP 已开启（仍需授权）</span>
           ) : (
-            <span className="ml-auto rounded-full bg-slate-100 px-2 py-0.5 text-xs font-medium text-slate-500">未暴露</span>
+            <span className="ml-auto rounded-full bg-slate-100 px-2 py-0.5 text-xs font-medium text-slate-500">MCP 未开启</span>
           )}
         </div>
 
@@ -2895,7 +2897,7 @@ function McpTab({ kb }: { kb: KnowledgeBase }) {
           <div className="rounded-lg bg-blue-50 border border-blue-100 px-3 py-2.5 text-xs text-blue-700">
             <div className="font-medium mb-1">📡 MCP (Model Context Protocol) 对接</div>
             <div className="text-blue-600">
-              其他 AI Agent / 工具可通过 MCP 协议接入此 RAG。将上方端点配置到支持 MCP 的客户端（如 Claude Desktop、Cursor、自定义 Agent），即可让 AI 自动检索和问答你的私有 RAG。
+              将端点和已授权的 API Key 配置到支持 HTTP POST 与自定义 Authorization 请求头的 MCP 客户端，即可检索和问答此 RAG。
             </div>
           </div>
 
@@ -2907,6 +2909,8 @@ function McpTab({ kb }: { kb: KnowledgeBase }) {
           )}
         </div>
       </div>
+
+      <KnowledgeConnectionPanel kbId={kb.id} />
 
       {/* 可用工具列表 */}
       <div className="surface data-card rounded-2xl">
@@ -2939,10 +2943,12 @@ function McpTab({ kb }: { kb: KnowledgeBase }) {
           <h3 className="text-sm font-semibold text-slate-900">调用示例</h3>
         </div>
 
+        <p className="mb-3 text-xs text-slate-500">将已授权的 API Key 设置为环境变量 WALIAPI_API_KEY，再执行以下命令。</p>
         <div className="space-y-3">
           <div>
             <label className="mb-1 block text-xs font-medium text-slate-500">1. 列出可用 RAG</label>
             <pre className="overflow-x-auto rounded-xl bg-slate-50 border border-slate-200 p-3 text-[11px]"><code className="text-slate-800">{`curl -X POST ${mcpEndpoint} \\
+  -H "Authorization: Bearer $WALIAPI_API_KEY" \\
   -H "Content-Type: application/json" \\
   -d '{
     "jsonrpc": "2.0",
@@ -2958,6 +2964,7 @@ function McpTab({ kb }: { kb: KnowledgeBase }) {
           <div>
             <label className="mb-1 block text-xs font-medium text-slate-500">2. 语义检索</label>
             <pre className="overflow-x-auto rounded-xl bg-slate-50 border border-slate-200 p-3 text-[11px]"><code className="text-slate-800">{`curl -X POST ${mcpEndpoint} \\
+  -H "Authorization: Bearer $WALIAPI_API_KEY" \\
   -H "Content-Type: application/json" \\
   -d '{
     "jsonrpc": "2.0",
@@ -2977,6 +2984,7 @@ function McpTab({ kb }: { kb: KnowledgeBase }) {
           <div>
             <label className="mb-1 block text-xs font-medium text-slate-500">3. RAG 问答</label>
             <pre className="overflow-x-auto rounded-xl bg-slate-50 border border-slate-200 p-3 text-[11px]"><code className="text-slate-800">{`curl -X POST ${mcpEndpoint} \\
+  -H "Authorization: Bearer $WALIAPI_API_KEY" \\
   -H "Content-Type: application/json" \\
   -d '{
     "jsonrpc": "2.0",
@@ -2986,6 +2994,7 @@ function McpTab({ kb }: { kb: KnowledgeBase }) {
       "name": "ask_knowledge_base",
       "arguments": {
         "question": "你的问题",
+        "model": "请替换为已授权的生成模型",
         "kb_id": "${kb.id}"
       }
     }
@@ -2994,7 +3003,7 @@ function McpTab({ kb }: { kb: KnowledgeBase }) {
         </div>
 
         <div className="mt-3 rounded-lg bg-slate-50 border border-slate-200 px-3 py-2 text-xs text-slate-500">
-          ℹ️ 仅接受 POST 请求。所有工具遵循 MCP JSON-RPC 2.0 规范。
+          API Key 使用无会话 HTTP POST /mcp，仅开放上方查询工具。旧版 SSE 和管理工具仍使用 WALIAPI_MCP_TOKEN。
         </div>
       </div>
     </div>

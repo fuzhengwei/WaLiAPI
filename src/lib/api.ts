@@ -73,6 +73,9 @@ export const channelApi = {
 
 // API Key commands
 export const apiKeyApi = {
+  getKnowledgeAccess: (id: string) => invoke<string[]>("get_api_key_knowledge_access", { id }),
+  setKnowledgeAccess: (id: string, kbIds: string[]) => invoke<void>("set_api_key_knowledge_access", { id, kbIds }),
+  testKnowledgeAccess: (id: string, kbId: string) => invoke<{ rest_status: number; rest_ok: boolean; mcp_status: number; mcp_ok: boolean }>("test_api_key_knowledge_access", { id, kbId }),
   getAll: () => invoke<ApiKey[]>("get_api_keys"),
   // FIX-13：列表只回掩码，复制/示例代码等显式动作经此按需取全量。
   getFull: (id: string) => invoke<string>("get_api_key_full", { id }),

@@ -1,4 +1,5 @@
 use super::embedder;
+use super::model_client::{ModelClient, QueryError};
 use super::models::{ConversationMessage, RagAnswer, RetrievalDetail, SourceInfo, UsageInfo};
 use super::repository::KbRepository;
 use super::retriever;
@@ -54,7 +55,47 @@ pub async fn ask_with_config(
     keyword_weight: f32,
     search_mode: &str,
 ) -> Result<RagAnswer, String> {
-    let repo = Repository::new(pool.clone());
+    let client = ModelClient::Internal {
+        pool,
+        settings,
+        kb_id,
+    };
+    ask_with_client(
+        &client,
+        pool,
+        kb_id,
+        query,
+        embedding_model,
+        chat_model,
+        top_k,
+        mcp_only,
+        history,
+        settings,
+        vector_weight,
+        keyword_weight,
+        search_mode,
+    )
+    .await
+    .map_err(|e| e.to_string())
+}
+
+// 沿用现有 RAG 参数，在公共流程中额外传递模型调用身份。
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn ask_with_client(
+    client: &ModelClient<'_>,
+    pool: &SqlitePool,
+    kb_id: &str,
+    query: &str,
+    embedding_model: &str,
+    chat_model: &str,
+    top_k: usize,
+    mcp_only: bool,
+    history: &[ConversationMessage],
+    settings: &SettingsStore,
+    vector_weight: f32,
+    keyword_weight: f32,
+    search_mode: &str,
+) -> Result<RagAnswer, QueryError> {
     let kb_repo = KbRepository::new(pool.clone());
     // 融合模式（C-06/R3）：RRF 默认（消量纲），weighted 保留可配回退
     let fusion_mode = retriever::FusionMode::parse(&settings.get_str("kb.fusion_mode", "rrf"));
@@ -64,18 +105,16 @@ pub async fn ask_with_config(
     // 开启时先用渠道模型把「近几轮对话 + 当前问题」改写成独立完整的检索查询。
     // 失败/超时静默回退原查询（best-effort），多一次 LLM 调用的成本由开关控制。
     let query = if settings.get_bool("kb.query_rewrite", false) && !history.is_empty() {
-        rewrite_query_with_llm(pool, settings, kb_id, chat_model, query, history).await
+        rewrite_query_with_llm(client, pool, chat_model, query, history).await
     } else {
         query.to_string()
     };
 
     // 1. Embed the query (needed for vector and hybrid modes)
     let query_emb_opt = if search_mode != "keyword" {
-        let embeddings = embedder::embed(&[query.to_string()], embedding_model, &repo)
-            .await
-            .map_err(|e| format!("Embedding failed: {}", e))?;
+        let embeddings = client.embed(&query, embedding_model).await?;
         if embeddings.is_empty() {
-            return Err("Failed to embed query".to_string());
+            return Err("Failed to embed query".into());
         }
         Some(embeddings[0].clone())
     } else {
@@ -88,9 +127,7 @@ pub async fn ask_with_config(
         let kw_results = if kb_id.is_empty() {
             // For search_all with keyword mode, we still need embeddings for cross-KB search
             // Fallback: embed and use hybrid
-            let embeddings = embedder::embed(&[query.to_string()], embedding_model, &repo)
-                .await
-                .map_err(|e| format!("Embedding failed: {}", e))?;
+            let embeddings = client.embed(&query, embedding_model).await?;
             retriever::hybrid_search_with_details(
                 pool,
                 kb_id,
@@ -176,7 +213,7 @@ pub async fn ask_with_config(
     // 重排调用的 token 消耗自动计入请求日志；失败静默回退原序（best-effort）。
     let scored_results =
         if settings.get_bool("kb.rerank_enabled", false) && scored_results.len() > 1 {
-            rerank_with_llm(pool, settings, kb_id, chat_model, &query, scored_results).await
+            rerank_with_llm(client, chat_model, &query, scored_results).await
         } else {
             scored_results
         };
@@ -187,7 +224,7 @@ pub async fn ask_with_config(
 
     if results.is_empty() {
         // Save to conversation history
-        if !kb_id.is_empty() {
+        if client.is_internal() && !kb_id.is_empty() {
             let answer = "RAG 中没有找到相关内容。".to_string();
             kb_repo
                 .add_conversation(kb_id, "user", &query, None, Some(chat_model), 0)
@@ -267,19 +304,7 @@ pub async fn ask_with_config(
         ],
         "stream": false
     });
-    let chat_request_str: String = serde_json::to_string(&chat_request).unwrap_or_default();
-    let proxy_result = proxy::handle_request(
-        &Arc::new(repo),
-        settings,
-        "kb-internal",
-        "RAG",
-        chat_request,
-        false,
-        Some(chat_request_str),
-        Some(format!("kb-internal_{}", kb_id)),
-        None, // legacy RAG path: no security gate yet — proxy scans internally
-    )
-    .await;
+    let proxy_result = client.chat(chat_request, "RAG").await;
 
     match proxy_result {
         Ok(result) => {
@@ -293,11 +318,7 @@ pub async fn ask_with_config(
                 .unwrap_or("生成回答失败")
                 .to_string();
 
-            let usage = result.usage.map(|u| UsageInfo {
-                prompt_tokens: u.prompt_tokens,
-                completion_tokens: u.completion_tokens,
-                total_tokens: u.total_tokens,
-            });
+            let usage = result.usage;
 
             let sources: Vec<SourceInfo> = results
                 .iter()
@@ -333,7 +354,7 @@ pub async fn ask_with_config(
                 .collect();
 
             // Save to conversation history
-            if !kb_id.is_empty() {
+            if client.is_internal() && !kb_id.is_empty() {
                 let sources_json = serde_json::to_string(&sources).ok();
                 let tokens = usage.as_ref().map(|u| u.total_tokens as i64).unwrap_or(0);
                 kb_repo
@@ -360,7 +381,7 @@ pub async fn ask_with_config(
                 retrieval_details: Some(retrieval_details),
             })
         }
-        Err((code, msg)) => Err(format!("LLM request failed ({}): {}", code, msg)),
+        Err(error) => Err(error),
     }
 }
 
@@ -785,9 +806,8 @@ fn extract_rewrite_query(reply: &str) -> Option<String> {
 /// 可选查询改写：近几轮对话 + 当前问题 → 独立完整检索查询。
 /// 走渠道模型（kb-internal 路由组，token 消耗自动落账）；任何失败静默回退原查询。
 async fn rewrite_query_with_llm(
+    client: &ModelClient<'_>,
     pool: &SqlitePool,
-    settings: &SettingsStore,
-    kb_id: &str,
     chat_model: &str,
     query: &str,
     history: &[ConversationMessage],
@@ -814,19 +834,7 @@ async fn rewrite_query_with_llm(
         "stream": false,
         "temperature": 0.0
     });
-    let chat_request_str: String = serde_json::to_string(&chat_request).unwrap_or_default();
-    let proxy_result = proxy::handle_request(
-        &std::sync::Arc::new(Repository::new(pool.clone())),
-        settings,
-        "kb-rewrite",
-        "RAG-rewrite",
-        chat_request,
-        false,
-        Some(chat_request_str),
-        Some(format!("kb-internal_{}", kb_id)),
-        None,
-    )
-    .await;
+    let proxy_result = client.chat(chat_request, "RAG-rewrite").await;
 
     let reply = match proxy_result {
         Ok(result) => result
@@ -921,8 +929,18 @@ mod rewrite_tests {
                 content: "在密钥页设置 quota_limit。".into(),
             },
         ];
-        let result =
-            rewrite_query_with_llm(&pool, &settings, "kb-1", "m", "那限流呢？", &history).await;
+        let result = rewrite_query_with_llm(
+            &ModelClient::Internal {
+                pool: &pool,
+                settings: &settings,
+                kb_id: "kb-1",
+            },
+            &pool,
+            "m",
+            "那限流呢？",
+            &history,
+        )
+        .await;
         assert_eq!(result, "那限流呢？", "上游不可用时必须静默回退原查询");
     }
 }
@@ -957,9 +975,7 @@ fn parse_rerank_order(reply: &str, len: usize) -> Option<Vec<usize>> {
 /// 可选 LLM 重排：把 top 候选拼给渠道模型打分重排（用渠道跑渠道）。
 /// 失败/关闭不影响主流程——原序返回，仅 tracing 告警。
 async fn rerank_with_llm(
-    pool: &SqlitePool,
-    settings: &crate::settings_store::SettingsStore,
-    kb_id: &str,
+    client: &ModelClient<'_>,
     chat_model: &str,
     query: &str,
     candidates: Vec<retriever::ScoredSearchResult>,
@@ -987,19 +1003,7 @@ async fn rerank_with_llm(
         "stream": false,
         "temperature": 0.0
     });
-    let chat_request_str: String = serde_json::to_string(&chat_request).unwrap_or_default();
-    let proxy_result = proxy::handle_request(
-        &std::sync::Arc::new(crate::db::repository::Repository::new(pool.clone())),
-        settings,
-        "kb-rerank",
-        "RAG-rerank",
-        chat_request,
-        false,
-        Some(chat_request_str),
-        Some(format!("kb-internal_{}", kb_id)),
-        None,
-    )
-    .await;
+    let proxy_result = client.chat(chat_request, "RAG-rerank").await;
 
     let reply = match proxy_result {
         Ok(result) => result

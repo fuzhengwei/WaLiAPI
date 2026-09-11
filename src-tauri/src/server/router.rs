@@ -67,7 +67,7 @@ fn mock_state_handle(state: &Arc<AppState>) -> tauri::State<'static, Arc<AppStat
 
 fn build_router(state: Arc<AppState>, shared: SharedState) -> Router {
     // 宽松 CORS 仅作用于数据面 /v1/* 与 /health（API Key 鉴权，供浏览器/跨域客户端调用）；
-    // KB/Wiki/MCP 服务路由带独立 token 鉴权，不附带宽松 CORS（防止任意网页跨域读取知识资产）；
+    // KB/Wiki/MCP 服务路由带凭据与权限校验，不附带宽松 CORS（防止任意网页跨域读取知识资产）；
     // /admin/api 与静态资源不附带 CORS 头（仅同源可用，配合 CSRF 中间件）。
     let cors = CorsLayer::new()
         .allow_origin(Any)
@@ -76,7 +76,7 @@ fn build_router(state: Arc<AppState>, shared: SharedState) -> Router {
         .expose_headers(Any);
 
     // Service registry — 服务路由按鉴权域分组装配：
-    // KB/Wiki REST 挂管理员 token（WALIAPI_ADMIN_TOKEN），MCP 挂独立 token（WALIAPI_MCP_TOKEN）。
+    // 保留管理 token；普通 API Key 通过白名单查询已授权知识库。
     let registry = crate::services::ServiceRegistry::new();
     let kb_wiki_router = registry
         .merge_routes_for(&["knowledge", "wiki"], state.clone())
@@ -154,9 +154,9 @@ pub struct SharedState {
     /// 供 /admin/api/invoke 分发用的 'static State（桌面：真实 handle；headless：mock handle）。
     pub state_static: tauri::State<'static, Arc<AppState>>,
     /// KB/Wiki REST 端点（/api/kb、/api/wiki）的管理员 Bearer token
-    /// （WALIAPI_ADMIN_TOKEN；None = 端点关闭，一律 401）。
+    /// （WALIAPI_ADMIN_TOKEN；None = 仅接受已授权 API Key 的 RAG 查询）。
     pub admin_token: Option<Arc<str>>,
-    /// MCP 端点（/mcp*）的独立 Bearer token（WALIAPI_MCP_TOKEN；None = 端点关闭，一律 401）。
+    /// MCP 端点（/mcp*）的独立 Bearer token（WALIAPI_MCP_TOKEN；None = 仅接受已授权 API Key 的无会话查询）。
     pub mcp_token: Option<Arc<str>>,
     /// 桌面端真实 AppHandle（文件对话框、自动启动等桌面专属命令）；headless 编译期不存在该字段。
     #[cfg(feature = "desktop-ui")]
@@ -175,7 +175,7 @@ mod tests {
 
     /// 构造最小可用的 AppState（临时目录真实 SQLite + 真实迁移），让 build_router
     /// 中的处理器可以真正执行（列表查询、JSON-RPC 分发）。
-    async fn test_state() -> Arc<AppState> {
+    pub(super) async fn test_state() -> Arc<AppState> {
         let data_dir =
             std::env::temp_dir().join(format!("waliapi-router-test-{}", uuid::Uuid::new_v4()));
         let db = Arc::new(crate::db::Database::new_with_path(&data_dir).await);
@@ -203,7 +203,11 @@ mod tests {
         })
     }
 
-    fn test_shared(state: &Arc<AppState>, admin: Option<&str>, mcp: Option<&str>) -> SharedState {
+    pub(super) fn test_shared(
+        state: &Arc<AppState>,
+        admin: Option<&str>,
+        mcp: Option<&str>,
+    ) -> SharedState {
         SharedState {
             state: state.clone(),
             state_static: mock_state_handle(state),
@@ -214,7 +218,7 @@ mod tests {
         }
     }
 
-    fn request(method: &str, uri: &str, bearer: Option<&str>) -> Request<Body> {
+    pub(super) fn request(method: &str, uri: &str, bearer: Option<&str>) -> Request<Body> {
         let mut builder = Request::builder().method(method).uri(uri);
         if let Some(token) = bearer {
             builder = builder.header("authorization", format!("Bearer {token}"));
@@ -222,7 +226,12 @@ mod tests {
         builder.body(Body::empty()).unwrap()
     }
 
-    fn json_request(method: &str, uri: &str, bearer: Option<&str>, body: &str) -> Request<Body> {
+    pub(super) fn json_request(
+        method: &str,
+        uri: &str,
+        bearer: Option<&str>,
+        body: &str,
+    ) -> Request<Body> {
         let mut builder = Request::builder()
             .method(method)
             .uri(uri)
@@ -959,3 +968,7 @@ mod tests {
         assert!(res.headers().get("Retry-After").is_some());
     }
 }
+
+#[cfg(test)]
+#[path = "knowledge_access_tests.rs"]
+mod knowledge_access_tests;

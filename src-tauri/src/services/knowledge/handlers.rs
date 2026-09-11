@@ -5,11 +5,13 @@ use super::rag;
 use super::repository::KbRepository;
 use super::retriever;
 use crate::db::repository::Repository;
+use crate::server::knowledge_access::{self, KnowledgeAccess};
 use crate::server::router::SharedState;
 use axum::{
     extract::{Path, Query, State},
     http::StatusCode,
     response::{IntoResponse, Json, Response},
+    Extension,
 };
 use serde::Deserialize;
 use sha2::Digest;
@@ -23,10 +25,18 @@ pub struct ListQuery {
 
 // ─── Knowledge Base CRUD ──────────────────────────────────────────
 
-pub async fn list_knowledge_bases(State(shared): State<SharedState>) -> Response {
+pub async fn list_knowledge_bases(
+    State(shared): State<SharedState>,
+    access: Option<Extension<KnowledgeAccess>>,
+) -> Response {
     let repo = KbRepository::new(shared.state.db.pool.clone());
     match repo.get_all_kbs().await {
-        Ok(kbs) => Json(serde_json::json!({ "data": kbs })).into_response(),
+        Ok(mut kbs) => {
+            if let Some(Extension(access)) = access {
+                kbs.retain(|kb| kb.status == 1 && access.kb_ids.contains(&kb.id));
+            }
+            Json(serde_json::json!({ "data": kbs })).into_response()
+        }
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             format!("DB error: {}", e),
@@ -228,11 +238,12 @@ pub async fn upload_document(
 
 pub async fn get_document(
     State(shared): State<SharedState>,
-    Path((_kb_id, doc_id)): Path<(String, String)>,
+    Path((kb_id, doc_id)): Path<(String, String)>,
 ) -> Response {
     let repo = KbRepository::new(shared.state.db.pool.clone());
     match repo.get_document(&doc_id).await {
-        Ok(doc) => Json(doc).into_response(),
+        Ok(doc) if doc.kb_id == kb_id => Json(doc).into_response(),
+        Ok(_) => (StatusCode::NOT_FOUND, "Document not found").into_response(),
         Err(_) => (StatusCode::NOT_FOUND, "Document not found").into_response(),
     }
 }
@@ -314,6 +325,7 @@ pub struct SearchQuery {
     pub kb_id: Option<String>,
     #[serde(default = "default_top_k")]
     pub top_k: usize,
+    pub search_mode: Option<String>,
 }
 
 fn default_top_k() -> usize {
@@ -323,7 +335,19 @@ fn default_top_k() -> usize {
 pub async fn search(
     State(shared): State<SharedState>,
     Query(query): Query<SearchQuery>,
+    access: Option<Extension<KnowledgeAccess>>,
 ) -> Response {
+    if let Some(Extension(access)) = access {
+        let input: AskInput = serde_json::from_value(serde_json::json!({
+            "question": query.q, "kb_id": query.kb_id, "top_k": query.top_k,
+            "search_mode": query.search_mode.unwrap_or_else(|| "vector".into()),
+        }))
+        .expect("valid search input");
+        return match knowledge_access::search(&shared, &access, input, false).await {
+            Ok(results) => Json(serde_json::json!({"data": results})).into_response(),
+            Err(error) => error.into_response(),
+        };
+    }
     let repo = Repository::new(shared.state.db.pool.clone());
 
     let emb_model = if let Some(kb_id) = &query.kb_id {
@@ -373,7 +397,17 @@ pub async fn search(
 
 // ─── RAG Ask (with history + token fallback) ──────────────────────
 
-pub async fn ask(State(shared): State<SharedState>, Json(input): Json<AskInput>) -> Response {
+pub async fn ask(
+    State(shared): State<SharedState>,
+    access: Option<Extension<KnowledgeAccess>>,
+    Json(input): Json<AskInput>,
+) -> Response {
+    if let Some(Extension(access)) = access {
+        return match knowledge_access::ask(&shared, &access, input, false).await {
+            Ok(answer) => Json(answer).into_response(),
+            Err(error) => error.into_response(),
+        };
+    }
     let kb_id = input.kb_id.clone().unwrap_or_default();
 
     let emb_model = if !kb_id.is_empty() {
