@@ -349,8 +349,8 @@ impl KbRepository {
         let symbol_kind = meta.get("symbol_kind").and_then(|v| v.as_str());
 
         sqlx::query(
-            "INSERT INTO kb_chunks (id, doc_id, kb_id, chunk_index, content, token_count, embedding, embedding_dim, metadata, symbol_name, symbol_kind, content_hash, created_at)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+            "INSERT INTO kb_chunks (id, doc_id, kb_id, chunk_index, content, token_count, embedding, embedding_dim, metadata, symbol_name, symbol_kind, content_hash, created_at, search_text)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
         )
         .bind(&chunk.id)
         .bind(&chunk.doc_id)
@@ -365,9 +365,39 @@ impl KbRepository {
         .bind(symbol_kind)
         .bind(&chunk.content_hash)
         .bind(&chunk.created_at)
+        .bind(super::text::search_projection(&chunk.content))
         .execute(&self.pool)
         .await?;
         Ok(())
+    }
+
+    /// 升级旧数据/正文变更后补建检索投影。NULL 有部分索引，正常检索只做空检查。
+    /// 分批提交可中断续跑；CAS 防止覆盖并发修改，正文、哈希和向量均不变。
+    pub async fn backfill_search_text(&self) -> Result<u64, sqlx::Error> {
+        let mut updated = 0;
+        loop {
+            let rows: Vec<(String, String)> = sqlx::query_as(
+                "SELECT id, content FROM kb_chunks WHERE search_text IS NULL ORDER BY id LIMIT 128",
+            )
+            .fetch_all(&self.pool)
+            .await?;
+            if rows.is_empty() {
+                return Ok(updated);
+            }
+            let mut tx = self.pool.begin().await?;
+            for (id, content) in rows {
+                updated += sqlx::query(
+                    "UPDATE kb_chunks SET search_text = ? WHERE id = ? AND content = ? AND search_text IS NULL",
+                )
+                .bind(super::text::search_projection(&content))
+                .bind(id)
+                .bind(content)
+                .execute(&mut *tx)
+                .await?
+                .rows_affected();
+            }
+            tx.commit().await?;
+        }
     }
 
     /// 该文档现存 chunk 的 (content_hash → embedding) 映射，供重处理时

@@ -186,6 +186,12 @@ impl Database {
             .await
             .expect("failed to run database migrations");
 
+        // 补建升级前切片的关键词投影，不改动已有正文和向量。
+        crate::services::knowledge::repository::KbRepository::new(pool.clone())
+            .backfill_search_text()
+            .await
+            .expect("failed to backfill knowledge search index");
+
         // Seed built-in security rules if table exists and is empty
         let _ = crate::security::rules::seed_builtin_rules(&pool).await;
 

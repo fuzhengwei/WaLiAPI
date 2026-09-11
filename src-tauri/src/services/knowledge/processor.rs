@@ -256,7 +256,7 @@ async fn process_document_inner(
                 page_no: Some((idx + 1) as u32),
                 ..Default::default()
             };
-            let page_md = page_md.clone();
+            let page_md = super::text::normalize_radicals(page_md);
             let config = config.clone();
             let mut page_chunks = std::panic::catch_unwind(move || {
                 splitter::split(&page_md, "markdown", &config, &page_meta)

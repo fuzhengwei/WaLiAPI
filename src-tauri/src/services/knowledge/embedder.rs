@@ -13,6 +13,11 @@ pub async fn embed(
     if texts.is_empty() {
         return Ok(vec![]);
     }
+    // 查询和文档统一修复 PDF 部首字形，覆盖 REST、MCP、管理命令入口。
+    let texts: Vec<String> = texts
+        .iter()
+        .map(|t| super::text::normalize_radicals(t))
+        .collect();
 
     // Get enabled channels
     let channels = repo
@@ -31,7 +36,7 @@ pub async fn embed(
     };
 
     for channel in &candidates {
-        match try_embed_with_channel(texts, model, channel).await {
+        match try_embed_with_channel(&texts, model, channel).await {
             Ok(embeddings) => {
                 // Log success and validate dimensions
                 if !embeddings.is_empty() {

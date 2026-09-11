@@ -13,6 +13,7 @@ pub mod repository;
 pub mod retriever;
 pub mod routes;
 pub mod splitter;
+pub mod text;
 pub mod upload;
 
 use super::{Service, ServiceStatus};
