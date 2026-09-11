@@ -343,6 +343,14 @@ impl KbRepository {
     // ==================== Chunk ====================
 
     pub async fn create_chunk(&self, chunk: &ChunkInsert) -> Result<(), sqlx::Error> {
+        let mut connection = self.pool.acquire().await?;
+        Self::insert_chunk(&mut connection, chunk).await
+    }
+
+    async fn insert_chunk(
+        connection: &mut sqlx::SqliteConnection,
+        chunk: &ChunkInsert,
+    ) -> Result<(), sqlx::Error> {
         // 从 metadata JSON 中提取 symbol_name / symbol_kind
         let meta: serde_json::Value = serde_json::from_str(&chunk.metadata).unwrap_or_default();
         let symbol_name = meta.get("symbol_name").and_then(|v| v.as_str());
@@ -365,9 +373,41 @@ impl KbRepository {
         .bind(symbol_kind)
         .bind(&chunk.content_hash)
         .bind(&chunk.created_at)
-        .execute(&self.pool)
+        .execute(connection)
         .await?;
         Ok(())
+    }
+
+    /// 新切片全部准备好后一次替换；失败时事务回滚，旧文档仍可检索。
+    pub async fn replace_document_chunks(
+        &self,
+        doc_id: &str,
+        kb_id: &str,
+        chunks: &[ChunkInsert],
+        ocr_info: Option<(i64, &str)>,
+    ) -> Result<(), sqlx::Error> {
+        let mut tx = self.pool.begin().await?;
+        sqlx::query("DELETE FROM kb_chunks WHERE doc_id = ?")
+            .bind(doc_id)
+            .execute(&mut *tx)
+            .await?;
+        for chunk in chunks {
+            Self::insert_chunk(&mut tx, chunk).await?;
+        }
+        let now = now_iso();
+        let total_tokens: i64 = chunks.iter().map(|chunk| chunk.token_count).sum();
+        sqlx::query("UPDATE kb_documents SET chunk_count = ?, token_count = ?, status = 'ready', error_message = NULL, updated_at = ? WHERE id = ? AND kb_id = ?")
+            .bind(chunks.len() as i64).bind(total_tokens).bind(&now).bind(doc_id).bind(kb_id)
+            .execute(&mut *tx).await?;
+        if let Some((pages, failed_pages)) = ocr_info {
+            sqlx::query("UPDATE kb_documents SET ocr_engine = 'vlm', page_count = ?, ocr_failed_pages = ? WHERE id = ?")
+                .bind(pages).bind(failed_pages).bind(doc_id).execute(&mut *tx).await?;
+        }
+        let dim = chunks.first().map(|chunk| chunk.embedding_dim).unwrap_or(0);
+        sqlx::query("UPDATE kb_knowledge_bases SET doc_count = (SELECT COUNT(*) FROM kb_documents WHERE kb_id = ?), chunk_count = (SELECT COUNT(*) FROM kb_chunks WHERE kb_id = ?), total_tokens = (SELECT COALESCE(SUM(token_count), 0) FROM kb_chunks WHERE kb_id = ?), embedding_dim = CASE WHEN embedding_dim = 0 THEN ? ELSE embedding_dim END, updated_at = ? WHERE id = ?")
+            .bind(kb_id).bind(kb_id).bind(kb_id).bind(dim).bind(&now).bind(kb_id)
+            .execute(&mut *tx).await?;
+        tx.commit().await
     }
 
     /// 该文档现存 chunk 的 (content_hash → embedding) 映射，供重处理时
