@@ -18,6 +18,7 @@ pub struct KbKnowledgeBase {
     pub excluded_files: String,
     pub included_files: String,
     pub embedding_dim: i64,
+    pub embedding_revision: i64,
     pub index_status: String,
     pub embedding_batch_size: i64,
     /// 知识库级 OCR 视觉模型（如 qwen-vl-max）；None/空 = 不启用。

@@ -295,7 +295,10 @@ pub async fn index_delta(
     let repo = KbRepository::new(pool.clone());
     let path = index_path(kb_id);
 
-    let loaded = if path.exists() {
+    let kb = repo.get_kb(kb_id).await.map_err(|e| e.to_string())?;
+    let loaded = if kb.index_status == "stale" {
+        Err("embedding model changed".to_string())
+    } else if path.exists() {
         HnswIndex::load(&path)
     } else {
         Err("index file missing".to_string())
