@@ -244,8 +244,13 @@ pub async fn delete_document(
     let repo = KbRepository::new(shared.state.db.pool.clone());
 
     if let Ok(doc) = repo.get_document(&doc_id).await {
-        if let Some(path) = &doc.file_path {
-            std::fs::remove_file(path).ok();
+        if let Err(e) = super::upload::remove_managed_file(
+            &shared.state.data_dir,
+            &doc.kb_id,
+            &doc.source_type,
+            doc.file_path.as_deref(),
+        ) {
+            return (StatusCode::INTERNAL_SERVER_ERROR, e).into_response();
         }
         // 级联删除 OCR 页级缓存（以内容哈希为键）
         super::ocr::cache::remove_cache(&shared.state.data_dir, &doc.content_hash);
