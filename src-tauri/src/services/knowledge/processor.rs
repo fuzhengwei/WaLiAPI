@@ -330,7 +330,13 @@ async fn process_document_inner(
     let total_tokens: i64 = chunks.iter().map(|c| c.token_count as i64).sum();
 
     // 3. Embed chunks in batches（内容未变的块复用既有向量，C-06/R1）
-    let emb_model = embedding_model.unwrap_or(DEFAULT_EMBEDDING_MODEL);
+    let emb_model = kb
+        .embedding_model
+        .as_deref()
+        .unwrap_or(DEFAULT_EMBEDDING_MODEL);
+    if embedding_model.unwrap_or(DEFAULT_EMBEDDING_MODEL) != emb_model {
+        return Err("处理期间嵌入模型配置已变更，请重新处理文档".to_string());
+    }
     let main_repo = Repository::new(pool.clone());
 
     // Detect expected embedding dimension from KB config
@@ -353,7 +359,11 @@ async fn process_document_inner(
         .iter()
         .map(|c| hex::encode(sha2::Sha256::digest(c.content.as_bytes())))
         .collect();
-    let (mut to_embed, reused) = split_chunks_for_embedding(&chunk_hashes, reuse_embeddings);
+    let cache_keys: Vec<String> = chunk_hashes
+        .iter()
+        .map(|hash| format!("{}:{hash}", kb.embedding_revision))
+        .collect();
+    let (mut to_embed, reused) = split_chunks_for_embedding(&cache_keys, reuse_embeddings);
 
     let mut all_embeddings: Vec<Vec<f32>> = vec![Vec::new(); chunks.len()];
     let mut reused_count = 0usize;
@@ -424,7 +434,9 @@ async fn process_document_inner(
             detected_dim,
             kb_id
         );
-        repo.update_kb_embedding_dim(kb_id, detected_dim).await.ok();
+        repo.update_kb_embedding_dim(kb_id, detected_dim, kb.embedding_revision)
+            .await
+            .map_err(|e| e.to_string())?;
     }
 
     // 4. Store chunks with embeddings
@@ -444,6 +456,8 @@ async fn process_document_inner(
             );
         }
         let embedding_bytes = retriever::encode_embedding(&all_embeddings[i]);
+        let mut metadata = serde_json::to_value(&chunk.metadata).map_err(|e| e.to_string())?;
+        metadata["embedding_revision"] = serde_json::json!(kb.embedding_revision);
         let chunk_insert = ChunkInsert {
             id: uuid::Uuid::new_v4().to_string(),
             doc_id: doc_id.to_string(),
@@ -453,7 +467,7 @@ async fn process_document_inner(
             token_count: chunk.token_count as i64,
             embedding: embedding_bytes,
             embedding_dim: all_embeddings[i].len() as i64,
-            metadata: serde_json::to_string(&chunk.metadata).unwrap_or_else(|_| "{}".to_string()),
+            metadata: metadata.to_string(),
             content_hash: Some(chunk_hashes[i].clone()),
             created_at: now_iso(),
         };
