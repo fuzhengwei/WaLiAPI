@@ -62,7 +62,9 @@ pub fn parse_file(filename: &str, content: &[u8]) -> Result<ParsedContent, Strin
                 format!("PDF parse panic: {}", msg)
             })?;
             let text = text.map_err(|e| format!("PDF parse error: {}", e))?;
-            Ok(ParsedContent::PlainText(text))
+            Ok(ParsedContent::PlainText(super::text::normalize_radicals(
+                &text,
+            )))
         }
         _ => {
             // Try to decode as UTF-8, fall back to lossy

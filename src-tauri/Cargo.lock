@@ -7351,6 +7351,7 @@ dependencies = [
  "tree-sitter-python",
  "tree-sitter-rust",
  "tree-sitter-typescript",
+ "unicode-normalization",
  "url",
  "uuid",
 ]

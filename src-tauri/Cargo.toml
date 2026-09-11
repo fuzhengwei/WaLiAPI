@@ -73,6 +73,7 @@ hex = "0.4"
 bincode = "1"
 base64 = "0.22"
 pdf-extract = "0.7"
+unicode-normalization = "0.1"
 # 知识库 VLM OCR：pdfium 渲染 PDF 页面（动态库运行时加载，见 resources/pdfium/README.md）
 pdfium-render = "0.8"
 image = "0.25"

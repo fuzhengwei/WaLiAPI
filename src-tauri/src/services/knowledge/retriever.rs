@@ -519,9 +519,13 @@ async fn fts5_search(
     // 整段塞进 MATCH，FTS5 会把它当查询表达式解析（空串报错、裸运算符
     // 误匹配甚至注入语法错误）。
     let tokens = tokenize_query(query);
-    if tokens.is_empty() {
+    if tokens.is_empty() || top_k == 0 {
         return Ok(Vec::new());
     }
+    KbRepository::new(pool.clone())
+        .backfill_search_text()
+        .await
+        .map_err(|e| format!("FTS5 projection backfill failed: {}", e))?;
     let fts_query = build_fts_query(&tokens);
 
     let rows: Vec<(String, String, String, String, String)> = sqlx::query_as(
@@ -570,107 +574,9 @@ fn build_fts_query(tokens: &[String]) -> String {
         .join(" OR ")
 }
 
-/// Tokenize a query string for FTS5 search.
-/// - English/numbers: split by whitespace and punctuation, keep tokens with 2+ chars
-/// - Chinese (CJK): extract continuous CJK character runs and generate 2-grams (bigrams)
-/// - Mixed: process each segment independently, then merge
+/// 文档和查询使用同一套 Unicode 规范化与中文双字分词。
 fn tokenize_query(query: &str) -> Vec<String> {
-    let mut tokens = Vec::new();
-    let chars: Vec<char> = query.chars().collect();
-    let mut i = 0;
-
-    while i < chars.len() {
-        let ch = chars[i];
-
-        // Check if CJK character
-        let is_cjk = (ch >= '\u{4e00}' && ch <= '\u{9fff}')
-            || (ch >= '\u{3400}' && ch <= '\u{4dbf}')
-            || (ch >= '\u{f900}' && ch <= '\u{faff}');
-
-        if is_cjk {
-            // Collect continuous CJK characters
-            let mut cjk_run = Vec::new();
-            while i < chars.len() {
-                let c = chars[i];
-                let cjk = (c >= '\u{4e00}' && c <= '\u{9fff}')
-                    || (c >= '\u{3400}' && c <= '\u{4dbf}')
-                    || (c >= '\u{f900}' && c <= '\u{faff}');
-                if !cjk {
-                    break;
-                }
-                cjk_run.push(c);
-                i += 1;
-            }
-
-            // Generate bigrams from CJK run
-            if cjk_run.len() == 1 {
-                // Single CJK char: use as-is
-                tokens.push(cjk_run[0].to_string());
-            } else {
-                for w in cjk_run.windows(2) {
-                    tokens.push(format!("{}{}", w[0], w[1]));
-                }
-            }
-        } else {
-            // Collect non-CJK characters as a word
-            let mut word = String::new();
-            while i < chars.len() {
-                let c = chars[i];
-                let cjk = (c >= '\u{4e00}' && c <= '\u{9fff}')
-                    || (c >= '\u{3400}' && c <= '\u{4dbf}')
-                    || (c >= '\u{f900}' && c <= '\u{faff}');
-                if cjk {
-                    break;
-                }
-                // Split on whitespace and common punctuation
-                if c.is_whitespace()
-                    || matches!(
-                        c,
-                        '.' | ','
-                            | '!'
-                            | '?'
-                            | ';'
-                            | ':'
-                            | '('
-                            | ')'
-                            | '['
-                            | ']'
-                            | '{'
-                            | '}'
-                            | '"'
-                            | '\''
-                            | '`'
-                            | '/'
-                            | '\\'
-                            | '|'
-                            | '<'
-                            | '>'
-                    )
-                {
-                    break;
-                }
-                word.push(c);
-                i += 1;
-            }
-
-            // Only keep tokens with 2+ characters
-            if word.chars().count() >= 2 {
-                tokens.push(word);
-            }
-
-            // Skip whitespace/punctuation separator
-            if i < chars.len() && !chars[i].is_alphanumeric() {
-                i += 1;
-            }
-        }
-    }
-
-    // Deduplicate while preserving order
-    let mut seen = std::collections::HashSet::new();
-    tokens
-        .into_iter()
-        .filter(|t| seen.insert(t.clone()))
-        .collect()
+    super::text::query_tokens(query)
 }
 
 /// Search result with individual score breakdowns for retrieval visualization.
