@@ -15,6 +15,7 @@ use crate::{
 pub enum ProviderKind {
     Codex,
     Kimi,
+    Gemini,
     Other(String),
 }
 
@@ -23,6 +24,7 @@ impl ProviderKind {
         match self {
             Self::Codex => "codex",
             Self::Kimi => "kimi",
+            Self::Gemini => "gemini",
             Self::Other(value) => value,
         }
     }
@@ -33,6 +35,7 @@ impl From<&str> for ProviderKind {
         match value {
             "codex" => Self::Codex,
             "kimi" => Self::Kimi,
+            "gemini" => Self::Gemini,
             other => Self::Other(other.to_owned()),
         }
     }
@@ -232,13 +235,16 @@ pub struct ProviderLoginContext {
     pub replacement: Option<ReplacementContext>,
 }
 
-/// Sanitized replacement material.  `previous_payload` is the only credential
-/// reference a provider may read during a replacement login.
+/// 脱敏后的替换登录材料。provider 在替换登录期间只能读取
+/// `previous_payload` 这一项凭据引用；`previous_attributes` 是 renderer-safe
+/// 的账号元数据（邮箱、project、tier），用于保留非秘密路由身份，不能解析
+/// 原始 `payload_json`。
 #[derive(Clone, Debug)]
 pub struct ReplacementContext {
     pub local_account_id: String,
     pub provider_account_id: String,
     pub previous_payload: ProviderPayload,
+    pub previous_attributes: Value,
 }
 
 /// Result of an OAuth/import flow before any persistence.  It carries the
@@ -299,11 +305,18 @@ pub enum ProviderError {
     TokenExchangeFailed,
     AuthorizationDenied,
     ImportFailed,
+    /// 已持久化凭据属于不兼容的 OAuth client，必须通过新的交互式登录替换。
+    CredentialMigrationRequired,
     Unauthorized,
-    /// Provider reports the subscription cannot be used (e.g. Kimi 402
-    /// "membership benefits").  Terminal: retrying on a maintenance cadence
-    /// never fixes an inactive membership.
+    /// provider 报告订阅不可用（例如 Kimi 402“membership benefits”）。这是终态，
+    /// 按维护节奏重试不能修复失效的会员资格。
     PaymentRequired,
+    /// provider 报告账号无权调用该 API（例如 Gemini 403）。
+    PermissionDenied,
+    /// Google 账号必须先打开额外验证链接（Code Assist）。
+    ValidationRequired {
+        url: String,
+    },
     UnsupportedFeatures {
         pointer: String,
     },
@@ -319,8 +332,10 @@ impl ProviderError {
             Self::AuthorizationDenied | Self::DeviceAuthorizationFailed => {
                 FailureClass::CallerTerminal
             }
-            Self::Unauthorized => FailureClass::ChannelAuthTerminal,
-            Self::PaymentRequired => FailureClass::CallerTerminal,
+            Self::Unauthorized | Self::PermissionDenied | Self::CredentialMigrationRequired => {
+                FailureClass::ChannelAuthTerminal
+            }
+            Self::PaymentRequired | Self::ValidationRequired { .. } => FailureClass::CallerTerminal,
             Self::Protocol => FailureClass::UpstreamProtocolError,
             Self::UnknownProvider { .. }
             | Self::LoginFailed
@@ -362,8 +377,15 @@ impl fmt::Display for ProviderError {
             }
             Self::AuthorizationDenied => formatter.write_str("provider authorization was denied"),
             Self::ImportFailed => formatter.write_str("provider credential import failed"),
+            Self::CredentialMigrationRequired => {
+                formatter.write_str("provider credentials require a new interactive login")
+            }
             Self::Unauthorized => formatter.write_str("provider credentials were rejected"),
             Self::PaymentRequired => formatter.write_str("provider subscription is not usable"),
+            Self::PermissionDenied => formatter.write_str("provider denied access to this account"),
+            Self::ValidationRequired { url } => {
+                write!(formatter, "Google account verification required: {url}")
+            }
             Self::UnsupportedFeatures { pointer } => {
                 write!(formatter, "unsupported provider request field at {pointer}")
             }
@@ -403,6 +425,14 @@ mod tests {
         assert_eq!(kind.as_str(), "kimi");
         assert_eq!(ProviderKind::from("kimi"), ProviderKind::Kimi);
         assert_eq!(kind.to_string(), "kimi");
+    }
+
+    #[test]
+    fn provider_kind_gemini_round_trip() {
+        let kind = ProviderKind::Gemini;
+        assert_eq!(kind.as_str(), "gemini");
+        assert_eq!(ProviderKind::from("gemini"), ProviderKind::Gemini);
+        assert_eq!(kind.to_string(), "gemini");
     }
 
     #[test]

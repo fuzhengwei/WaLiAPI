@@ -50,9 +50,10 @@ pub fn upstream_protocol(protocol: UpstreamProtocol, endpoint: &str) -> Option<P
         // new codec.
         (UpstreamProtocol::Anthropic, "messages_beta") => Some(Protocol::Messages),
         (UpstreamProtocol::Responses, "responses") => Some(Protocol::Responses),
+        (UpstreamProtocol::Gemini, "generate_content") => Some(Protocol::Gemini),
         // Ollama's `api_chat`, CountTokens / Embeddings, unknown endpoint
         // strings, and mismatched transport-endpoint pairs are all outside
-        // the typed three-protocol codec matrix.
+        // the typed codec matrix.
         _ => None,
     }
 }
@@ -100,6 +101,10 @@ mod tests {
         assert_eq!(
             upstream_protocol(UpstreamProtocol::Responses, "responses"),
             Some(Protocol::Responses)
+        );
+        assert_eq!(
+            upstream_protocol(UpstreamProtocol::Gemini, "generate_content"),
+            Some(Protocol::Gemini)
         );
 
         for (protocol, endpoint) in [

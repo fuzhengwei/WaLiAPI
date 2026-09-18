@@ -202,6 +202,24 @@ fn registry_has_one_preparable_strategy_for_each_protocol_pair() {
             &responses,
             CodecId::Native,
         ),
+        (
+            Protocol::Chat,
+            Protocol::Gemini,
+            &chat,
+            CodecId::ChatToGeminiV1,
+        ),
+        (
+            Protocol::Messages,
+            Protocol::Gemini,
+            &messages,
+            CodecId::MessagesToGeminiV1,
+        ),
+        (
+            Protocol::Responses,
+            Protocol::Gemini,
+            &responses,
+            CodecId::ResponsesToGeminiV1,
+        ),
     ];
 
     for (downstream, upstream, request, expected_id) in cases {

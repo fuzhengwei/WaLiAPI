@@ -195,7 +195,7 @@ pub async fn dispatch_auth_account_executor(
             Err(error) => {
                 return AttemptResult::Failure(AttemptFailure {
                     failure_class: FailureClass::UpstreamProtocolError,
-                    message: format!("Kimi non-stream body failed JSON decode: {error}"),
+                    message: format!("Auth account non-stream body failed JSON decode: {error}"),
                     status_code: Some(502),
                     retry_after: None,
                 })
@@ -344,8 +344,19 @@ fn force_responses_stream(body: &Value) -> Value {
 /// `stream_options` removed (Chat clients may send `stream_options` even when
 /// not streaming, and the fixed Kimi transport must not echo it), and the
 /// fixed Messages beta `betas` token ensured on the Anthropic profile.
+fn is_gemini_auth(attempt: &PreparedAttempt) -> bool {
+    attempt.upstream_protocol == "gemini"
+}
+
 fn non_stream_json_body(body: &Value, attempt: &PreparedAttempt) -> Value {
     let mut body = body.clone();
+    if is_gemini_auth(attempt) {
+        if let Some(object) = body.as_object_mut() {
+            object.remove("stream");
+            object.remove("stream_options");
+        }
+        return body;
+    }
     if let Some(object) = body.as_object_mut() {
         object.insert("stream".to_owned(), Value::Bool(false));
         object.remove("stream_options");
@@ -380,6 +391,13 @@ fn ensure_messages_betas(body: &mut Value, attempt: &PreparedAttempt) {
 /// profile gets no Chat-only `stream_options`.
 fn streaming_json_body(body: &Value, attempt: &PreparedAttempt) -> Value {
     let mut body = body.clone();
+    if is_gemini_auth(attempt) {
+        if let Some(object) = body.as_object_mut() {
+            object.remove("stream");
+            object.remove("stream_options");
+        }
+        return body;
+    }
     if let Some(object) = body.as_object_mut() {
         object.insert("stream".to_owned(), Value::Bool(true));
         if attempt.upstream_endpoint == "chat_completions" && attempt.upstream_protocol == "openai"
@@ -587,6 +605,11 @@ pub fn semantic_failure(protocol: &str, body: &Value) -> Option<AttemptFailure> 
     // OpenAI-compatible providers conventionally use a top-level non-null
     // error object. A normal Chat/Responses success does not have this shape.
     let openai_error = protocol != "anthropic" && body.get("error").is_some_and(|v| !v.is_null());
+    if protocol == "gemini" {
+        if let Some(failure) = gemini_prompt_feedback_failure(body) {
+            return Some(failure);
+        }
+    }
     if !(responses_failed || anthropic_error || openai_error) {
         return None;
     }
@@ -641,6 +664,28 @@ pub fn semantic_failure(protocol: &str, body: &Value) -> Option<AttemptFailure> 
             502
         }),
         retry_after,
+    })
+}
+
+fn gemini_prompt_feedback_failure(body: &Value) -> Option<AttemptFailure> {
+    let vertex = body.get("response").unwrap_or(body);
+    let feedback = vertex.get("promptFeedback")?;
+    let reason = feedback
+        .get("blockReason")
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty() && *s != "BLOCK_REASON_UNSPECIFIED")?;
+    let message = feedback
+        .get("blockReasonMessage")
+        .and_then(Value::as_str)
+        .unwrap_or("prompt blocked");
+    Some(AttemptFailure {
+        failure_class: FailureClass::CallerTerminal,
+        message: format!("gemini promptFeedback {reason}: {message}")
+            .chars()
+            .take(300)
+            .collect(),
+        status_code: Some(400),
+        retry_after: None,
     })
 }
 
@@ -1013,7 +1058,11 @@ async fn send_request(
     if let Ok(config) = serde_json::from_str::<Value>(&channel.config) {
         if let Some(headers) = config.get("request_headers").and_then(Value::as_array) {
             for item in headers {
-                let name = item.get("name").and_then(Value::as_str).unwrap_or("").trim();
+                let name = item
+                    .get("name")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .trim();
                 let value = item.get("value").and_then(Value::as_str).unwrap_or("");
                 let status = item.get("status").and_then(Value::as_i64).unwrap_or(1);
                 if !name.is_empty() && status != 0 && !is_unsafe_proxy_header(name) {
@@ -1468,6 +1517,18 @@ mod tests {
         );
         let success = serde_json::json!({"object":"chat.completion","message":"error text"});
         assert!(semantic_failure("openai", &success).is_none());
+        let blocked = serde_json::json!({
+            "response": {
+                "promptFeedback": {"blockReason": "SAFETY", "blockReasonMessage": "hate"},
+                "candidates": []
+            }
+        });
+        let failure = semantic_failure("gemini", &blocked).unwrap();
+        assert_eq!(failure.failure_class, FailureClass::CallerTerminal);
+        assert!(failure.message.contains("SAFETY"));
+        let ok =
+            serde_json::json!({"response":{"candidates":[{"content":{"parts":[{"text":"hi"}]}}]}});
+        assert!(semantic_failure("gemini", &ok).is_none());
     }
 
     #[test]

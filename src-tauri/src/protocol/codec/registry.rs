@@ -9,7 +9,7 @@ use super::ports::{
 };
 use super::report::{ConversionContext, ConversionReport};
 use super::types::{CodecId, PreparedCodec, PreparedConversion, Protocol};
-use super::{chat, directions, messages, responses_codec};
+use super::{chat, directions, gemini, messages, responses_codec};
 use serde_json::Value;
 
 type EncodeFn = fn(&Value, &str) -> Result<(Value, ConversionContext), PrepareError>;
@@ -187,6 +187,14 @@ impl CodecRegistry {
             (Protocol::Responses, Protocol::Chat) => &RESPONSES_TO_CHAT,
             (Protocol::Messages, Protocol::Responses) => &directions::MESSAGES_TO_RESPONSES_V2,
             (Protocol::Responses, Protocol::Messages) => &directions::RESPONSES_TO_MESSAGES_V2,
+            (Protocol::Chat, Protocol::Gemini) => &gemini::CHAT_TO_GEMINI,
+            (Protocol::Messages, Protocol::Gemini) => &gemini::MESSAGES_TO_GEMINI,
+            (Protocol::Responses, Protocol::Gemini) => &gemini::RESPONSES_TO_GEMINI,
+            (Protocol::Gemini, _) => {
+                return Err(CodecError::new(
+                    "Gemini is an upstream-only protocol and cannot be used downstream",
+                ))
+            }
         };
         debug_assert_eq!(strategy.downstream(), downstream);
         debug_assert_eq!(strategy.upstream(), upstream);

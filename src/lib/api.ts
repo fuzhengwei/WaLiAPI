@@ -139,7 +139,8 @@ export const authApi = {
   /** Web 版：直接上传 auth 文件内容导入（无服务器文件路径）。 */
   loginImportContent: (provider: string, content: string, format?: string) =>
     invoke<AuthMutationResult>("auth_login_import_content", { provider, content, format }),
-  defaultImportPath: () => invoke<string>("auth_default_import_path"),
+  defaultImportPath: (provider?: string) =>
+    invoke<string>("auth_default_import_path", { provider: provider ?? null }),
   logout: (id: string) => invoke<AuthLogoutResult>("auth_logout", { id }),
   refreshToken: (id: string) => invoke<AuthAccount>("auth_refresh_token", { id }),
   refreshQuota: (id: string) => invoke<AuthAccount>("auth_refresh_quota", { id }),

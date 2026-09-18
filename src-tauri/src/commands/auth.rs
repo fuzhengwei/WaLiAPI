@@ -39,6 +39,7 @@ pub struct AuthAccountDto {
     pub weight: i64,
     pub email: Option<String>,
     pub plan_type: Option<String>,
+    pub project_id: Option<String>,
     /// Stable, non-secret reason the account was marked invalid (e.g.
     /// "payment_required" for an unusable subscription).  Written via
     /// `Repository::mark_invalid` into `attributes_json.invalidation_reason`.
@@ -71,6 +72,11 @@ impl TryFrom<AuthAccountSummary> for AuthAccountDto {
             .get("plan_type")
             .and_then(Value::as_str)
             .map(str::to_owned);
+        let project_id = value
+            .attributes
+            .get("project_id")
+            .and_then(Value::as_str)
+            .map(str::to_owned);
         let invalidation_reason = value
             .attributes
             .get("invalidation_reason")
@@ -87,6 +93,7 @@ impl TryFrom<AuthAccountSummary> for AuthAccountDto {
             weight: value.weight,
             email,
             plan_type,
+            project_id,
             invalidation_reason,
             models: value.models.models,
             quota: value.quota,
@@ -385,7 +392,7 @@ impl LoginSessions {
                 session.status.state = "failed".into();
                 session.status.step = None;
                 session.status.error_code = Some(login_error_code(&error).into());
-                session.status.error = Some(login_error_message(&error).into());
+                session.status.error = Some(login_error_message(&error));
             }
         }
     }
@@ -408,27 +415,45 @@ fn login_error_code(error: &ProviderError) -> &'static str {
         ProviderError::DeviceAuthorizationFailed => "device_authorization",
         ProviderError::TokenExchangeFailed => "token_exchange",
         ProviderError::AuthorizationDenied => "authorization_denied",
+        ProviderError::ValidationRequired { .. } => "validation_required",
+        ProviderError::PermissionDenied => "permission_denied",
+        ProviderError::CredentialMigrationRequired => "credential_migration",
         _ => "login_failed",
     }
 }
 
-fn login_error_message(error: &ProviderError) -> &'static str {
-    match login_error_code(error) {
-        "cancelled" => "登录已取消，可以重新开始。",
-        "timeout" => "等待浏览器授权超时，请重新开始登录。",
-        "browser_open" => "无法打开浏览器授权页，请检查默认浏览器后重试。",
-        "callback_state" => "授权回调无效或被拒绝，请重新开始登录。",
-        "device_authorization" => "Device Code 不可用，请检查 ChatGPT 个人安全设置或 Workspace 管理员权限；也可导入 auth.json。",
-        "token_exchange" => "授权完成，但令牌交换失败，请重新开始登录。",
-        "authorization_denied" => "授权被拒绝，请重新开始登录。",
-        _ => "登录未完成，请检查浏览器授权后重试。",
+fn login_error_message(error: &ProviderError) -> String {
+    match error {
+        ProviderError::ValidationRequired { url } if url.starts_with("https://") => {
+            format!("Google 账号需要先完成验证才能使用 Code Assist。请打开：{url}")
+        }
+        _ => match login_error_code(error) {
+            "cancelled" => "登录已取消，可以重新开始。".to_owned(),
+            "timeout" => "等待浏览器授权超时，请重新开始登录。".to_owned(),
+            "browser_open" => "无法打开浏览器授权页，请检查默认浏览器后重试。".to_owned(),
+            "callback_state" => "授权回调无效或被拒绝，请重新开始登录。".to_owned(),
+            "device_authorization" => "Device Code 不可用，请检查 ChatGPT 个人安全设置或 Workspace 管理员权限；也可导入 auth.json。".to_owned(),
+            "token_exchange" => "授权完成，但令牌交换失败，请重新开始登录。".to_owned(),
+            "authorization_denied" => "授权被拒绝，请重新开始登录。".to_owned(),
+            "validation_required" => "Google 账号需要先完成验证才能使用 Code Assist。".to_owned(),
+            "permission_denied" => {
+                "Google 账号没有 Antigravity Code Assist 权限，请确认账号资格后重试。".to_owned()
+            }
+            "credential_migration" => {
+                "该账号使用旧版 Gemini CLI 凭据，必须通过 Antigravity OAuth 重新登录。".to_owned()
+            }
+            _ => "登录未完成，请检查浏览器授权后重试。".to_owned(),
+        },
     }
 }
 
-fn safe_error(_: ProviderError) -> String {
-    // ProviderError::Display is already redacted.  Keep this extra command
-    // boundary stable so filesystem/SQL/OAuth diagnostics never cross it.
-    "Auth operation failed".to_owned()
+fn safe_error(error: ProviderError) -> String {
+    match error {
+        ProviderError::ValidationRequired { .. }
+        | ProviderError::PermissionDenied
+        | ProviderError::CredentialMigrationRequired => login_error_message(&error),
+        _ => "Auth operation failed".to_owned(),
+    }
 }
 
 fn storage_error() -> String {
@@ -446,7 +471,7 @@ fn provider_kind(provider: Option<String>) -> Result<ProviderKind, String> {
     let provider = provider.unwrap_or_else(|| "codex".to_owned());
     let kind = ProviderKind::from(provider.trim());
     match kind {
-        ProviderKind::Codex | ProviderKind::Kimi => Ok(kind),
+        ProviderKind::Codex | ProviderKind::Kimi | ProviderKind::Gemini => Ok(kind),
         ProviderKind::Other(_) => Err("Unsupported auth provider".to_owned()),
     }
 }
@@ -601,10 +626,14 @@ fn import_path(path: Option<String>) -> Result<PathBuf, String> {
     }
 }
 
-/// Return the default Codex CLI auth file path for the native file picker.
-/// Reads no secrets; path logic stays in `CodexLogin::default_auth_json_path`.
+/// 返回原生文件选择器使用的默认 Codex 凭据路径。
+/// Gemini/Antigravity 凭据故意不支持导入，因为它们属于不同的 OAuth client
+/// 和本地存储格式，必须通过浏览器 OAuth 登录获取。
 #[tauri::command]
-pub async fn auth_default_import_path() -> Result<String, String> {
+pub async fn auth_default_import_path(provider: Option<String>) -> Result<String, String> {
+    if provider.as_deref() == Some("gemini") {
+        return Err("Antigravity credentials must be added through OAuth login".to_owned());
+    }
     CodexLogin::default_auth_json_path()
         .map(|path| path.to_string_lossy().into_owned())
         .map_err(safe_error)
@@ -1317,7 +1346,24 @@ mod tests {
         assert!(!kimi.supports_import);
         assert!(!kimi.supports_export);
         assert!(!kimi.supports_quota);
-        assert_eq!(providers.len(), 2);
+        let gemini = providers.iter().find(|p| p.id == "gemini").unwrap();
+        assert_eq!(gemini.display_name, "Antigravity");
+        assert_eq!(gemini.icon_key, "google");
+        assert_eq!(gemini.login_mode, "browser_callback");
+        assert_eq!(gemini.login_methods, vec!["browser_callback".to_owned()]);
+        assert!(!gemini.supports_import);
+        assert!(!gemini.supports_export);
+        assert!(!gemini.supports_quota);
+        assert_eq!(providers.len(), 3);
+    }
+
+    #[tokio::test]
+    async fn default_import_path_rejects_gemini_and_keeps_codex() {
+        assert!(auth_default_import_path(Some("gemini".into()))
+            .await
+            .is_err());
+        let codex = auth_default_import_path(None).await.unwrap();
+        assert!(codex.contains("auth.json"));
     }
 
     #[test]
@@ -1329,6 +1375,10 @@ mod tests {
         assert_eq!(
             provider_kind(Some("codex".into())).unwrap(),
             ProviderKind::Codex
+        );
+        assert_eq!(
+            provider_kind(Some("gemini".into())).unwrap(),
+            ProviderKind::Gemini
         );
         assert!(provider_kind(Some("nope".into())).is_err());
     }
@@ -1360,8 +1410,21 @@ mod tests {
             resolve_login_method(&ProviderKind::Codex, Some("device_code")).unwrap(),
             crate::auth_provider::AuthLoginMode::DeviceCode
         );
+        assert!(resolve_login_method(&ProviderKind::Gemini, Some("device_code")).is_err());
         assert!(resolve_login_method(&ProviderKind::Kimi, Some("browser_callback")).is_err());
         assert!(resolve_login_method(&ProviderKind::Codex, Some("unknown")).is_err());
+    }
+
+    #[test]
+    fn login_error_message_surfaces_google_validation_url() {
+        let msg = login_error_message(&ProviderError::ValidationRequired {
+            url: "https://accounts.google.com/tos".into(),
+        });
+        assert!(msg.contains("https://accounts.google.com/tos"));
+        assert_eq!(
+            login_error_code(&ProviderError::PermissionDenied),
+            "permission_denied"
+        );
     }
 
     #[tokio::test]

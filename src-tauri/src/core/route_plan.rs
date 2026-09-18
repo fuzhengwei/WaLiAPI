@@ -90,6 +90,8 @@ pub enum UpstreamProtocol {
     Ollama,
     /// The fixed Codex account adapter speaks the backend Responses wire format.
     Responses,
+    /// Gemini Code Assist generateContent (auth accounts only).
+    Gemini,
 }
 
 impl UpstreamProtocol {
@@ -99,6 +101,7 @@ impl UpstreamProtocol {
             UpstreamProtocol::Anthropic => "anthropic",
             UpstreamProtocol::Ollama => "ollama",
             UpstreamProtocol::Responses => "responses",
+            UpstreamProtocol::Gemini => "gemini",
         }
     }
 }
@@ -786,6 +789,13 @@ fn profile_for_model_state(provider: &str, protocol: Option<&str>) -> Option<Aut
             native_base_url: "https://api.kimi.com/coding".into(),
             upstream_protocol: UpstreamProtocol::Anthropic,
             upstream_endpoint: "messages_beta".into(),
+            non_stream_framing: AuthNonStreamFraming::Json,
+        }),
+        ("gemini", _) => Some(AuthRouteProfile {
+            provider: "gemini".into(),
+            native_base_url: "https://cloudcode-pa.googleapis.com".into(),
+            upstream_protocol: UpstreamProtocol::Gemini,
+            upstream_endpoint: "generate_content".into(),
             non_stream_framing: AuthNonStreamFraming::Json,
         }),
         // Unknown provider or unknown non-empty Kimi protocol: fail closed.
@@ -2740,6 +2750,58 @@ mod tests {
     }
 
     // --- C5: per-model auth route profiles ---
+
+    fn gemini_account(id: &str, model: &str) -> AuthAccount {
+        let mut account = auth_account(id, model, 1, 1);
+        account.provider = "gemini".into();
+        account.model_states_json = json!({
+            "version": 1,
+            "models": [{
+                "id": model,
+                "status": "available",
+                "unavailable": false,
+                "next_retry_after": null,
+                "last_error": null,
+                "protocol": "gemini"
+            }]
+        })
+        .to_string();
+        account
+    }
+
+    #[test]
+    fn gemini_account_is_conversion_for_all_three_downstream_endpoints() {
+        let key = api_key(&[], &[]);
+        for endpoint in [
+            EndpointKind::ChatCompletions,
+            EndpointKind::Messages,
+            EndpointKind::Responses,
+        ] {
+            let plan = authorize_and_plan_with_accounts(
+                &key,
+                "gemini-2.5-flash",
+                endpoint,
+                &[],
+                &[gemini_account("g1", "gemini-2.5-flash")],
+                &flags(false),
+                &json!({}),
+                &mut seeded(),
+            )
+            .unwrap();
+            let group = &plan.groups[0];
+            assert_eq!(group.tier, GroupTier::Conversion);
+            assert_eq!(group.upstream_protocol, UpstreamProtocol::Gemini);
+            assert_eq!(group.candidates[0].upstream_endpoint, "generate_content");
+            assert_eq!(
+                group.candidates[0].auth_non_stream_framing,
+                Some(AuthNonStreamFraming::Json)
+            );
+            assert_eq!(
+                group.candidates[0].native_base_url,
+                "https://cloudcode-pa.googleapis.com"
+            );
+        }
+    }
 
     fn kimi_account(id: &str, model: &str, protocol: &str) -> AuthAccount {
         let mut account = auth_account(id, model, 1, 1);

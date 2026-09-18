@@ -857,6 +857,7 @@ mod tests {
                 local_account_id: "local-1".into(),
                 provider_account_id: DEVICE_ID.into(),
                 previous_payload: payload(),
+                previous_attributes: json!({}),
             }),
         };
         let replaced = provider.login(&context, &runtime).await.unwrap();
@@ -877,6 +878,7 @@ mod tests {
                 local_account_id: "local-1".into(),
                 provider_account_id: DEVICE_ID.into(),
                 previous_payload: ProviderPayload::new(json!({"access_token": "x"})),
+                previous_attributes: json!({}),
             }),
         };
         // The device_id is required before any OAuth request is issued.

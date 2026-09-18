@@ -273,6 +273,7 @@ export interface AuthAccount {
   sort_order: number;
   email: string | null;
   plan_type: string | null;
+  project_id: string | null;
   /** Stable, non-secret reason the account was marked invalid (e.g. "payment_required"). */
   invalidation_reason: string | null;
   models: AuthModelState[];
@@ -300,7 +301,7 @@ export interface AuthLoginStart {
   sessionId: string;
 }
 
-export type AuthProviderId = "codex" | "kimi" | (string & {});
+export type AuthProviderId = "codex" | "kimi" | "gemini" | (string & {});
 export type AuthLoginMethod = "browser_callback" | "device_code";
 
 export interface AuthProviderInfo {

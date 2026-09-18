@@ -1,6 +1,7 @@
 use std::{collections::HashMap, sync::Arc};
 
 use chrono::{DateTime, Duration, Utc};
+use serde_json::Value;
 use tokio::sync::Mutex;
 
 use crate::{
@@ -109,10 +110,13 @@ impl AuthService {
                     return Err(ProviderError::InvalidPayload);
                 }
                 let previous_payload = Self::payload_for(&account)?;
+                let previous_attributes =
+                    serde_json::from_str(&account.attributes_json).unwrap_or(Value::Null);
                 Some(ReplacementContext {
                     local_account_id: local_account_id.clone(),
                     provider_account_id: account.account_id.clone(),
                     previous_payload,
+                    previous_attributes,
                 })
             }
         };
@@ -587,6 +591,8 @@ impl AuthService {
             )
             .await?;
         if response.status() != reqwest::StatusCode::UNAUTHORIZED {
+            self.mark_forbidden_if_needed(account_id, response.status())
+                .await;
             self.persist_quota_if_present(account_id, &response).await;
             return Ok(response);
         }
@@ -616,8 +622,17 @@ impl AuthService {
             self.schedule_maintenance_retry(account_id, None).await;
             return Err(ProviderError::Unauthorized);
         }
+        self.mark_forbidden_if_needed(account_id, retry.status())
+            .await;
         self.persist_quota_if_present(account_id, &retry).await;
         Ok(retry)
+    }
+
+    async fn mark_forbidden_if_needed(&self, account_id: &str, status: reqwest::StatusCode) {
+        if status == reqwest::StatusCode::FORBIDDEN {
+            self.schedule_maintenance_retry(account_id, Some("permission_denied"))
+                .await;
+        }
     }
 
     async fn send_with_persisted_account(

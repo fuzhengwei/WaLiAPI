@@ -3,6 +3,8 @@
 
 pub mod codex_backend;
 pub mod codex_login;
+pub mod gemini_backend;
+pub mod gemini_login;
 pub mod kimi_backend;
 pub mod kimi_login;
 pub mod maintenance;
@@ -155,6 +157,7 @@ impl Default for ProviderRegistry {
         };
         registry.register(Arc::new(codex_backend::CodexProvider::new()));
         registry.register(Arc::new(kimi_backend::KimiProvider::new()));
+        registry.register(Arc::new(gemini_backend::GeminiProvider::new()));
         registry
     }
 }

@@ -613,7 +613,9 @@ async fn dispatch(shared: &SharedState, cmd: &str, args: Value) -> Result<Value,
             )
             .await,
         ),
-        "auth_default_import_path" => to_json(commands::auth::auth_default_import_path().await),
+        "auth_default_import_path" => {
+            to_json(commands::auth::auth_default_import_path(arg(&args, "provider")?).await)
+        }
         "auth_logout" => to_json(commands::auth::auth_logout(arg(&args, "id")?, state).await),
         "auth_refresh_token" => {
             to_json(commands::auth::auth_refresh_token(arg(&args, "id")?, state).await)

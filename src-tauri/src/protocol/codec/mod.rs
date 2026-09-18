@@ -20,6 +20,7 @@ pub mod chat;
 pub mod direction;
 pub mod directions;
 pub mod error;
+pub mod gemini;
 pub mod identity;
 pub mod messages;
 pub mod ports;

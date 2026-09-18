@@ -74,7 +74,18 @@ const KIMI: ProviderSpec = ProviderSpec {
     supports_quota: false,
 };
 
-const REGISTERED: &[&ProviderSpec] = &[&CODEX, &KIMI];
+const GEMINI: ProviderSpec = ProviderSpec {
+    kind: "gemini",
+    display_name: "Antigravity",
+    icon_key: "google",
+    login_mode: AuthLoginMode::BrowserCallback,
+    login_methods: &[AuthLoginMode::BrowserCallback],
+    supports_import: false,
+    supports_export: false,
+    supports_quota: false,
+};
+
+const REGISTERED: &[&ProviderSpec] = &[&CODEX, &KIMI, &GEMINI];
 
 /// Spec for an explicit (non-`Other`) provider kind, if it is a known spec.
 pub fn provider_spec(kind: &ProviderKind) -> Option<&'static ProviderSpec> {
@@ -144,15 +155,33 @@ mod tests {
             Some("codex")
         );
         assert_eq!(provider_spec_by_name("kimi").map(|s| s.kind), Some("kimi"));
+        assert_eq!(
+            provider_spec_by_name("gemini").map(|s| s.kind),
+            Some("gemini")
+        );
         assert!(provider_spec_by_name("codEx").is_none());
     }
 
     #[test]
-    fn registered_specs_contains_codex_and_kimi() {
+    fn registered_specs_contains_codex_kimi_and_gemini() {
         let names: Vec<&str> = registered_provider_specs().iter().map(|s| s.kind).collect();
         assert!(names.contains(&"codex"));
         assert!(names.contains(&"kimi"));
-        assert_eq!(registered_provider_specs().len(), 2);
+        assert!(names.contains(&"gemini"));
+        assert_eq!(registered_provider_specs().len(), 3);
+    }
+
+    #[test]
+    fn gemini_spec_exact_values() {
+        let spec = provider_spec(&ProviderKind::Gemini).expect("gemini spec must exist");
+        assert_eq!(spec.kind, "gemini");
+        assert_eq!(spec.display_name, "Antigravity");
+        assert_eq!(spec.icon_key, "google");
+        assert_eq!(spec.login_mode, AuthLoginMode::BrowserCallback);
+        assert_eq!(spec.login_methods, &[AuthLoginMode::BrowserCallback]);
+        assert!(!spec.supports_import);
+        assert!(!spec.supports_export);
+        assert!(!spec.supports_quota);
     }
 
     #[test]

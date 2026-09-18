@@ -2215,3 +2215,437 @@ async fn kimi_chat_401_refreshes_and_replays_once_successfully() {
     assert_eq!(success.status, 200);
     assert_eq!(state.chat_hits.load(Ordering::SeqCst), 2);
 }
+
+// ─────────────────────────────────────────────────────────────────────────
+// Gemini auth executor (Json profile: generateContent / streamGenerateContent)
+// ─────────────────────────────────────────────────────────────────────────
+
+fn gemini_attempt(
+    channel_id: &str,
+    downstream: EndpointKind,
+    body: Value,
+    framing: crate::core::route_plan::AuthNonStreamFraming,
+    model: &str,
+) -> PreparedAttempt {
+    use crate::core::protocol_boundary::{
+        downstream_protocol, upstream_protocol as upstream_proto,
+    };
+    let downstream_p = downstream_protocol(downstream).expect("downstream codec");
+    let upstream_p = upstream_proto(
+        crate::core::route_plan::UpstreamProtocol::Gemini,
+        "generate_content",
+    )
+    .expect("gemini codec");
+    let prepared = CodecRegistry::prepare_pair(downstream_p, upstream_p, model, &body)
+        .expect("gemini attempt must prepare");
+    PreparedAttempt {
+        channel_id: channel_id.into(),
+        channel_name: "Gemini".into(),
+        upstream_type: "auth_account".into(),
+        route_group: format!("{}_g2_conversion", downstream.as_str()),
+        upstream_protocol: "gemini".into(),
+        upstream_endpoint: "generate_content".into(),
+        upstream_model: model.to_string(),
+        native_base_url: "http://gemini.invalid".into(),
+        auth_provider: Some("gemini".into()),
+        auth_non_stream_framing: Some(framing),
+        codec_version: Some(prepared.codec.label().to_string()),
+        prepared_codec: Some(prepared.codec),
+        encoded_body: prepared.encoded_request,
+        conversion_report: Some(json!({})),
+        is_retry: false,
+        attempt_no: 1,
+    }
+}
+
+#[derive(Clone)]
+struct GeminiMock {
+    generate_hits: Arc<AtomicUsize>,
+    stream_hits: Arc<AtomicUsize>,
+    bodies: Arc<Mutex<Vec<Value>>>,
+    headers: Arc<Mutex<Vec<axum::http::HeaderMap>>>,
+    fail_401: Arc<AtomicBool>,
+    fail_once: Arc<AtomicBool>,
+    fail_403: Arc<AtomicBool>,
+}
+
+impl Default for GeminiMock {
+    fn default() -> Self {
+        Self {
+            generate_hits: Arc::new(AtomicUsize::new(0)),
+            stream_hits: Arc::new(AtomicUsize::new(0)),
+            bodies: Arc::new(Mutex::new(Vec::new())),
+            headers: Arc::new(Mutex::new(Vec::new())),
+            fail_401: Arc::new(AtomicBool::new(false)),
+            fail_once: Arc::new(AtomicBool::new(false)),
+            fail_403: Arc::new(AtomicBool::new(false)),
+        }
+    }
+}
+
+async fn gemini_mock() -> (
+    Arc<AuthService>,
+    GeminiMock,
+    Arc<Repository>,
+    crate::db::models::AuthAccount,
+) {
+    let pool = fresh_db().await;
+    let repo = Arc::new(Repository::new(pool));
+    let state = GeminiMock::default();
+    let app_state = state.clone();
+    let app = Router::new()
+        .route(
+            "/token",
+            axum::routing::post(|| async {
+                Json(json!({
+                    "access_token": "tok",
+                    "refresh_token": "rot",
+                    "expires_in": 3600,
+                    "token_type": "Bearer"
+                }))
+            }),
+        )
+        .route(
+            "/v1internal:generateContent",
+            axum::routing::post(
+                |s: axum::extract::State<GeminiMock>,
+                 h: axum::http::HeaderMap,
+                 b: axum::body::Bytes| {
+                    let s = s.clone();
+                    async move {
+                        s.generate_hits.fetch_add(1, Ordering::SeqCst);
+                        s.bodies
+                            .lock()
+                            .unwrap()
+                            .push(serde_json::from_slice(&b).unwrap_or(Value::Null));
+                        s.headers.lock().unwrap().push(h.clone());
+                        if s.fail_once.load(Ordering::SeqCst) {
+                            s.fail_once.store(false, Ordering::SeqCst);
+                            return (
+                                axum::http::StatusCode::UNAUTHORIZED,
+                                Json(json!({"error": {"message": "unauthorized"}})),
+                            )
+                                .into_response();
+                        }
+                        if s.fail_401.load(Ordering::SeqCst) {
+                            return (
+                                axum::http::StatusCode::UNAUTHORIZED,
+                                Json(json!({"error": {"message": "unauthorized"}})),
+                            )
+                                .into_response();
+                        }
+                        if s.fail_403.load(Ordering::SeqCst) {
+                            return (
+                                axum::http::StatusCode::FORBIDDEN,
+                                Json(json!({"error": {"message": "permission denied"}})),
+                            )
+                                .into_response();
+                        }
+                        Json(json!({
+                            "response": {
+                                "candidates": [{
+                                    "content": { "role": "model", "parts": [{ "text": "hi" }] },
+                                    "finishReason": "STOP"
+                                }],
+                                "usageMetadata": {
+                                    "promptTokenCount": 1,
+                                    "candidatesTokenCount": 1
+                                }
+                            }
+                        }))
+                        .into_response()
+                    }
+                },
+            ),
+        )
+        .route(
+            "/v1internal:streamGenerateContent",
+            axum::routing::post(
+                |s: axum::extract::State<GeminiMock>,
+                 h: axum::http::HeaderMap,
+                 b: axum::body::Bytes| {
+                    let s = s.clone();
+                    async move {
+                        s.stream_hits.fetch_add(1, Ordering::SeqCst);
+                        s.bodies
+                            .lock()
+                            .unwrap()
+                            .push(serde_json::from_slice(&b).unwrap_or(Value::Null));
+                        s.headers.lock().unwrap().push(h.clone());
+                        let stream = concat!(
+                            "data: {\"response\":{\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"hi\"}]}}]}}\n\n",
+                            "data: {\"response\":{\"candidates\":[{\"content\":{\"parts\":[]},\"finishReason\":\"STOP\"}],\"usageMetadata\":{\"promptTokenCount\":1,\"candidatesTokenCount\":1}}}\n\n"
+                        );
+                        (
+                            axum::http::StatusCode::OK,
+                            [(axum::http::header::CONTENT_TYPE, "text/event-stream")],
+                            stream,
+                        )
+                            .into_response()
+                    }
+                },
+            ),
+        )
+        .with_state(app_state);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap().to_string();
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+    let account = repo
+        .upsert_by_provider_account_id(&AuthAccountUpsert {
+            provider: "gemini".into(),
+            label: "Gemini fixture".into(),
+            account_id: "user@gmail.com".into(),
+            attributes: json!({"email":"user@gmail.com","project_id":"proj-1"}),
+            payload: json!({
+                "version": 2,
+                "oauth_client": "antigravity",
+                "access_token":"tok",
+                "refresh_token":"rot",
+                "expires_at":"2099-01-01T00:00:00Z"
+            }),
+            last_refreshed_at: None,
+            next_refresh_after: None,
+            next_retry_after: None,
+        })
+        .await
+        .unwrap();
+    let mut registry = ProviderRegistry::new();
+    registry.register(Arc::new(
+        crate::auth_provider::gemini_backend::GeminiProvider::with_endpoints(
+            format!("http://{addr}"),
+            format!("http://{addr}/oauth2/v2/userinfo"),
+            crate::auth_provider::gemini_login::GeminiLogin::with_endpoints(
+                "http://127.0.0.1/authorize",
+                format!("http://{addr}/token"),
+            ),
+        ),
+    ));
+    let service = Arc::new(AuthService::new(repo.clone(), registry));
+    (service, state, repo, account)
+}
+
+#[tokio::test]
+async fn gemini_chat_non_stream_does_not_inject_stream_and_decodes() {
+    let (service, state, _repo, account) = gemini_mock().await;
+    let body = json!({
+        "model": "gemini-2.5-flash",
+        "messages": [{"role":"user","content":"hi"}],
+        "stream": true,
+        "stream_options": {"include_usage": true}
+    });
+    let attempt = gemini_attempt(
+        &account.id,
+        EndpointKind::ChatCompletions,
+        body,
+        crate::core::route_plan::AuthNonStreamFraming::Json,
+        "gemini-2.5-flash",
+    );
+    let result = crate::endpoint_executor::dispatch_auth_account_executor(
+        EndpointKind::ChatCompletions,
+        &attempt,
+        &service,
+        &[],
+    )
+    .await;
+    let AttemptResult::Success(success) = result else {
+        panic!("expected success, got {result:?}");
+    };
+    assert_eq!(success.status, 200);
+    assert_eq!(success.body["choices"][0]["message"]["content"], "hi");
+    let sent = state.bodies.lock().unwrap()[0].clone();
+    assert!(sent["request"].get("stream").is_none());
+    assert!(sent["request"].get("stream_options").is_none());
+    assert_eq!(sent["project"], "proj-1");
+    assert_eq!(sent["model"], "gemini-2.5-flash");
+}
+
+#[tokio::test]
+async fn gemini_messages_non_stream_converts_through_chat() {
+    let (service, _state, _repo, account) = gemini_mock().await;
+    let body = json!({
+        "model": "gemini-2.5-flash",
+        "max_tokens": 32,
+        "messages": [{"role":"user","content":"hi"}]
+    });
+    let attempt = gemini_attempt(
+        &account.id,
+        EndpointKind::Messages,
+        body,
+        crate::core::route_plan::AuthNonStreamFraming::Json,
+        "gemini-2.5-flash",
+    );
+    let result = crate::endpoint_executor::dispatch_auth_account_executor(
+        EndpointKind::Messages,
+        &attempt,
+        &service,
+        &[],
+    )
+    .await;
+    let AttemptResult::Success(success) = result else {
+        panic!("expected success, got {result:?}");
+    };
+    assert_eq!(success.body["type"], "message");
+    assert_eq!(success.body["role"], "assistant");
+}
+
+#[tokio::test]
+async fn gemini_chat_stream_uses_stream_generate_content_without_inner_stream() {
+    let (service, state, _repo, account) = gemini_mock().await;
+    let body = json!({
+        "model": "gemini-2.5-flash",
+        "messages": [{"role":"user","content":"hi"}]
+    });
+    let attempt = gemini_attempt(
+        &account.id,
+        EndpointKind::ChatCompletions,
+        body,
+        crate::core::route_plan::AuthNonStreamFraming::Json,
+        "gemini-2.5-flash",
+    );
+    let result =
+        crate::endpoint_executor::dispatch_auth_account_stream_executor(&attempt, &service, &[])
+            .await;
+    let StreamAttemptResult::Connected(_) = result else {
+        panic!("expected connected stream");
+    };
+    assert_eq!(state.stream_hits.load(Ordering::SeqCst), 1);
+    let sent = state.bodies.lock().unwrap()[0].clone();
+    assert!(sent["request"].get("stream").is_none());
+    let headers = state.headers.lock().unwrap();
+    let accept = headers[0]
+        .get(axum::http::header::ACCEPT)
+        .unwrap()
+        .to_str()
+        .unwrap();
+    assert_eq!(accept, "text/event-stream");
+}
+
+#[tokio::test]
+async fn gemini_chat_401_refreshes_and_replays_once_successfully() {
+    let (service, state, _repo, account) = gemini_mock().await;
+    state.fail_once.store(true, Ordering::SeqCst);
+    let body = json!({
+        "model": "gemini-2.5-flash",
+        "messages": [{"role":"user","content":"hi"}]
+    });
+    let attempt = gemini_attempt(
+        &account.id,
+        EndpointKind::ChatCompletions,
+        body,
+        crate::core::route_plan::AuthNonStreamFraming::Json,
+        "gemini-2.5-flash",
+    );
+    let result = crate::endpoint_executor::dispatch_auth_account_executor(
+        EndpointKind::ChatCompletions,
+        &attempt,
+        &service,
+        &[],
+    )
+    .await;
+    let AttemptResult::Success(success) = result else {
+        panic!("expected success after refresh replay, got {result:?}");
+    };
+    assert_eq!(success.status, 200);
+    assert_eq!(state.generate_hits.load(Ordering::SeqCst), 2);
+}
+
+#[tokio::test]
+async fn gemini_chat_401_replay_still_unauthorized_is_terminal() {
+    let (service, state, _repo, account) = gemini_mock().await;
+    state.fail_401.store(true, Ordering::SeqCst);
+    let body = json!({
+        "model": "gemini-2.5-flash",
+        "messages": [{"role":"user","content":"hi"}]
+    });
+    let attempt = gemini_attempt(
+        &account.id,
+        EndpointKind::ChatCompletions,
+        body,
+        crate::core::route_plan::AuthNonStreamFraming::Json,
+        "gemini-2.5-flash",
+    );
+    let result = crate::endpoint_executor::dispatch_auth_account_executor(
+        EndpointKind::ChatCompletions,
+        &attempt,
+        &service,
+        &[],
+    )
+    .await;
+    let AttemptResult::Failure(failure) = result else {
+        panic!("expected auth-terminal failure, got {result:?}");
+    };
+    assert_eq!(failure.failure_class, FailureClass::ChannelAuthTerminal);
+    assert_eq!(state.generate_hits.load(Ordering::SeqCst), 2);
+}
+
+#[tokio::test]
+async fn gemini_responses_non_stream_converts_through_chat() {
+    let (service, state, _repo, account) = gemini_mock().await;
+    let body = json!({
+        "model": "gemini-2.5-flash",
+        "input": "hi"
+    });
+    let attempt = gemini_attempt(
+        &account.id,
+        EndpointKind::Responses,
+        body,
+        crate::core::route_plan::AuthNonStreamFraming::Json,
+        "gemini-2.5-flash",
+    );
+    let result = crate::endpoint_executor::dispatch_auth_account_executor(
+        EndpointKind::Responses,
+        &attempt,
+        &service,
+        &[],
+    )
+    .await;
+    let AttemptResult::Success(success) = result else {
+        panic!("expected success, got {result:?}");
+    };
+    assert_eq!(success.body["object"], "response");
+    assert_eq!(success.body["status"], "completed");
+    assert_eq!(success.body["output"][0]["content"][0]["text"], "hi");
+    let sent = state.bodies.lock().unwrap()[0].clone();
+    assert_eq!(sent["project"], "proj-1");
+    assert_eq!(
+        sent["request"]["session_id"],
+        format!("waliapi-{}", account.id)
+    );
+    assert!(sent["user_prompt_id"]
+        .as_str()
+        .is_some_and(|id| !id.is_empty()));
+}
+
+#[tokio::test]
+async fn gemini_chat_403_is_terminal_and_marks_permission_denied() {
+    let (service, state, repo, account) = gemini_mock().await;
+    state.fail_403.store(true, Ordering::SeqCst);
+    let body = json!({
+        "model": "gemini-2.5-flash",
+        "messages": [{"role":"user","content":"hi"}]
+    });
+    let attempt = gemini_attempt(
+        &account.id,
+        EndpointKind::ChatCompletions,
+        body,
+        crate::core::route_plan::AuthNonStreamFraming::Json,
+        "gemini-2.5-flash",
+    );
+    let result = crate::endpoint_executor::dispatch_auth_account_executor(
+        EndpointKind::ChatCompletions,
+        &attempt,
+        &service,
+        &[],
+    )
+    .await;
+    let AttemptResult::Failure(failure) = result else {
+        panic!("expected auth-terminal failure, got {result:?}");
+    };
+    assert_eq!(failure.failure_class, FailureClass::ChannelAuthTerminal);
+    assert_eq!(failure.status_code, Some(403));
+    let stored = repo.get_auth_account(&account.id).await.unwrap();
+    assert_eq!(stored.status, "invalid");
+    let attributes: Value = serde_json::from_str(&stored.attributes_json).unwrap();
+    assert_eq!(attributes["invalidation_reason"], "permission_denied");
+}

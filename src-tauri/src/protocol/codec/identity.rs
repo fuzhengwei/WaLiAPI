@@ -147,6 +147,9 @@ impl IdentityStreamDecoder {
             Protocol::Responses => event
                 .get("usage")
                 .or_else(|| event.pointer("/response/usage")),
+            Protocol::Gemini => event
+                .get("usageMetadata")
+                .or_else(|| event.pointer("/response/usageMetadata")),
         };
         let Some(usage) = usage else { return };
         let merged = self.usage.get_or_insert_with(|| Usage {
@@ -156,6 +159,7 @@ impl IdentityStreamDecoder {
         let (input_key, output_key) = match self.protocol {
             Protocol::Chat => ("prompt_tokens", "completion_tokens"),
             Protocol::Messages | Protocol::Responses => ("input_tokens", "output_tokens"),
+            Protocol::Gemini => ("promptTokenCount", "candidatesTokenCount"),
         };
         if let Some(input) = usage.get(input_key).and_then(Value::as_u64) {
             merged.input_tokens = input;
@@ -266,18 +270,25 @@ impl StreamDecoder for IdentityStreamDecoder {
 
 /// Extract the common usage shapes without performing a second protocol parse.
 pub(crate) fn parse_usage(protocol: Protocol, body: &Value) -> Option<Usage> {
-    let usage = body.get("usage")?;
+    let usage = match protocol {
+        Protocol::Gemini => body
+            .get("usageMetadata")
+            .or_else(|| body.pointer("/response/usageMetadata"))?,
+        _ => body.get("usage")?,
+    };
     let input = match protocol {
         Protocol::Chat => usage.get("prompt_tokens").and_then(Value::as_u64),
         Protocol::Messages | Protocol::Responses => {
             usage.get("input_tokens").and_then(Value::as_u64)
         }
+        Protocol::Gemini => usage.get("promptTokenCount").and_then(Value::as_u64),
     };
     let output = match protocol {
         Protocol::Chat => usage.get("completion_tokens").and_then(Value::as_u64),
         Protocol::Messages | Protocol::Responses => {
             usage.get("output_tokens").and_then(Value::as_u64)
         }
+        Protocol::Gemini => usage.get("candidatesTokenCount").and_then(Value::as_u64),
     };
     Some(Usage {
         input_tokens: input.unwrap_or_default(),

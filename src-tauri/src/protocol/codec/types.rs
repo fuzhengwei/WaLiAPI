@@ -8,13 +8,17 @@ use serde::{Serialize, Serializer};
 use serde_json::Value;
 use std::fmt;
 
-/// The three request/response protocol families owned by this codec matrix.
+/// Application protocol families in the codec matrix.
+///
+/// `Gemini` is an **upstream-only** wire format (Code Assist generateContent).
+/// Downstream HTTP still exposes only Chat / Messages / Responses.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Protocol {
     Chat,
     Messages,
     Responses,
+    Gemini,
 }
 
 /// Stable identifier recorded in logs and conversion reports.
@@ -32,6 +36,9 @@ pub enum CodecId {
     ResponsesToMessagesV1,
     MessagesToResponsesV2,
     ResponsesToMessagesV2,
+    ChatToGeminiV1,
+    MessagesToGeminiV1,
+    ResponsesToGeminiV1,
 }
 
 impl CodecId {
@@ -46,6 +53,9 @@ impl CodecId {
             Self::ResponsesToMessagesV1 => "responses_to_messages_v1",
             Self::MessagesToResponsesV2 => "messages_to_responses_v2",
             Self::ResponsesToMessagesV2 => "responses_to_messages_v2",
+            Self::ChatToGeminiV1 => "chat_to_gemini_v1",
+            Self::MessagesToGeminiV1 => "messages_to_gemini_v1",
+            Self::ResponsesToGeminiV1 => "responses_to_gemini_v1",
         }
     }
 }

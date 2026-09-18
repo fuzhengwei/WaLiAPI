@@ -53,7 +53,7 @@
 │   │   │                     #   plan_executor.rs、attempt.rs、stream_supervisor.rs、
 │   │   │                     #   channel_identity.rs、feature_flags.rs、protocol_boundary.rs
 │   │   ├── endpoint_executor/ # 端点执行器（请求驱动、SSE 处理、Token 用量估算）
-│   │   ├── auth_provider/    # Auth 账号（Codex / Kimi OAuth 登录、Token 刷新、模型发现）
+│   │   ├── auth_provider/    # Auth 账号（Codex / Kimi / Antigravity OAuth 登录、Token 刷新、模型发现）
 │   │   ├── protocol/         # 协议转换层：codec/（chat / messages / responses_codec /
 │   │   │                     #   directions 双向转换）、sse_bridge.rs（字节级 SSE 重组，CJK 安全）
 │   │   ├── adaptor/          # 上游渠道适配器：openai / claude / deepseek / gemini / custom
