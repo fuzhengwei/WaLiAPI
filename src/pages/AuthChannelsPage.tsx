@@ -67,10 +67,16 @@ function exportFileName(account: AuthAccount) {
   return `${base || "codex-auth"}.json`;
 }
 
+function providerMark(provider: AuthProviderInfo) {
+  if (provider.id === "kimi" || provider.iconKey === "moonshot") return "☾";
+  if (provider.id === "grok" || provider.iconKey === "grok") return "✦";
+  return "⌘";
+}
+
 function EmptyAccountSlot({ provider, onLogin, onSelectImportFormat, busy }: { provider: AuthProviderInfo; onLogin: () => void; onSelectImportFormat: (format: ImportFormat) => void; busy: boolean }) {
-  const isKimi = provider.loginMode === "device_code";
+  const isDevice = provider.loginMode === "device_code";
   const displayName = provider.displayName;
-  return <section className="flex min-h-80 flex-col items-center justify-center rounded-[24px] border border-dashed border-border bg-card/50 p-6 text-center"><div className="flex h-12 w-12 items-center justify-center rounded-2xl bg-success/10 text-xl font-bold text-success">{isKimi ? "☾" : "⌘"}</div><h2 className="mt-4 font-semibold">＋ 登录 {displayName} 账号</h2><p className="mt-2 max-w-xs text-sm leading-6 text-muted-foreground">{isKimi ? "设备码授权：在浏览器确认后返回。" : "浏览器 OAuth 登录（PKCE）或从本机 ~/.codex/auth.json 导入"}</p><div className="mt-5 flex flex-wrap justify-center gap-2"><button onClick={onLogin} disabled={busy} className="action-primary"><KeyRound size={16} />登录</button>{!isKimi && <ImportDropdown busy={busy} onSelect={onSelectImportFormat} />}</div></section>;
+  return <section className="flex min-h-80 flex-col items-center justify-center rounded-[24px] border border-dashed border-border bg-card/50 p-6 text-center"><div className="flex h-12 w-12 items-center justify-center rounded-2xl bg-success/10 text-xl font-bold text-success">{providerMark(provider)}</div><h2 className="mt-4 font-semibold">＋ 登录 {displayName} 账号</h2><p className="mt-2 max-w-xs text-sm leading-6 text-muted-foreground">{isDevice ? "设备码授权：在浏览器确认后返回。" : "浏览器 OAuth 登录（PKCE）或从本机 ~/.codex/auth.json 导入"}</p><div className="mt-5 flex flex-wrap justify-center gap-2"><button onClick={onLogin} disabled={busy} className="action-primary"><KeyRound size={16} />登录</button>{provider.supportsImport && <ImportDropdown busy={busy} onSelect={onSelectImportFormat} />}</div></section>;
 }
 
 function ConfirmationDialog({ confirmation, pending, onCancel, onConfirm }: { confirmation: Confirmation; pending: boolean; onCancel: () => void; onConfirm: () => void }) {
@@ -107,15 +113,15 @@ export function AuthChannelsPage() {
 
   const activeProvider = providers.find((p) => p.id === selectedProvider) ?? {
     id: selectedProvider,
-    displayName: selectedProvider === "kimi" ? "Kimi Code" : "Codex",
-    iconKey: selectedProvider === "kimi" ? "moonshot" : "codex",
-    loginMode: selectedProvider === "kimi" ? "device_code" : "browser_callback",
-    loginMethods: selectedProvider === "kimi"
+    displayName: selectedProvider === "kimi" ? "Kimi Code" : selectedProvider === "grok" ? "Grok" : "Codex",
+    iconKey: selectedProvider === "kimi" ? "moonshot" : selectedProvider === "grok" ? "grok" : "codex",
+    loginMode: selectedProvider === "kimi" || selectedProvider === "grok" ? "device_code" : "browser_callback",
+    loginMethods: selectedProvider === "kimi" || selectedProvider === "grok"
       ? ["device_code" as const]
       : ["browser_callback" as const, "device_code" as const],
-    supportsImport: selectedProvider !== "kimi",
-    supportsExport: selectedProvider !== "kimi",
-    supportsQuota: selectedProvider !== "kimi",
+    supportsImport: selectedProvider === "codex",
+    supportsExport: selectedProvider === "codex",
+    supportsQuota: selectedProvider === "codex",
   };
 
   // The pill selects which provider's accounts are shown.  `load()` re-fetches

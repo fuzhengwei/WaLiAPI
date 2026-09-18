@@ -217,7 +217,7 @@ pub struct PreparedAttempt {
     /// Single source of truth for body / logs / stats (design 11.4).
     pub upstream_model: String,
     pub native_base_url: String,
-    /// Registered provider string for auth attempts (`codex`, `kimi`); `None`
+    /// Registered provider string for auth attempts (`codex`, `kimi`, `grok`); `None`
     /// for regular channels.  The executor never re-derives provider/framing.
     pub auth_provider: Option<String>,
     /// Non-stream framing frozen by RoutePlan for auth attempts; `None` for

@@ -36,6 +36,15 @@ const kimiSteps = [
   "同步模型",
 ];
 
+const grokSteps = [
+  "申请设备授权",
+  "打开 Grok 授权页",
+  "等待确认",
+  "交换令牌",
+  "保存账号",
+  "同步模型",
+];
+
 const codexDeviceSteps = [
   "申请设备授权",
   "打开 OpenAI 授权页",
@@ -87,7 +96,7 @@ export function LoginModal({
   );
   const isDevice = loginMethod === "device_code";
   const steps = isDevice
-    ? provider.id === "kimi" ? kimiSteps : codexDeviceSteps
+    ? provider.id === "kimi" ? kimiSteps : provider.id === "grok" ? grokSteps : codexDeviceSteps
     : codexSteps;
   const isDesktop = isTauriRuntime();
 
@@ -185,7 +194,7 @@ export function LoginModal({
       {error && <p role="alert" className="mt-4 flex items-center gap-2 rounded-xl bg-destructive/10 px-3 py-2.5 text-sm text-destructive"><CircleAlert size={15} />{error}</p>}
       {state === "done" && <p className="mt-4 rounded-xl bg-success/10 px-3 py-2.5 text-sm text-success">账号已保存。{currentStep === 5 ? "模型同步已完成。" : ""}</p>}
       </>}
-      {error && isDevice && <p className="mt-2 text-xs leading-5 text-muted-foreground">请登录 ChatGPT Web，进入“设置 → 账户 → 安全与登录”，确认已打开“为 Codex 启用设备代码授权”。Workspace 用户可能还需联系管理员开启权限；也可改用 auth.json 导入。</p>}
+      {error && isDevice && provider.id === "codex" && <p className="mt-2 text-xs leading-5 text-muted-foreground">请登录 ChatGPT Web，进入“设置 → 账户 → 安全与登录”，确认已打开“为 Codex 启用设备代码授权”。Workspace 用户可能还需联系管理员开启权限；也可改用 auth.json 导入。</p>}
       <div className="mt-6 flex justify-end gap-2">{state === "running" ? <button onClick={() => void cancel()} className="action-secondary">取消登录</button> : state !== "done" && <button onClick={onClose} className="action-secondary">取消</button>}{state === "done" ? <button onClick={onClose} className="action-primary">完成</button> : <button onClick={() => void login()} disabled={state === "running" || !loginMethod} className="action-primary">{state === "running" ? "登录中…" : "开始登录"}</button>}</div>
     </div>
   </div>;

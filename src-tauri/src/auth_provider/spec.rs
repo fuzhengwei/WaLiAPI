@@ -74,7 +74,18 @@ const KIMI: ProviderSpec = ProviderSpec {
     supports_quota: false,
 };
 
-const REGISTERED: &[&ProviderSpec] = &[&CODEX, &KIMI];
+const GROK: ProviderSpec = ProviderSpec {
+    kind: "grok",
+    display_name: "Grok",
+    icon_key: "grok",
+    login_mode: AuthLoginMode::DeviceCode,
+    login_methods: &[AuthLoginMode::DeviceCode],
+    supports_import: false,
+    supports_export: false,
+    supports_quota: false,
+};
+
+const REGISTERED: &[&ProviderSpec] = &[&CODEX, &KIMI, &GROK];
 
 /// Spec for an explicit (non-`Other`) provider kind, if it is a known spec.
 pub fn provider_spec(kind: &ProviderKind) -> Option<&'static ProviderSpec> {
@@ -132,6 +143,19 @@ mod tests {
     }
 
     #[test]
+    fn grok_spec_exact_values() {
+        let spec = provider_spec(&ProviderKind::Grok).expect("grok spec must exist");
+        assert_eq!(spec.kind, "grok");
+        assert_eq!(spec.display_name, "Grok");
+        assert_eq!(spec.icon_key, "grok");
+        assert_eq!(spec.login_mode, AuthLoginMode::DeviceCode);
+        assert_eq!(spec.login_methods, &[AuthLoginMode::DeviceCode]);
+        assert!(!spec.supports_import);
+        assert!(!spec.supports_export);
+        assert!(!spec.supports_quota);
+    }
+
+    #[test]
     fn unknown_provider_spec_is_none() {
         assert!(provider_spec(&ProviderKind::Other("nope".into())).is_none());
         assert!(provider_spec_by_name("nope").is_none());
@@ -144,6 +168,7 @@ mod tests {
             Some("codex")
         );
         assert_eq!(provider_spec_by_name("kimi").map(|s| s.kind), Some("kimi"));
+        assert_eq!(provider_spec_by_name("grok").map(|s| s.kind), Some("grok"));
         assert!(provider_spec_by_name("codEx").is_none());
     }
 
@@ -152,7 +177,8 @@ mod tests {
         let names: Vec<&str> = registered_provider_specs().iter().map(|s| s.kind).collect();
         assert!(names.contains(&"codex"));
         assert!(names.contains(&"kimi"));
-        assert_eq!(registered_provider_specs().len(), 2);
+        assert!(names.contains(&"grok"));
+        assert_eq!(registered_provider_specs().len(), 3);
     }
 
     #[test]

@@ -247,7 +247,7 @@ pub struct RouteGroupCandidate {
     pub tier: GroupTier,
     pub upstream_protocol: UpstreamProtocol,
     pub upstream_endpoint: String,
-    /// Registered provider string for auth candidates (`codex`, `kimi`);
+    /// Registered provider string for auth candidates (`codex`, `kimi`, `grok`);
     /// `None` for regular channels.
     pub auth_provider: Option<String>,
     /// Frozen base URL the executor must use.  Auth candidates carry the
@@ -787,6 +787,13 @@ fn profile_for_model_state(provider: &str, protocol: Option<&str>) -> Option<Aut
             upstream_protocol: UpstreamProtocol::Anthropic,
             upstream_endpoint: "messages_beta".into(),
             non_stream_framing: AuthNonStreamFraming::Json,
+        }),
+        ("grok", "responses") => Some(AuthRouteProfile {
+            provider: "grok".into(),
+            native_base_url: "https://cli-chat-proxy.grok.com/v1".into(),
+            upstream_protocol: UpstreamProtocol::Responses,
+            upstream_endpoint: "responses".into(),
+            non_stream_framing: AuthNonStreamFraming::ForcedResponsesSse,
         }),
         // Unknown provider or unknown non-empty Kimi protocol: fail closed.
         _ => None,
@@ -2741,6 +2748,24 @@ mod tests {
 
     // --- C5: per-model auth route profiles ---
 
+    fn grok_account(id: &str, model: &str) -> AuthAccount {
+        let mut account = auth_account(id, model, 1, 1);
+        account.provider = "grok".into();
+        account.model_states_json = json!({
+            "version": 1,
+            "models": [{
+                "id": model,
+                "status": "available",
+                "unavailable": false,
+                "next_retry_after": null,
+                "last_error": null,
+                "protocol": "responses"
+            }]
+        })
+        .to_string();
+        account
+    }
+
     fn kimi_account(id: &str, model: &str, protocol: &str) -> AuthAccount {
         let mut account = auth_account(id, model, 1, 1);
         account.provider = "kimi".into();
@@ -3032,6 +3057,129 @@ mod tests {
             group.candidates[0].native_base_url,
             "https://chatgpt.com/backend-api/codex"
         );
+    }
+
+    #[test]
+    fn grok_profile_is_responses_with_forced_sse_and_fixed_upstream() {
+        let account = grok_account("g1", "grok-4");
+        let profile = resolve_auth_route_profile(&account, "grok-4").unwrap();
+        assert_eq!(profile.provider, "grok");
+        assert_eq!(
+            profile.native_base_url,
+            "https://cli-chat-proxy.grok.com/v1"
+        );
+        assert_eq!(profile.upstream_protocol, UpstreamProtocol::Responses);
+        assert_eq!(profile.upstream_endpoint, "responses");
+        assert_eq!(
+            profile.non_stream_framing,
+            AuthNonStreamFraming::ForcedResponsesSse
+        );
+    }
+
+    #[test]
+    fn grok_responses_is_native_and_chat_converts() {
+        let key = api_key(&[], &[]);
+        let account = grok_account("g1", "grok-4");
+        let plan = authorize_and_plan_with_accounts(
+            &key,
+            "grok-4",
+            EndpointKind::Responses,
+            &[],
+            &[account],
+            &flags(false),
+            &json!({}),
+            &mut seeded(),
+        )
+        .unwrap();
+        let group = &plan.groups[0];
+        assert_eq!(group.tier, GroupTier::Native);
+        assert_eq!(group.upstream_protocol, UpstreamProtocol::Responses);
+        assert_eq!(group.upstream_endpoint, "responses");
+        assert_eq!(
+            group.candidates[0].auth_non_stream_framing,
+            Some(AuthNonStreamFraming::ForcedResponsesSse)
+        );
+        assert_eq!(group.candidates[0].auth_provider.as_deref(), Some("grok"));
+        assert_eq!(
+            group.candidates[0].native_base_url,
+            "https://cli-chat-proxy.grok.com/v1"
+        );
+
+        let account = grok_account("g1", "grok-4");
+        let plan = authorize_and_plan_with_accounts(
+            &key,
+            "grok-4",
+            EndpointKind::ChatCompletions,
+            &[],
+            &[account],
+            &flags(false),
+            &json!({}),
+            &mut seeded(),
+        )
+        .unwrap();
+        let group = &plan.groups[0];
+        assert_eq!(group.tier, GroupTier::Conversion);
+        assert_eq!(group.upstream_protocol, UpstreamProtocol::Responses);
+        assert_eq!(group.upstream_endpoint, "responses");
+    }
+
+    #[test]
+    fn grok_unknown_protocol_fails_closed_no_candidate() {
+        let key = api_key(&[], &[]);
+        for protocol in ["mars", "openai", "kimi", ""] {
+            let mut account = grok_account("g3", "grok-4");
+            account.model_states_json = json!({
+                "version": 1,
+                "models": [{
+                    "id": "grok-4",
+                    "status": "available",
+                    "unavailable": false,
+                    "next_retry_after": null,
+                    "last_error": null,
+                    "protocol": protocol
+                }]
+            })
+            .to_string();
+            assert!(
+                resolve_auth_route_profile(&account, "grok-4").is_none(),
+                "protocol {protocol:?} must not resolve a Grok profile"
+            );
+            let err = authorize_and_plan_with_accounts(
+                &key,
+                "grok-4",
+                EndpointKind::ChatCompletions,
+                &[],
+                &[account],
+                &flags(false),
+                &json!({}),
+                &mut seeded(),
+            )
+            .unwrap_err();
+            assert!(matches!(
+                err,
+                PlanError::NoEndpointSupported(EndpointKind::ChatCompletions, _)
+            ));
+        }
+    }
+
+    #[test]
+    fn grok_unavailable_model_never_routes() {
+        let key = api_key(&[], &[]);
+        let mut account = grok_account("g2", "grok-4");
+        account.model_states_json = json!({
+            "version": 1,
+            "models": [{
+                "id": "grok-4",
+                "status": "unavailable",
+                "unavailable": true,
+                "next_retry_after": null,
+                "last_error": null,
+                "protocol": "responses"
+            }]
+        })
+        .to_string();
+        let candidates = resolve_route_candidates(&[], &[account], "grok-4", &key);
+        assert!(candidates.is_empty());
     }
 
     #[test]

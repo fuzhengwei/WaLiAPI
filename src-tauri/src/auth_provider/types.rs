@@ -15,6 +15,7 @@ use crate::{
 pub enum ProviderKind {
     Codex,
     Kimi,
+    Grok,
     Other(String),
 }
 
@@ -23,6 +24,7 @@ impl ProviderKind {
         match self {
             Self::Codex => "codex",
             Self::Kimi => "kimi",
+            Self::Grok => "grok",
             Self::Other(value) => value,
         }
     }
@@ -33,6 +35,7 @@ impl From<&str> for ProviderKind {
         match value {
             "codex" => Self::Codex,
             "kimi" => Self::Kimi,
+            "grok" => Self::Grok,
             other => Self::Other(other.to_owned()),
         }
     }
@@ -403,6 +406,14 @@ mod tests {
         assert_eq!(kind.as_str(), "kimi");
         assert_eq!(ProviderKind::from("kimi"), ProviderKind::Kimi);
         assert_eq!(kind.to_string(), "kimi");
+    }
+
+    #[test]
+    fn provider_kind_grok_round_trip() {
+        let kind = ProviderKind::Grok;
+        assert_eq!(kind.as_str(), "grok");
+        assert_eq!(ProviderKind::from("grok"), ProviderKind::Grok);
+        assert_eq!(kind.to_string(), "grok");
     }
 
     #[test]

@@ -300,7 +300,7 @@ export interface AuthLoginStart {
   sessionId: string;
 }
 
-export type AuthProviderId = "codex" | "kimi" | (string & {});
+export type AuthProviderId = "codex" | "kimi" | "grok" | (string & {});
 export type AuthLoginMethod = "browser_callback" | "device_code";
 
 export interface AuthProviderInfo {

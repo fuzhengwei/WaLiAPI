@@ -212,8 +212,10 @@ fn is_secret_field(key: &str) -> bool {
             | "access_key"
             | "access_token"
             | "refresh_token"
+            | "id_token"
             | "device_code"
             | "user_code"
+            | "authorization_code"
             | "auth_token"
             | "token"
             | "password"
@@ -285,5 +287,31 @@ mod tests {
         for key in ["access_token", "refresh_token", "device_code", "user_code"] {
             assert!(is_secret_field(key), "{key} must be secret");
         }
+    }
+
+    #[test]
+    fn grok_secret_fields_are_redacted_for_logging() {
+        let payload = json!({
+            "access_token": "grok-access-secret",
+            "refresh_token": "grok-refresh-secret",
+            "id_token": "grok-id-token-secret",
+            "device_code": "grok-device-code",
+            "authorization_code": "grok-auth-code",
+            "expires_at": "2099-01-01T00:00:00Z",
+            "token_endpoint": "https://auth.x.ai/oauth2/token",
+        });
+        let redacted = redact_json_for_logging(&payload);
+        for secret in [
+            "grok-access-secret",
+            "grok-refresh-secret",
+            "grok-id-token-secret",
+            "grok-device-code",
+            "grok-auth-code",
+        ] {
+            let rendered = redacted.to_string();
+            assert!(!rendered.contains(secret), "log redaction leaked {secret}");
+        }
+        assert_eq!(redacted["expires_at"], "2099-01-01T00:00:00Z");
+        assert_eq!(redacted["token_endpoint"], "https://auth.x.ai/oauth2/token");
     }
 }
