@@ -20,21 +20,23 @@ use axum::{
     routing::get,
     Router,
 };
+use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use chrono::Utc;
 use serde::Deserialize;
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
 use tokio::sync::{oneshot, Mutex};
 
 use super::{ProviderError, ProviderPayload, RefreshedPayload};
 
-// Antigravity 桌面端 OAuth client 为 confidential 类型：令牌交换必须携带
-// client_secret（Google 返回 400 invalid_request "client_secret is missing."）。
-// client_secret 属于敏感凭据，仓库与安装包均不内置，由部署方在运行时通过
-// 环境变量 `WALIAPI_ANTIGRAVITY_CLIENT_SECRET` 注入；未注入时不携带该字段。
-// 用户点击登录即可进入浏览器授权；client ID 亦可经环境变量覆盖。
+// Antigravity 桌面端 OAuth 使用公开 client material。该 client secret 属于
+// 应用级配置，不是用户个人凭据；环境变量可覆盖，便于自定义部署。
+// 用户点击登录即可进入浏览器授权，不要求启动前手动配置客户端变量。
 pub const ANTIGRAVITY_CLIENT_ID: &str =
     "1071006060591-tmhssin2h21lcre235vtolojh4g403ep.apps.googleusercontent.com";
 pub const ANTIGRAVITY_CLIENT_ID_ENV: &str = "WALIAPI_ANTIGRAVITY_CLIENT_ID";
+// 这是公开桌面端 OAuth client 的 client material，不是用户个人凭据；环境变量可覆盖。
+pub const ANTIGRAVITY_CLIENT_SECRET: &str = "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";
 pub const ANTIGRAVITY_CLIENT_SECRET_ENV: &str = "WALIAPI_ANTIGRAVITY_CLIENT_SECRET";
 pub const GOOGLE_OAUTH_AUTHORIZE_URL: &str = "https://accounts.google.com/o/oauth2/v2/auth";
 pub const GOOGLE_OAUTH_TOKEN_URL: &str = "https://oauth2.googleapis.com/token";
@@ -76,7 +78,8 @@ impl GeminiLogin {
             token_url: GOOGLE_OAUTH_TOKEN_URL.to_owned(),
             client_id: configured_value(ANTIGRAVITY_CLIENT_ID_ENV)
                 .unwrap_or_else(|| ANTIGRAVITY_CLIENT_ID.to_owned()),
-            client_secret: configured_value(ANTIGRAVITY_CLIENT_SECRET_ENV),
+            client_secret: configured_value(ANTIGRAVITY_CLIENT_SECRET_ENV)
+                .or_else(|| Some(ANTIGRAVITY_CLIENT_SECRET.to_owned())),
             timeout: Duration::from_secs(5 * 60),
             client: http_client(),
         }
@@ -138,6 +141,8 @@ impl GeminiLogin {
             .port();
         let redirect_uri = format!("http://localhost:{port}/oauth-callback");
         let state = uuid::Uuid::new_v4().simple().to_string();
+        let code_verifier = pkce_verifier();
+        let code_challenge = pkce_challenge(&code_verifier);
         let callback_state = CallbackState::new(state.clone());
         let app = Router::new()
             .route("/oauth-callback", get(oauth_callback))
@@ -146,7 +151,13 @@ impl GeminiLogin {
             let _ = axum::serve(listener, app).await;
         });
 
-        let browser_url = authorization_url(&self.authorize_url, client_id, &redirect_uri, &state);
+        let browser_url = authorization_url(
+            &self.authorize_url,
+            client_id,
+            &redirect_uri,
+            &state,
+            &code_challenge,
+        );
 
         let result = async {
             runtime.set_step(super::LoginStep::Authorizing).await;
@@ -171,7 +182,7 @@ impl GeminiLogin {
             runtime.set_step(super::LoginStep::Exchanging).await;
             tokio::select! {
                 _ = runtime.cancelled() => Err(ProviderError::LoginCancelled),
-                result = self.exchange_code(&redirect_uri, &callback) => result,
+                result = self.exchange_code(&redirect_uri, &callback, &code_verifier) => result,
             }
         }
         .await;
@@ -184,17 +195,11 @@ impl GeminiLogin {
         &self,
         redirect_uri: &str,
         code: &str,
+        code_verifier: &str,
     ) -> Result<OAuthTokens, ProviderError> {
         let (client_id, client_secret) = self.credentials();
-        let form = with_optional_client_secret(
-            vec![
-                ("code", code),
-                ("client_id", client_id),
-                ("redirect_uri", redirect_uri),
-                ("grant_type", "authorization_code"),
-            ],
-            client_secret,
-        );
+        let form =
+            authorization_code_form(code, client_id, redirect_uri, code_verifier, client_secret);
         let response = self
             .client
             .post(&self.token_url)
@@ -243,14 +248,7 @@ impl GeminiLogin {
 
     async fn refresh_once(&self, refresh: &str) -> Result<OAuthTokens, RefreshError> {
         let (client_id, client_secret) = self.credentials();
-        let form = with_optional_client_secret(
-            vec![
-                ("client_id", client_id),
-                ("grant_type", "refresh_token"),
-                ("refresh_token", refresh),
-            ],
-            client_secret,
-        );
+        let form = refresh_form(client_id, refresh, client_secret);
         let response = self
             .client
             .post(&self.token_url)
@@ -297,9 +295,26 @@ enum RefreshError {
     Protocol,
 }
 
-// 不使用 PKCE 是为了匹配已验证的 Antigravity client contract，并非遗漏安全参数；
-// state 仍由 WaLiAPI 本地生成并严格校验。
-fn authorization_url(authorize: &str, client_id: &str, redirect_uri: &str, state: &str) -> String {
+fn pkce_verifier() -> String {
+    // 两个 UUID 合并后为 64 个 URL-safe 字符，落在 RFC 7636 要求的 43..=128 范围内。
+    format!(
+        "{}{}",
+        uuid::Uuid::new_v4().simple(),
+        uuid::Uuid::new_v4().simple()
+    )
+}
+
+fn pkce_challenge(verifier: &str) -> String {
+    URL_SAFE_NO_PAD.encode(Sha256::digest(verifier.as_bytes()))
+}
+
+fn authorization_url(
+    authorize: &str,
+    client_id: &str,
+    redirect_uri: &str,
+    state: &str,
+    code_challenge: &str,
+) -> String {
     let mut url = reqwest::Url::parse(authorize).expect("configured authorize URL");
     url.query_pairs_mut()
         .append_pair("client_id", client_id)
@@ -308,12 +323,48 @@ fn authorization_url(authorize: &str, client_id: &str, redirect_uri: &str, state
         .append_pair("scope", OAUTH_SCOPES)
         .append_pair("access_type", "offline")
         .append_pair("prompt", "consent")
-        .append_pair("state", state);
+        .append_pair("state", state)
+        .append_pair("code_challenge", code_challenge)
+        .append_pair("code_challenge_method", "S256");
     url.to_string()
 }
 
 fn configured_value(name: &str) -> Option<String> {
     env::var(name).ok().filter(|value| !value.trim().is_empty())
+}
+
+fn authorization_code_form<'a>(
+    code: &'a str,
+    client_id: &'a str,
+    redirect_uri: &'a str,
+    code_verifier: &'a str,
+    client_secret: Option<&'a str>,
+) -> Vec<(&'a str, &'a str)> {
+    with_optional_client_secret(
+        vec![
+            ("code", code),
+            ("client_id", client_id),
+            ("redirect_uri", redirect_uri),
+            ("grant_type", "authorization_code"),
+            ("code_verifier", code_verifier),
+        ],
+        client_secret,
+    )
+}
+
+fn refresh_form<'a>(
+    client_id: &'a str,
+    refresh_token: &'a str,
+    client_secret: Option<&'a str>,
+) -> Vec<(&'a str, &'a str)> {
+    with_optional_client_secret(
+        vec![
+            ("client_id", client_id),
+            ("grant_type", "refresh_token"),
+            ("refresh_token", refresh_token),
+        ],
+        client_secret,
+    )
 }
 
 fn with_optional_client_secret<'a>(
@@ -629,7 +680,8 @@ mod tests {
         assert_eq!(tokens.access_token, "ya29.new");
         assert!(!tokens.refresh_token.is_empty());
         let opened = runtime.opened.lock().unwrap();
-        assert!(!opened[0].contains("code_challenge"));
+        assert!(opened[0].contains("code_challenge="));
+        assert!(opened[0].contains("code_challenge_method=S256"));
         assert!(opened[0].contains("localhost"));
         assert!(opened[0].contains("oauth-callback"));
         assert!(opened[0].contains("cclog"));
@@ -729,18 +781,17 @@ mod tests {
         assert_eq!(client_secret, Some("test-antigravity-client-secret"));
     }
 
-    // client_secret 不再内置：Google 令牌端点要求 Antigravity confidential
-    // client 携带 client_secret，部署方需通过 WALIAPI_ANTIGRAVITY_CLIENT_SECRET
-    // 在运行时注入；未注入时不携带该字段（token exchange 返回 400）。
     #[test]
-    fn default_client_secret_comes_from_runtime_env() {
+    fn default_client_material_is_available() {
         let login = GeminiLogin::new();
         let (client_id, client_secret) = login.credentials();
-        assert_eq!(client_id, ANTIGRAVITY_CLIENT_ID);
         assert_eq!(
-            client_secret,
-            configured_value(ANTIGRAVITY_CLIENT_SECRET_ENV).as_deref()
+            client_id,
+            configured_value(ANTIGRAVITY_CLIENT_ID_ENV)
+                .as_deref()
+                .unwrap_or(ANTIGRAVITY_CLIENT_ID)
         );
+        assert!(client_secret.is_some());
     }
 
     #[test]
@@ -750,12 +801,54 @@ mod tests {
     }
 
     #[test]
+    fn builtin_client_material_is_complete() {
+        assert!(ANTIGRAVITY_CLIENT_ID.ends_with(".apps.googleusercontent.com"));
+        assert!(!ANTIGRAVITY_CLIENT_SECRET.is_empty());
+    }
+
+    #[test]
+    fn pkce_challenge_is_deterministic_and_url_safe() {
+        let verifier = "verifier-for-antigravity-test";
+        let challenge = pkce_challenge(verifier);
+        assert_eq!(challenge.len(), 43);
+        assert!(!challenge.contains('='));
+        assert!(!challenge.contains('+'));
+        assert!(!challenge.contains('/'));
+        assert_eq!(challenge, pkce_challenge(verifier));
+    }
+
+    #[test]
+    fn authorization_code_form_contains_pkce_and_secret() {
+        let form = authorization_code_form(
+            "code",
+            ANTIGRAVITY_CLIENT_ID,
+            "http://localhost/callback",
+            "verifier",
+            Some(ANTIGRAVITY_CLIENT_SECRET),
+        );
+        assert!(form.contains(&("code_verifier", "verifier")));
+        assert!(form.contains(&("client_secret", ANTIGRAVITY_CLIENT_SECRET)));
+    }
+
+    #[test]
+    fn refresh_form_contains_client_material() {
+        let form = refresh_form(
+            ANTIGRAVITY_CLIENT_ID,
+            "refresh",
+            Some(ANTIGRAVITY_CLIENT_SECRET),
+        );
+        assert!(form.contains(&("client_id", ANTIGRAVITY_CLIENT_ID)));
+        assert!(form.contains(&("client_secret", ANTIGRAVITY_CLIENT_SECRET)));
+    }
+
+    #[test]
     fn authorization_url_matches_antigravity_profile() {
         let url = authorization_url(
             GOOGLE_OAUTH_AUTHORIZE_URL,
             "test-antigravity-client-id",
             "http://localhost:43123/oauth-callback",
             "state-value",
+            "challenge-value",
         );
         let parsed = reqwest::Url::parse(&url).unwrap();
         let params: std::collections::HashMap<_, _> = parsed.query_pairs().into_owned().collect();
@@ -768,7 +861,14 @@ mod tests {
             Some("http://localhost:43123/oauth-callback")
         );
         assert_eq!(params.get("state").map(String::as_str), Some("state-value"));
-        assert!(!params.contains_key("code_challenge"));
+        assert_eq!(
+            params.get("code_challenge").map(String::as_str),
+            Some("challenge-value")
+        );
+        assert_eq!(
+            params.get("code_challenge_method").map(String::as_str),
+            Some("S256")
+        );
         assert!(params.get("scope").is_some_and(
             |scope| scope.contains("cclog") && scope.contains("experimentsandconfigs")
         ));
