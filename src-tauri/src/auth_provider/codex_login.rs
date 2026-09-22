@@ -88,7 +88,7 @@ impl super::LoginRuntime for TauriLoginRuntime {
         self.app
             .opener()
             .open_url(url, None::<&str>)
-            .map_err(|_| ProviderError::LoginFailed)
+            .map_err(|_| ProviderError::BrowserOpenFailed)
     }
 
     async fn set_step(&self, _step: super::LoginStep) {}

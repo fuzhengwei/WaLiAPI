@@ -152,7 +152,14 @@ impl MessagesResponsesStream {
                 let index = event.get("index").and_then(Value::as_u64).unwrap_or(0) as usize;
                 let b = event.get("content_block").unwrap_or(&Value::Null);
                 let kind = b.get("type").and_then(Value::as_str).unwrap_or("");
-                let item_id = format!("item_{index}");
+                // 条目 id 的前缀是 Responses 协议的一部分：`msg_` / `rs_` / `fc_`
+                // （官方上游回放历史时校验）。历史实现统一用 `item_N` 会被 400。
+                let item_id = match kind {
+                    "text" => format!("msg_{index}"),
+                    "thinking" => format!("rs_{index}"),
+                    "tool_use" => format!("fc_{index}"),
+                    _ => format!("item_{index}"),
+                };
                 let mut block = Block {
                     item_id: item_id.clone(),
                     kind: kind.into(),
@@ -172,6 +179,8 @@ impl MessagesResponsesStream {
                         let name = required(b, "name", "/content_block_start/content_block")?;
                         block.id = id.to_string();
                         block.name = name.to_string();
+                        // `id` 是 `fc_` 开头的条目 id，`call_id` 是与工具结果
+                        // 关联的上游调用 id，两者不能混用。
                         out.push(Self::frame("response.output_item.added",serde_json::json!({"type":"response.output_item.added","output_index":index,"item":{"id":item_id,"type":"function_call","call_id":id,"name":name,"arguments":""}})))
                     }
                     _ => {

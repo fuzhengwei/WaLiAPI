@@ -52,6 +52,9 @@ pub fn responses_to_openai(
         "prompt_cache_key",
         "prompt_cache_options",
         "client_metadata",
+        // `text` 控制输出格式与详细度：`format` 映射为 Chat 的
+        // `response_format`，`verbosity` 没有 Chat 等价物（丢弃）。
+        "text",
         // Mapped below: `reasoning.effort` → top-level `reasoning_effort`.
         "reasoning",
     ];
@@ -109,6 +112,33 @@ pub fn responses_to_openai(
     // Pass through top_p if present
     if let Some(top_p) = body.get("top_p") {
         openai_body["top_p"] = top_p.clone();
+    }
+
+    // Responses `text.format` → Chat `response_format`：Codex CLI 的请求会带
+    // `text`，JSON schema 输出要保住，`verbosity` 等无对应物的字段丢弃而非 400。
+    if let Some(text) = body.get("text") {
+        match text
+            .pointer("/format/type")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+        {
+            "json_schema" => {
+                let format = text.get("format").unwrap_or(&Value::Null);
+                openai_body["response_format"] = serde_json::json!({
+                    "type": "json_schema",
+                    "json_schema": {
+                        "name": format.get("name").and_then(Value::as_str).unwrap_or("response"),
+                        "schema": format.get("schema").cloned().unwrap_or_else(|| serde_json::json!({})),
+                        "strict": format.get("strict").cloned().unwrap_or(Value::Bool(false)),
+                    }
+                });
+            }
+            "json_object" => {
+                openai_body["response_format"] = serde_json::json!({"type": "json_object"});
+            }
+            // "text" 或缺失：默认文本输出，无需任何字段。
+            _ => {}
+        }
     }
     // Convert Responses API tools to Chat Completions tools format.
     // Responses API uses flat format: { type: "function", name, parameters, description }
@@ -454,25 +484,46 @@ pub(super) fn convert_responses_input_to_messages(input: &Value) -> Value {
                         "developer" => "system".to_string(),
                         other => other.to_string(),
                     };
-                    let content =
-                        if let Some(content_arr) = item.get("content").and_then(|c| c.as_array()) {
-                            // Extract text from content blocks
-                            let texts: Vec<String> = content_arr
-                                .iter()
-                                .filter_map(|block| {
-                                    // input_text, output_text, text
-                                    block
-                                        .get("text")
-                                        .and_then(|t| t.as_str())
-                                        .map(|s| s.to_string())
-                                })
-                                .collect();
-                            Value::String(texts.join(""))
-                        } else if let Some(text) = item.get("content").and_then(|c| c.as_str()) {
-                            Value::String(text.to_string())
+                    let content = if let Some(content_arr) =
+                        item.get("content").and_then(|c| c.as_array())
+                    {
+                        // Preserve input images instead of silently dropping them. The
+                        // downstream codec decides whether the source is representable.
+                        let mut blocks = Vec::new();
+                        let mut text_only = true;
+                        for block in content_arr {
+                            if let Some(text) = block.get("text").and_then(Value::as_str) {
+                                blocks.push(serde_json::json!({
+                                    "type": "text",
+                                    "text": text,
+                                }));
+                            } else if block.get("type").and_then(Value::as_str)
+                                == Some("input_image")
+                            {
+                                text_only = false;
+                                let image_url =
+                                    block.get("image_url").and_then(Value::as_str).unwrap_or("");
+                                blocks.push(serde_json::json!({
+                                    "type": "image_url",
+                                    "image_url": {"url": image_url},
+                                }));
+                            }
+                        }
+                        if text_only {
+                            Value::String(
+                                blocks
+                                    .iter()
+                                    .filter_map(|block| block.get("text").and_then(Value::as_str))
+                                    .collect::<String>(),
+                            )
                         } else {
-                            Value::String(String::new())
-                        };
+                            Value::Array(blocks)
+                        }
+                    } else if let Some(text) = item.get("content").and_then(|c| c.as_str()) {
+                        Value::String(text.to_string())
+                    } else {
+                        Value::String(String::new())
+                    };
                     let mut msg = serde_json::json!({
                         "role": role,
                         "content": content,

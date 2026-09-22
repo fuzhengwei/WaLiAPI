@@ -402,14 +402,10 @@ mod tests {
     #[tokio::test]
     async fn responses_replay_replays_frames_and_synthesizes_incomplete_tail() {
         let state = test_state().await;
-        seed_replay_state(
-            &state,
-            "sk-rt-1",
-            "resp_rt_1",
-            "2026-09-09T00:00:00+00:00",
-            true,
-        )
-        .await;
+        // 帧时间必须落在 `stream.resume_ttl_secs`（默认 24h）窗口内：写死日期
+        // 会让这个用例随时间流逝自己变成 410（TTL 过期）。
+        let recent = (chrono::Utc::now() - chrono::Duration::hours(1)).to_rfc3339();
+        seed_replay_state(&state, "sk-rt-1", "resp_rt_1", &recent, true).await;
         let shared = test_shared(&state, Some(ADMIN_TOKEN), Some(MCP_TOKEN));
         let app = build_router(state, shared);
 

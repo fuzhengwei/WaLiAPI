@@ -164,9 +164,17 @@ fn reassembled_tool_call_survives_real_fragmentation() {
         "tool call id lost by fragmentation: got {}",
         added["item"]["call_id"]
     );
-    assert_eq!(
-        added["item"]["id"], "call_00_ET_qpwrSuOGqdNVOyDYESq94260",
-        "tool call item id must not fall back to fc_0"
+    // 条目 id 与关联 id 是两个字段：`id` 必须是 `fc_` 前缀的条目 id
+    // （官方上游回放历史时会校验），`call_id` 保留上游 tool_call id。
+    let item_id = added["item"]["id"].as_str().unwrap_or_default();
+    assert!(
+        item_id.starts_with("fc_"),
+        "function_call item id must be fc_-prefixed: got {item_id}"
+    );
+    assert_ne!(
+        item_id,
+        added["item"]["call_id"].as_str().unwrap_or_default(),
+        "item id must not be the tool call's association id"
     );
 
     // The final function_call output_item.done must carry full arguments.

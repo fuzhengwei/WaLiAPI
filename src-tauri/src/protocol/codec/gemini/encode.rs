@@ -13,6 +13,7 @@ const SUPPORTED_TOP_LEVEL: &[&str] = &[
     "max_completion_tokens",
     "temperature",
     "top_p",
+    "stop",
     "stream",
     "tools",
     "tool_choice",
@@ -21,6 +22,9 @@ const SUPPORTED_TOP_LEVEL: &[&str] = &[
     "store",
     "stream_options",
 ];
+
+/// Gemini `generationConfig.stopSequences` 最多接受 5 个序列。
+const MAX_GEMINI_STOP_SEQUENCES: usize = 5;
 
 pub fn encode_chat_to_gemini(
     body: &Value,
@@ -100,6 +104,49 @@ pub fn encode_chat_to_gemini(
     {
         generation.insert("maxOutputTokens".into(), max_tokens.clone());
     }
+    // Anthropic 的 `stop_sequences` 在 messages→chat 阶段已成为 Chat 的 `stop`。
+    if let Some(stop) = body.get("stop") {
+        match stop {
+            Value::String(sequence) if !sequence.is_empty() => {
+                generation.insert("stopSequences".into(), json!([sequence]));
+                normalized.push("/stop".to_owned());
+            }
+            Value::Array(sequences) => {
+                let parsed: Option<Vec<Value>> = sequences
+                    .iter()
+                    .map(|item| item.as_str().filter(|s| !s.is_empty()).map(|s| json!(s)))
+                    .collect();
+                match parsed {
+                    // OpenAI 允许空数组表示“不限制”，Gemini 省略该字段即可。
+                    Some(list) if list.is_empty() => normalized.push("/stop".to_owned()),
+                    Some(list) if list.len() > MAX_GEMINI_STOP_SEQUENCES => request::reject(
+                        &mut rejected,
+                        FeatureKind::UnsupportedField,
+                        "/stop",
+                        format!(
+                            "stop accepts at most {MAX_GEMINI_STOP_SEQUENCES} sequences for Gemini"
+                        ),
+                    ),
+                    Some(list) => {
+                        generation.insert("stopSequences".into(), Value::Array(list));
+                        normalized.push("/stop".to_owned());
+                    }
+                    None => request::reject(
+                        &mut rejected,
+                        FeatureKind::UnsupportedField,
+                        "/stop",
+                        "stop must be a string or an array of non-empty strings",
+                    ),
+                }
+            }
+            _ => request::reject(
+                &mut rejected,
+                FeatureKind::UnsupportedField,
+                "/stop",
+                "stop must be a string or an array of strings",
+            ),
+        }
+    }
 
     let mut decls = Vec::new();
     if let Some(tools) = body.get("tools") {
@@ -161,6 +208,9 @@ pub fn encode_chat_to_gemini(
                 );
                 continue;
             }
+            // 透传的标准 JSON Schema 要先归一成 Gemini 能接受的子集，
+            // 否则不认识的键会让上游 400 掉整个请求。
+            let parameters = sanitize_gemini_schema(parameters);
             let mut decl = json!({ "name": name, "parameters": parameters });
             if let Some(desc) = function.get("description") {
                 decl["description"] = desc.clone();
@@ -312,7 +362,13 @@ fn convert_message(
                             "tool call arguments must be a JSON object",
                         ));
                     }
-                    parts.push(json!({ "functionCall": { "name": name, "args": args } }));
+                    // Gemini 3 要求原样回传 functionCall 上的 thoughtSignature，
+                    // 签名在 tool call id 尾部往返（见 `tool_call_id_with_signature`）。
+                    let mut part = json!({ "functionCall": { "name": name, "args": args } });
+                    if let (_, Some(signature)) = super::split_tool_call_id(id) {
+                        part["thoughtSignature"] = json!(signature);
+                    }
+                    parts.push(part);
                 }
             }
             if !parts.is_empty() {
@@ -539,7 +595,10 @@ fn apply_response_format(
             match schema {
                 Some(Value::Object(schema)) => {
                     generation.insert("responseMimeType".into(), json!("application/json"));
-                    generation.insert("responseSchema".into(), Value::Object(schema));
+                    generation.insert(
+                        "responseSchema".into(),
+                        sanitize_gemini_schema(&Value::Object(schema)),
+                    );
                     normalized.push("/response_format".to_owned());
                 }
                 Some(Value::String(_)) => request::reject(
@@ -563,6 +622,158 @@ fn apply_response_format(
             format!("unsupported response_format type {ty:?}"),
         ),
     }
+}
+
+/// Gemini `Schema` 只接受 OpenAPI 3.0 子集，而下游（Claude Code 的 MCP 工具等）
+/// 常直接透传标准 JSON Schema：`$schema` / `additionalProperties` / `$defs` 这类
+/// 关键字会让上游以 `Unknown name "$schema"` 400 掉整个请求。这里按白名单递归
+/// 归一并内联同文档 `$ref`；表达不了的关键字丢弃（放宽约束）而非让请求失败。
+fn sanitize_gemini_schema(schema: &Value) -> Value {
+    let defs = collect_schema_defs(schema);
+    sanitize_schema_with_defs(schema, &defs, 0)
+}
+
+/// Generative Language v1beta `Schema` 认识的字段。
+pub(super) const GEMINI_SCHEMA_KEYS: &[&str] = &[
+    "anyOf",
+    "default",
+    "description",
+    "enum",
+    "example",
+    "format",
+    "items",
+    "maxItems",
+    "maxLength",
+    "maxProperties",
+    "maximum",
+    "minItems",
+    "minLength",
+    "minProperties",
+    "minimum",
+    "nullable",
+    "pattern",
+    "properties",
+    "propertyOrdering",
+    "required",
+    "title",
+    "type",
+];
+
+/// `$ref` 内联的递归上限，避免自引用 schema 无限展开。
+const MAX_SCHEMA_DEPTH: usize = 12;
+
+fn collect_schema_defs(schema: &Value) -> Map<String, Value> {
+    let mut defs = Map::new();
+    let Some(root) = schema.as_object() else {
+        return defs;
+    };
+    for key in ["$defs", "definitions"] {
+        if let Some(Value::Object(entries)) = root.get(key) {
+            for (name, value) in entries {
+                defs.insert(name.clone(), value.clone());
+            }
+        }
+    }
+    defs
+}
+
+fn resolve_schema_def<'a>(reference: &str, defs: &'a Map<String, Value>) -> Option<&'a Value> {
+    let name = reference
+        .strip_prefix("#/$defs/")
+        .or_else(|| reference.strip_prefix("#/definitions/"))?;
+    defs.get(name)
+}
+
+fn sanitize_schema_with_defs(schema: &Value, defs: &Map<String, Value>, depth: usize) -> Value {
+    if depth > MAX_SCHEMA_DEPTH {
+        return json!({});
+    }
+    let Some(object) = schema.as_object() else {
+        // JSON Schema 允许布尔 schema（true/false），Gemini 只接受对象。
+        return json!({});
+    };
+    if let Some(reference) = object.get("$ref").and_then(Value::as_str) {
+        if let Some(target) = resolve_schema_def(reference, defs) {
+            return sanitize_schema_with_defs(target, defs, depth + 1);
+        }
+    }
+
+    let mut out = Map::new();
+    for (key, value) in object {
+        if !GEMINI_SCHEMA_KEYS.contains(&key.as_str()) {
+            continue;
+        }
+        match key.as_str() {
+            "properties" => {
+                let Some(entries) = value.as_object() else {
+                    continue;
+                };
+                let mut properties = Map::new();
+                for (name, sub) in entries {
+                    properties.insert(
+                        name.clone(),
+                        sanitize_schema_with_defs(sub, defs, depth + 1),
+                    );
+                }
+                out.insert("properties".to_owned(), Value::Object(properties));
+            }
+            "items" => match value {
+                // draft 允许 items 为数组；Gemini 只接受单个 Schema。
+                Value::Array(list) => {
+                    let branches: Vec<Value> = list
+                        .iter()
+                        .map(|sub| sanitize_schema_with_defs(sub, defs, depth + 1))
+                        .collect();
+                    match branches.len() {
+                        0 => {}
+                        1 => {
+                            if let Some(first) = branches.into_iter().next() {
+                                out.insert("items".to_owned(), first);
+                            }
+                        }
+                        _ => {
+                            out.insert("items".to_owned(), json!({ "anyOf": branches }));
+                        }
+                    }
+                }
+                other => {
+                    out.insert(
+                        "items".to_owned(),
+                        sanitize_schema_with_defs(other, defs, depth + 1),
+                    );
+                }
+            },
+            "anyOf" => {
+                let Some(list) = value.as_array() else {
+                    continue;
+                };
+                let branches: Vec<Value> = list
+                    .iter()
+                    .map(|sub| sanitize_schema_with_defs(sub, defs, depth + 1))
+                    .collect();
+                out.insert("anyOf".to_owned(), Value::Array(branches));
+            }
+            "type" => match value {
+                Value::String(_) => {
+                    out.insert("type".to_owned(), value.clone());
+                }
+                // `"type": ["string", "null"]` 是 draft 写法，Gemini 只认单类型。
+                Value::Array(types) => {
+                    if types.iter().any(|t| t.as_str() == Some("null")) {
+                        out.insert("nullable".to_owned(), Value::Bool(true));
+                    }
+                    if let Some(first) = types.iter().find(|t| t.as_str() != Some("null")) {
+                        out.insert("type".to_owned(), first.clone());
+                    }
+                }
+                _ => {}
+            },
+            _ => {
+                out.insert(key.clone(), value.clone());
+            }
+        }
+    }
+    Value::Object(out)
 }
 
 fn parse_data_url(url: &str) -> Option<(String, String)> {

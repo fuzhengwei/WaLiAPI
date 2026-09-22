@@ -16,6 +16,10 @@ Thumbs.db
 *.swp
 *.swo
 
+# 本地 agent / 工具目录
+.codewhale/
+.omx/
+
 # Environment
 .env
 .env.local

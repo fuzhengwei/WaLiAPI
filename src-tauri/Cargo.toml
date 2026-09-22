@@ -96,6 +96,7 @@ password-hash = { version = "0.5", features = ["rand_core"] }
 dashmap = "6"
 mime_guess = "2"
 rust-embed = { version = "8", optional = true }
+serde_yaml = "0.9.34"
 
 [features]
 # desktop-ui：桌面专属能力（托盘图标/文件对话框/开机自启/OAuth 打开系统浏览器），

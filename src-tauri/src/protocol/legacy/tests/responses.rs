@@ -468,3 +468,30 @@ fn responses_input_interleaved_call_never_leaves_orphan_assistant() {
         serde_json::json!({"role": "tool", "tool_call_id": "call_B", "content": "file contents"})
     );
 }
+
+#[test]
+fn responses_to_openai_accepts_text_control() {
+    // Codex CLI 的部分请求会带 `text`（输出格式与详细度）。Chat 侧只有
+    // `response_format` 能表达 `format`；`verbosity` 没有对应物，必须丢弃
+    // 而不是让整个请求 400。
+    let with_schema = serde_json::json!({
+        "model": "gpt-4",
+        "input": [{"role": "user", "content": [{"type": "input_text", "text": "hi"}]}],
+        "text": {
+            "format": {"type": "json_schema", "name": "out", "schema": {"type": "object"}, "strict": true},
+            "verbosity": "medium"
+        }
+    });
+    let converted = responses_to_openai(&with_schema).unwrap();
+    assert_eq!(converted["response_format"]["type"], "json_schema");
+    assert_eq!(converted["response_format"]["json_schema"]["name"], "out");
+    assert_eq!(converted["response_format"]["json_schema"]["strict"], true);
+
+    let verbosity_only = serde_json::json!({
+        "model": "gpt-4",
+        "input": [{"role": "user", "content": [{"type": "input_text", "text": "hi"}]}],
+        "text": {"verbosity": "low"}
+    });
+    let converted = responses_to_openai(&verbosity_only).unwrap();
+    assert!(converted.get("response_format").is_none());
+}

@@ -227,11 +227,10 @@ pub fn convert_openai_sse_to_responses(
                             // Initialize tool call state if this is the first time we see it
                             if !state.tool_calls.contains_key(&tc_index) {
                                 let output_index = state.next_output_index;
-                                let item_id = if !tc_id.is_empty() {
-                                    tc_id.to_string()
-                                } else {
-                                    format!("fc_{}", tc_index)
-                                };
+                                // 条目 id 必须带 `fc_` 前缀；上游 Chat 的 tool_call id
+                                // 是关联 id，只能进 `call_id`（写进 `id` 会让官方上游
+                                // 在回放旧会话时报 "Expected an ID that begins with 'fc'"）。
+                                let item_id = format!("fc_{}", uuid::Uuid::new_v4().simple());
 
                                 state.tool_calls.insert(
                                     tc_index,

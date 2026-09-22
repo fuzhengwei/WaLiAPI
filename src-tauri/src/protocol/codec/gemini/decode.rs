@@ -79,8 +79,13 @@ pub fn decode_gemini_to_chat(
             let name = call.get("name").and_then(Value::as_str).unwrap_or("");
             let args = call.get("args").cloned().unwrap_or(json!({}));
             let args_text = serde_json::to_string(&args).unwrap_or_else(|_| "{}".into());
+            // Gemini 3 的 functionCall 带 thoughtSignature，必须随 id 带回上游。
+            let id = super::tool_call_id_with_signature(
+                &format!("call_{}", uuid::Uuid::new_v4().simple()),
+                part.get("thoughtSignature").and_then(Value::as_str),
+            );
             tool_calls.push(json!({
-                "id": format!("call_{}", uuid::Uuid::new_v4().simple()),
+                "id": id,
                 "type": "function",
                 "function": { "name": name, "arguments": args_text }
             }));

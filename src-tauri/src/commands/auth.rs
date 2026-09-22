@@ -456,7 +456,8 @@ fn safe_error(error: ProviderError) -> String {
     match error {
         ProviderError::ValidationRequired { .. }
         | ProviderError::PermissionDenied
-        | ProviderError::CredentialMigrationRequired => login_error_message(&error),
+        | ProviderError::CredentialMigrationRequired
+        | ProviderError::BrowserOpenFailed => login_error_message(&error),
         _ => "Auth operation failed".to_owned(),
     }
 }

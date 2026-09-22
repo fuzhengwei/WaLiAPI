@@ -137,22 +137,22 @@ const APPS: &[AppDef] = &[
         name: "openclaw",
         label: "OpenClaw",
         icon: "bot",
-        description: "开源 Agent 框架，读取配置文件中的 provider 段",
-        config_format: "JSON (~/.qclaw/)",
+        description: "开源 Agent 框架，读取 openclaw.json 中的 models.providers 段",
+        config_format: "JSON (~/.openclaw/openclaw.json)",
         download_url: "https://openclaw.ai",
-        config_dir_fn: || home_dir().join(".qclaw"),
-        config_file: "config.json",
+        config_dir_fn: || home_dir().join(".openclaw"),
+        config_file: "openclaw.json",
         check_installed_fn: |dir| dir.exists(),
     },
     AppDef {
         name: "hermes",
         label: "Hermes Agent",
         icon: "code",
-        description: "Hermes Agent 框架，读取配置文件中的 custom_providers 段",
-        config_format: "TOML/JSON (Hermes config)",
+        description: "Hermes Agent 框架，读取 config.yaml 中的 model 与 custom_providers 段",
+        config_format: "YAML (~/.hermes/config.yaml)",
         download_url: "https://github.com/openai/hermes",
         config_dir_fn: || home_dir().join(".hermes"),
-        config_file: "config.json",
+        config_file: "config.yaml",
         check_installed_fn: |dir| dir.exists(),
     },
     AppDef {
@@ -202,6 +202,17 @@ fn read_json_file<T: serde::de::DeserializeOwned>(path: &PathBuf) -> Result<T, S
 fn write_json_file<T: Serialize>(path: &PathBuf, data: &T) -> Result<(), String> {
     let json = to_pretty_json(data).map_err(|e| format!("序列化 JSON 失败: {e}"))?;
     atomic_write(path, json.as_bytes())
+}
+
+/// 写 YAML 配置（Hermes 的 config.yaml）。首行注明本文件由 WaLiAPI 写入，
+/// 提醒注释不会保留、原文件在 `.waliapi-backup`。
+fn write_yaml_file<T: Serialize>(path: &PathBuf, data: &T) -> Result<(), String> {
+    let yaml = serde_yaml::to_string(data).map_err(|e| format!("序列化 YAML 失败: {e}"))?;
+    let text = format!(
+        "# 本文件由 WaLiAPI 写入；YAML 注释不会被保留，原文件已备份为同名 .waliapi-backup。\n{}\n",
+        yaml.trim_start_matches("---\n")
+    );
+    atomic_write(path, text.as_bytes())
 }
 
 /// 自定义 JSON pretty printer，不转义 non-ASCII 字符
@@ -854,6 +865,11 @@ fn write_opencode(
     };
 
     if let Some(obj) = config.as_object_mut() {
+        // opencode 把 `models` 的**键**当作请求里的 model（`name` 只是显示名），
+        // 键必须是网关认识的模型名：写占位名会被服务端以 "No available upstream
+        // candidate" 拒掉，客户端侧看起来只是“没有响应”。
+        let mut models = serde_json::Map::new();
+        models.insert(model.to_string(), serde_json::json!({ "name": model }));
         let provider = serde_json::json!({
             "npm": "@ai-sdk/openai-compatible",
             "name": "WaLiAPI Gateway",
@@ -861,9 +877,7 @@ fn write_opencode(
                 "baseURL": format!("{}/v1", waliapi_url),
                 "apiKey": waliapi_key
             },
-            "models": {
-                "waliapi-default": { "name": model }
-            }
+            "models": serde_json::Value::Object(models)
         });
         if let Some(providers) = obj.get_mut("provider").and_then(|v| v.as_object_mut()) {
             providers.insert("waliapi".to_string(), provider);
@@ -873,6 +887,11 @@ fn write_opencode(
                 serde_json::json!({"waliapi": provider}),
             );
         }
+        // 顶层 `model` 决定默认模型；缺省时 opencode 会退回第一个可用模型。
+        obj.insert(
+            "model".to_string(),
+            serde_json::json!(format!("waliapi/{model}")),
+        );
     }
 
     write_json_file(&config_path, &config)
@@ -884,21 +903,73 @@ fn write_openclaw(
     waliapi_key: &str,
     model: &str,
 ) -> Result<(), String> {
-    let config_path = config_dir.join("config.json");
+    let config_path = config_dir.join("openclaw.json");
     let mut config: serde_json::Value = if config_path.exists() {
         read_json_file(&config_path).unwrap_or_else(|_| serde_json::json!({}))
     } else {
         serde_json::json!({})
     };
 
+    // OpenClaw 的 provider 定义在 `models.providers.<id>`，默认模型是
+    // `agents.defaults.model.primary` 里的 `provider/model` 引用；旧版写的平铺
+    // `{baseUrl, apiKey, model}` 既不在正确路径也不在正确结构里，读不到。
+    let provider_id = "waliapi";
+    let model_ref = format!("{provider_id}/{model}");
+    let base_url = format!("{}/v1", waliapi_url);
+
     if let Some(obj) = config.as_object_mut() {
-        obj.insert(
-            "baseUrl".to_string(),
-            serde_json::json!(format!("{}/v1", waliapi_url)),
-        );
-        obj.insert("apiKey".to_string(), serde_json::json!(waliapi_key));
-        obj.insert("model".to_string(), serde_json::json!(model));
-        obj.insert("_waliapi".to_string(), serde_json::json!(true));
+        let models = obj
+            .entry("models".to_string())
+            .or_insert_with(|| serde_json::json!({}));
+        if let Some(models_obj) = models.as_object_mut() {
+            // `merge` 保留 OpenClaw 内置的模型目录，只追加我们的 provider。
+            models_obj
+                .entry("mode".to_string())
+                .or_insert_with(|| serde_json::json!("merge"));
+            let providers = models_obj
+                .entry("providers".to_string())
+                .or_insert_with(|| serde_json::json!({}));
+            if let Some(providers_obj) = providers.as_object_mut() {
+                providers_obj.insert(
+                    provider_id.to_string(),
+                    serde_json::json!({
+                        "baseUrl": base_url,
+                        "apiKey": waliapi_key,
+                        "api": "openai-completions",
+                        "models": [{ "id": model, "name": model }]
+                    }),
+                );
+            }
+        }
+
+        let agents = obj
+            .entry("agents".to_string())
+            .or_insert_with(|| serde_json::json!({}));
+        if let Some(agents_obj) = agents.as_object_mut() {
+            let defaults = agents_obj
+                .entry("defaults".to_string())
+                .or_insert_with(|| serde_json::json!({}));
+            if let Some(defaults_obj) = defaults.as_object_mut() {
+                let model_cfg = defaults_obj
+                    .entry("model".to_string())
+                    .or_insert_with(|| serde_json::json!({}));
+                if let Some(model_obj) = model_cfg.as_object_mut() {
+                    model_obj.insert("primary".to_string(), serde_json::json!(model_ref.clone()));
+                }
+                // 未进 allowlist 的模型不会出现在可选列表里。
+                let allow = defaults_obj
+                    .entry("models".to_string())
+                    .or_insert_with(|| serde_json::json!({}));
+                if let Some(allow_obj) = allow.as_object_mut() {
+                    allow_obj.insert(model_ref.clone(), serde_json::json!({}));
+                }
+            }
+        }
+        // OpenClaw 的配置 schema 对根级未知键做严格校验，带上 `_waliapi` 标记会让
+        // 它直接以 `Invalid config ... Unrecognized key: "_waliapi"` 拒绝启动。
+        // 「是否已应用」改由 `models.providers.waliapi` 判断（见 `detect_applied`），
+        // 这里顺手清掉历史版本写入的标记，让老配置在下次应用时自愈。
+        let _ = obj.remove("_waliapi");
     }
 
     write_json_file(&config_path, &config)
@@ -910,47 +981,74 @@ fn write_hermes(
     waliapi_key: &str,
     model: &str,
 ) -> Result<(), String> {
-    let config_path = config_dir.join("config.json");
+    // Hermes 的主配置是 `~/.hermes/config.yaml`：provider 走 `custom_providers`
+    // 列表（元素用 `name`），默认模型由 `model` 段的 `provider: custom:<name>` +
+    // `default` + `base_url` 决定。用 serde_yaml 读回现有配置再合并，只覆盖
+    // model 段与本网关的条目；YAML 重写不保留注释，故写入前先备份原文件。
+    let config_path = config_dir.join("config.yaml");
     let mut config: serde_json::Value = if config_path.exists() {
-        read_json_file(&config_path).unwrap_or_else(|_| serde_json::json!({}))
+        let raw = fs::read_to_string(&config_path).map_err(|e| format!("读取文件失败: {e}"))?;
+        if raw.trim().is_empty() {
+            serde_json::json!({})
+        } else {
+            serde_yaml::from_str::<serde_json::Value>(&raw)
+                .map_err(|e| format!("解析 ~/.hermes/config.yaml 失败（原文件未改动）：{e}"))?
+        }
     } else {
         serde_json::json!({})
     };
-
-    if let Some(obj) = config.as_object_mut() {
-        if let Some(providers) = obj
-            .get_mut("custom_providers")
-            .and_then(|v| v.as_array_mut())
-        {
-            providers.retain(|p| p.get("id").and_then(|v| v.as_str()) != Some("waliapi"));
-            let mut entry = serde_json::Map::new();
-            entry.insert("id".to_string(), serde_json::json!("waliapi"));
-            entry.insert("name".to_string(), serde_json::json!("WaLiAPI Gateway"));
-            entry.insert(
-                "base_url".to_string(),
-                serde_json::json!(format!("{}/v1", waliapi_url)),
-            );
-            entry.insert("api_key".to_string(), serde_json::json!(waliapi_key));
-            entry.insert("default_model".to_string(), serde_json::json!(model));
-            providers.push(serde_json::Value::Object(entry));
-        } else {
-            let mut entry = serde_json::Map::new();
-            entry.insert("id".to_string(), serde_json::json!("waliapi"));
-            entry.insert("name".to_string(), serde_json::json!("WaLiAPI Gateway"));
-            entry.insert(
-                "base_url".to_string(),
-                serde_json::json!(format!("{}/v1", waliapi_url)),
-            );
-            entry.insert("api_key".to_string(), serde_json::json!(waliapi_key));
-            entry.insert("default_model".to_string(), serde_json::json!(model));
-            obj.insert(
-                "custom_providers".to_string(),
-                serde_json::Value::Array(vec![serde_json::Value::Object(entry)]),
-            );
-        }
+    if !config.is_object() {
+        config = serde_json::json!({});
     }
 
-    write_json_file(&config_path, &config)
+    let provider_id = "waliapi";
+    let base_url = format!("{}/v1", waliapi_url);
+    if let Some(obj) = config.as_object_mut() {
+        let mut entry = serde_json::Map::new();
+        entry.insert("name".to_string(), serde_json::json!(provider_id));
+        entry.insert("base_url".to_string(), serde_json::json!(base_url.clone()));
+        entry.insert("api_key".to_string(), serde_json::json!(waliapi_key));
+        entry.insert(
+            "api_mode".to_string(),
+            serde_json::json!("chat_completions"),
+        );
+        let mut models = serde_json::Map::new();
+        models.insert(model.to_string(), serde_json::json!({}));
+        entry.insert("models".to_string(), serde_json::Value::Object(models));
+
+        let providers = obj
+            .entry("custom_providers".to_string())
+            .or_insert_with(|| serde_json::json!([]));
+        if !providers.is_array() {
+            *providers = serde_json::json!([]);
+        }
+        if let Some(list) = providers.as_array_mut() {
+            // 旧版本写的是 `id` 字段（Hermes 不认），这里按 `name` 去重重建。
+            list.retain(|p| p.get("name").and_then(serde_json::Value::as_str) != Some(provider_id));
+            list.push(serde_json::Value::Object(entry));
+        }
+
+        let model_cfg = obj
+            .entry("model".to_string())
+            .or_insert_with(|| serde_json::json!({}));
+        if let Some(model_obj) = model_cfg.as_object_mut() {
+            model_obj.insert(
+                "provider".to_string(),
+                serde_json::json!(format!("custom:{provider_id}")),
+            );
+            model_obj.insert("default".to_string(), serde_json::json!(model));
+            model_obj.insert("base_url".to_string(), serde_json::json!(base_url));
+            model_obj.insert(
+                "api_mode".to_string(),
+                serde_json::json!("chat_completions"),
+            );
+        }
+        obj.insert("_waliapi".to_string(), serde_json::json!(true));
+    }
+
+    // YAML 重写不留注释：先留一份 `.waliapi-backup` 作为退路。
+    backup_config(&config_path)?;
+    write_yaml_file(&config_path, &config)
 }
 
 fn write_walicode(
@@ -1110,6 +1208,11 @@ fn detect_applied(config_path: &PathBuf, app_name: &str) -> bool {
                         .and_then(|x| x.as_str())
                         .is_some_and(|s| !s.is_empty())
                     && env.and_then(|e| e.get("ANTHROPIC_API_KEY")).is_none()
+            } else if app_name == "openclaw" {
+                // OpenClaw 不允许根级未知键，所以不能用 `_waliapi` 标记认领写入的
+                // 配置；`models.providers.waliapi` 本身就是「已由 WaLiAPI 写入」的
+                // 证据（与 opencode 分支同一思路）。
+                v.pointer("/models/providers/waliapi").is_some()
             } else {
                 v.get("_waliapi").and_then(|v| v.as_bool()).unwrap_or(false)
             }
@@ -1124,7 +1227,9 @@ fn detect_applied(config_path: &PathBuf, app_name: &str) -> bool {
             v.pointer("/provider/waliapi").is_some()
         }
         "hermes" => {
-            let v: serde_json::Value = match serde_json::from_str(&content) {
+            // Hermes 的主配置是 YAML（`config.yaml`），必须用 YAML 解析器；
+            // provider 名在 `custom_providers[].name`（`id` 是不被识别的旧字段）。
+            let v: serde_json::Value = match serde_yaml::from_str(&content) {
                 Ok(v) => v,
                 Err(_) => return false,
             };
@@ -1132,7 +1237,7 @@ fn detect_applied(config_path: &PathBuf, app_name: &str) -> bool {
                 .and_then(|v| v.as_array())
                 .and_then(|arr| {
                     arr.iter()
-                        .find(|p| p.get("id").and_then(|v| v.as_str()) == Some("waliapi"))
+                        .find(|p| p.get("name").and_then(|v| v.as_str()) == Some("waliapi"))
                 })
                 .is_some()
         }
@@ -1757,5 +1862,165 @@ mod tests {
         assert!(write_claude_code_transactional(&dir, "http://gateway", "key", "model").is_err());
         assert_eq!(fs::read(&path).unwrap(), b"not-json");
         assert!(!backup_path(&path).exists());
+    }
+
+    /// opencode 把 `models` 的键当作请求的 model：必须是真实模型名，
+    /// 写占位名会让网关以 "No available upstream candidate" 拒掉。
+    #[test]
+    fn opencode_config_uses_real_model_id_and_sets_default_model() {
+        let dir = temp_dir("opencode");
+        write_opencode(
+            &dir,
+            "http://127.0.0.1:8777",
+            "sk-waliapi-test",
+            "gemini-3.8-flash-medium",
+        )
+        .unwrap();
+
+        let config: serde_json::Value = read_json_file(&dir.join("opencode.json")).unwrap();
+        let models = &config["provider"]["waliapi"]["models"];
+        assert!(models.get("gemini-3.8-flash-medium").is_some());
+        assert!(models.get("waliapi-default").is_none());
+        assert_eq!(config["model"], "waliapi/gemini-3.8-flash-medium");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// OpenClaw 读 `models.providers.<id>` 与 `agents.defaults.model.primary`，
+    /// 不是平铺的 `{baseUrl, apiKey, model}`。
+    #[test]
+    fn openclaw_config_writes_models_providers_block() {
+        let dir = temp_dir("openclaw");
+        write_openclaw(
+            &dir,
+            "http://127.0.0.1:8777",
+            "sk-waliapi-test",
+            "gemini-3.8-flash-medium",
+        )
+        .unwrap();
+
+        let config: serde_json::Value = read_json_file(&dir.join("openclaw.json")).unwrap();
+        let provider = &config["models"]["providers"]["waliapi"];
+        assert_eq!(provider["baseUrl"], "http://127.0.0.1:8777/v1");
+        assert_eq!(provider["api"], "openai-completions");
+        assert_eq!(provider["apiKey"], "sk-waliapi-test");
+        assert_eq!(provider["models"][0]["id"], "gemini-3.8-flash-medium");
+        assert_eq!(
+            config["agents"]["defaults"]["model"]["primary"],
+            "waliapi/gemini-3.8-flash-medium"
+        );
+        assert!(config["agents"]["defaults"]["models"]
+            .get("waliapi/gemini-3.8-flash-medium")
+            .is_some());
+        assert!(config.get("baseUrl").is_none(), "不应再写平铺字段");
+        assert!(
+            config.get("_waliapi").is_none(),
+            "OpenClaw 对根级未知键严格校验，不能写 _waliapi 标记"
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// OpenClaw 的严格 schema 会把根级的 `_waliapi` 当成非法键直接拒绝启动，
+    /// 所以历史版本写入的标记必须在下次应用时清掉；已应用状态改由
+    /// `models.providers.waliapi` 识别。
+    #[test]
+    fn openclaw_config_drops_legacy_marker_and_detects_provider_block() {
+        let dir = temp_dir("openclaw-legacy");
+        let path = dir.join("openclaw.json");
+        fs::write(&path, br#"{"_waliapi":true,"agents":{"defaults":{}}}"#).unwrap();
+
+        write_openclaw(
+            &dir,
+            "http://127.0.0.1:8777",
+            "[redacted]",
+            "gemini-3.8-flash-medium",
+        )
+        .unwrap();
+
+        let config: serde_json::Value = read_json_file(&path).unwrap();
+        assert!(config.get("_waliapi").is_none(), "遗留标记必须被清除");
+        assert!(detect_applied(&path, "openclaw"));
+
+        // 没有 provider 块（即未由 WaLiAPI 写入）时不得误判为已应用。
+        fs::write(&path, br#"{"agents":{"defaults":{}}}"#).unwrap();
+        assert!(!detect_applied(&path, "openclaw"));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// Hermes 的主配置是 `config.yaml`，`custom_providers` 用 `name` 字段；
+    /// 已经存在的 YAML 文本不得被覆盖。
+    #[test]
+    fn hermes_config_merges_yaml_and_backs_up_original() {
+        let dir = temp_dir("hermes");
+        write_hermes(
+            &dir,
+            "http://127.0.0.1:8777",
+            "sk-waliapi-test",
+            "gemini-3.8-flash-medium",
+        )
+        .unwrap();
+
+        let raw = fs::read_to_string(dir.join("config.yaml")).unwrap();
+        let config: serde_json::Value = serde_yaml::from_str(&raw).unwrap();
+        assert_eq!(config["model"]["provider"], "custom:waliapi");
+        assert_eq!(config["model"]["default"], "gemini-3.8-flash-medium");
+        assert_eq!(config["model"]["base_url"], "http://127.0.0.1:8777/v1");
+        assert_eq!(config["custom_providers"][0]["name"], "waliapi");
+        assert!(config["custom_providers"][0].get("id").is_none());
+
+        // 已有 YAML：只改本网关的段，其余配置（含不是本网关写的段）保留，
+        // 且原文件先落一份备份（YAML 重写不保留注释）。
+        let yaml_dir = temp_dir("hermes-merge");
+        let yaml_path = yaml_dir.join("config.yaml");
+        let original = "# 用户注释\nmodel:\n  provider: xai-oauth\n  default: grok-4.6\ntelegram:\n  enabled: true\n";
+        fs::write(&yaml_path, original).unwrap();
+        write_hermes(&yaml_dir, "http://127.0.0.1:8777", "k", "my-model").unwrap();
+
+        let merged: serde_json::Value =
+            serde_yaml::from_str(&fs::read_to_string(&yaml_path).unwrap()).unwrap();
+        assert_eq!(merged["model"]["provider"], "custom:waliapi");
+        assert_eq!(merged["model"]["default"], "my-model");
+        assert_eq!(merged["telegram"]["enabled"], true, "用户其它配置必须保留");
+        assert_eq!(
+            fs::read_to_string(yaml_dir.join("config.yaml.waliapi-backup")).unwrap(),
+            original,
+            "备份必须是写入前的原文件"
+        );
+
+        // 语法坏的 YAML：报错且不碰原文件。
+        let bad_dir = temp_dir("hermes-bad");
+        let bad_path = bad_dir.join("config.yaml");
+        fs::write(&bad_path, "model: [unclosed\n").unwrap();
+        assert!(write_hermes(&bad_dir, "http://127.0.0.1:8777", "k", "m").is_err());
+        assert_eq!(
+            fs::read_to_string(&bad_path).unwrap(),
+            "model: [unclosed\n",
+            "解析失败时不得改写原文件"
+        );
+
+        let _ = fs::remove_dir_all(&dir);
+        let _ = fs::remove_dir_all(&yaml_dir);
+        let _ = fs::remove_dir_all(&bad_dir);
+    }
+
+    /// Hermes 的「已配置」检测必须能解析 YAML 主配置，并且认 `name` 字段。
+    #[test]
+    fn hermes_detection_parses_yaml_config() {
+        let dir = temp_dir("hermes-detect");
+        write_hermes(&dir, "http://127.0.0.1:8777", "k", "m").unwrap();
+        assert!(detect_applied(&dir.join("config.yaml"), "hermes"));
+
+        let other = temp_dir("hermes-other");
+        fs::write(
+            other.join("config.yaml"),
+            "model:\n  provider: xai-oauth\n  default: grok-4.6\n",
+        )
+        .unwrap();
+        assert!(
+            !detect_applied(&other.join("config.yaml"), "hermes"),
+            "不是 WaLiAPI 写入的 YAML 不应被误认为已配置"
+        );
+
+        let _ = fs::remove_dir_all(&dir);
+        let _ = fs::remove_dir_all(&other);
     }
 }

@@ -177,34 +177,49 @@ impl NonStreamDecoder for GeminiThenChatToMessages {
     }
 }
 
+/// Gemini 3 要求随 functionCall part 原样回传模型给的 `thoughtSignature`，否则
+/// 上游 400（`Function call is missing a thought_signature`）。三种下游协议都没有
+/// 承载它的字段，而客户端必定回传 tool call id，故附在 id 尾部：
+/// `call_<uuid>.<signature>`。
+pub(super) fn tool_call_id_with_signature(id: &str, signature: Option<&str>) -> String {
+    match signature.filter(|sig| looks_like_thought_signature(sig)) {
+        Some(sig) => format!("{id}.{sig}"),
+        None => id.to_owned(),
+    }
+}
+
+/// [`tool_call_id_with_signature`] 的逆向：拆出原始 id 与签名。
+pub(super) fn split_tool_call_id(id: &str) -> (&str, Option<&str>) {
+    match id.split_once('.') {
+        Some((base, sig)) if looks_like_thought_signature(sig) => (base, Some(sig)),
+        _ => (id, None),
+    }
+}
+
+/// 只把确实像签名的尾部当签名（base64 字符集、有足够长度），避免误伤
+/// 自带 `.` 的第三方 tool call id。
+fn looks_like_thought_signature(value: &str) -> bool {
+    value.len() >= 32
+        && value
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'+' | b'/' | b'=' | b'-' | b'_'))
+}
+
 /// Antigravity/Code Assist 不识别 Responses 的 namespace 工具 marker。
 ///
 /// 这类工具是调用方用于分组或路由的元数据，不是 Gemini
-/// `functionDeclarations` 可以表达的工具类型。这里只移除 marker，
-/// 不猜测把它转换成 MCP 或 function；其他不支持的工具仍由后续校验拒绝。
+/// Responses 的工具类型里，`namespace`（分组 marker）与 `web_search` /
+/// `file_search` / `computer_use` 等内置工具在 Gemini `functionDeclarations` 里
+/// 没有等价物，保留会让上游 400（`Gemini only supports Responses function
+/// tools`）。这里统一移除、只留 `function`，不把内置工具伪装成 function；
+/// 指向被移除工具的 `tool_choice` 一并移除，避免悬空引用。
 fn normalize_responses_for_gemini(body: &Value) -> Value {
     let tools = body.get("tools").and_then(Value::as_array);
-    let tool_choice_is_namespace = body
-        .get("tool_choice")
-        .and_then(Value::as_object)
-        .and_then(|choice| choice.get("type"))
-        .and_then(Value::as_str)
-        == Some("namespace");
-
-    if tools.is_none() && !tool_choice_is_namespace {
-        return body.clone();
-    }
-
-    let mut normalized = body.clone();
-    let Some(normalized_object) = normalized.as_object_mut() else {
-        return body.clone();
-    };
-
     let filtered_tools: Vec<Value> = tools
         .map(|items| {
             items
                 .iter()
-                .filter(|tool| tool.get("type").and_then(Value::as_str) != Some("namespace"))
+                .filter(|tool| tool.get("type").and_then(Value::as_str) == Some("function"))
                 .cloned()
                 .collect()
         })
@@ -213,24 +228,53 @@ fn normalize_responses_for_gemini(body: &Value) -> Value {
         .map(|items| items.len().saturating_sub(filtered_tools.len()))
         .unwrap_or_default();
 
-    if removed_count == 0 && !tool_choice_is_namespace {
+    let kept_names: std::collections::HashSet<&str> = filtered_tools
+        .iter()
+        .filter_map(|tool| tool.get("name").and_then(Value::as_str))
+        .collect();
+    let droppable_tool_choice = body
+        .get("tool_choice")
+        .and_then(Value::as_object)
+        .map(|choice| {
+            let ty = choice.get("type").and_then(Value::as_str);
+            match ty {
+                // 不引用具体工具的选择器可以保留。
+                Some("auto" | "none" | "required") => false,
+                // 指向函数的 tool_choice 只在函数仍存在时保留。
+                Some("function") => choice
+                    .get("name")
+                    .and_then(Value::as_str)
+                    .map(|name| !kept_names.contains(name))
+                    .unwrap_or(true),
+                // namespace 与被移除的内置工具：选择器一并移除。
+                Some(_) => true,
+                None => false,
+            }
+        })
+        .unwrap_or(false);
+
+    if removed_count == 0 && !droppable_tool_choice {
         return body.clone();
     }
 
-    if tools.is_some() {
-        if filtered_tools.is_empty() {
-            normalized_object.remove("tools");
-        } else {
-            normalized_object.insert("tools".to_owned(), Value::Array(filtered_tools));
-        }
+    let mut normalized = body.clone();
+    let Some(normalized_object) = normalized.as_object_mut() else {
+        return body.clone();
+    };
+
+    if filtered_tools.is_empty() {
+        normalized_object.remove("tools");
+    } else {
+        normalized_object.insert("tools".to_owned(), Value::Array(filtered_tools));
     }
-    if tool_choice_is_namespace {
+    if droppable_tool_choice {
         normalized_object.remove("tool_choice");
     }
 
     tracing::debug!(
-        removed_namespace_tools = removed_count,
-        "normalized unsupported namespace tools for Antigravity Gemini conversion"
+        removed_tools = removed_count,
+        dropped_tool_choice = droppable_tool_choice,
+        "normalized unsupported Responses tools for Antigravity Gemini conversion"
     );
     normalized
 }
@@ -353,21 +397,14 @@ fn validate_responses_for_gemini(body: &Value) -> Result<(), UnsupportedFeatures
                     });
                 }
             }
-            Some("reasoning") => rejected.push(super::error::RejectedField {
-                code: FeatureKind::Thinking.code().to_owned(),
-                pointer: format!("{pointer}/type"),
-                message: "Gemini Responses conversion cannot preserve reasoning items safely"
-                    .to_owned(),
-            }),
+            // 其余条目类型（`reasoning` 思考摘要、`web_search_call` 等内置调用
+            // 记录）在 Responses→Chat 转换里本就会被丢弃；Codex CLI 的历史里
+            // 很常见，不能因为历史里有就让整段请求失败。
+            Some(_) => {}
             None => rejected.push(super::error::RejectedField {
                 code: FeatureKind::UnknownBlock.code().to_owned(),
                 pointer: format!("{pointer}/type"),
                 message: "Responses input item is missing type and role".to_owned(),
-            }),
-            Some(other) => rejected.push(super::error::RejectedField {
-                code: FeatureKind::UnknownBlock.code().to_owned(),
-                pointer: format!("{pointer}/type"),
-                message: format!("unsupported Responses input item {other:?}"),
             }),
         }
     }
@@ -480,8 +517,34 @@ impl StreamDecoder for PipeGeminiToChatThen {
 
 #[cfg(test)]
 mod tests {
+    use super::encode::GEMINI_SCHEMA_KEYS;
     use super::*;
     use serde_json::json;
+
+    /// 递归校验：发给 Gemini 的 schema 不能出现白名单之外的键（上游会 400）。
+    fn assert_only_gemini_schema_keys(schema: &Value) {
+        let object = schema.as_object().expect("schema must be an object");
+        for (key, value) in object {
+            assert!(
+                GEMINI_SCHEMA_KEYS.contains(&key.as_str()),
+                "unexpected Gemini schema key: {key}"
+            );
+            match key.as_str() {
+                "properties" => {
+                    for sub in value.as_object().expect("properties").values() {
+                        assert_only_gemini_schema_keys(sub);
+                    }
+                }
+                "items" => assert_only_gemini_schema_keys(value),
+                "anyOf" => {
+                    for sub in value.as_array().expect("anyOf") {
+                        assert_only_gemini_schema_keys(sub);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
 
     #[test]
     fn chat_text_round_trip() {
@@ -605,6 +668,30 @@ mod tests {
     }
 
     #[test]
+    fn response_schema_is_sanitized_for_gemini() {
+        let req = json!({
+            "messages": [{"role": "user", "content": "hi"}],
+            "response_format": {
+                "type": "json_schema",
+                "json_schema": {
+                    "name": "item",
+                    "schema": {
+                        "$schema": "https://json-schema.org/draft/2020-12/schema",
+                        "type": "object",
+                        "additionalProperties": false,
+                        "properties": {"id": {"type": "string"}}
+                    }
+                }
+            }
+        });
+        let (encoded, _) = encode_chat_to_gemini(&req, "m").unwrap();
+        let schema = &encoded["generationConfig"]["responseSchema"];
+        assert!(schema.get("$schema").is_none());
+        assert!(schema.get("additionalProperties").is_none());
+        assert_eq!(schema["properties"]["id"]["type"], json!("string"));
+    }
+
+    #[test]
     fn remote_image_is_rejected() {
         let req = json!({
             "messages": [{
@@ -645,6 +732,229 @@ mod tests {
         )
         .unwrap_err();
         assert!(err.message.contains("SAFETY"));
+    }
+
+    /// Claude Code 的工具 input_schema 是标准 JSON Schema，带 Gemini
+    /// `Schema` 不认识的键；这些键必须被清洗掉，而不是原样发给上游。
+    #[test]
+    fn antigravity_tool_schema_drops_unsupported_json_schema_keywords() {
+        let req = json!({
+            "model": "gemini-3.8-flash-medium",
+            "max_tokens": 1024,
+            "messages": [{"role": "user", "content": "hi"}],
+            "tools": [{
+                "name": "lookup",
+                "description": "look up a value",
+                "input_schema": {
+                    "$schema": "http://json-schema.org/draft-07/schema#",
+                    "type": "object",
+                    "additionalProperties": false,
+                    "$defs": {"opt": {"type": ["string", "null"]}},
+                    "properties": {
+                        "q": {"type": "string", "examples": ["a"]},
+                        "opt": {"$ref": "#/$defs/opt"}
+                    },
+                    "required": ["q"]
+                }
+            }]
+        });
+        let (encoded, _) = MESSAGES_TO_GEMINI
+            .encode_request(&req, "gemini-3.8-flash-medium")
+            .unwrap();
+        let parameters = &encoded["tools"][0]["functionDeclarations"][0]["parameters"];
+
+        assert!(parameters.get("$schema").is_none());
+        assert!(parameters.get("additionalProperties").is_none());
+        assert!(parameters.get("$defs").is_none());
+        assert!(parameters["properties"]["q"].get("examples").is_none());
+        assert_eq!(parameters["properties"]["q"]["type"], json!("string"));
+        assert_eq!(parameters["required"], json!(["q"]));
+        // `$ref` 内联后仍保留类型：draft 的 type 数组归一为单类型 + nullable。
+        assert_eq!(parameters["properties"]["opt"]["type"], json!("string"));
+        assert_eq!(parameters["properties"]["opt"]["nullable"], json!(true));
+        assert_only_gemini_schema_keys(parameters);
+    }
+
+    /// 真实 Claude Code / MCP 风格的深层 schema 也不得漏到上游。
+    #[test]
+    fn deeply_nested_json_schema_is_fully_sanitized() {
+        let req = json!({
+            "model": "gemini-3.8-flash-medium",
+            "max_tokens": 512,
+            "messages": [{"role": "user", "content": "hi"}],
+            "tools": [{
+                "name": "mcp__demo__run",
+                "description": "run a demo action",
+                "input_schema": {
+                    "$schema": "http://json-schema.org/draft-07/schema#",
+                    "type": "object",
+                    "additionalProperties": false,
+                    "$defs": {
+                        "target": {
+                            "type": "object",
+                            "properties": {"path": {"type": "string", "format": "uri"}},
+                            "required": ["path"],
+                            "additionalProperties": false
+                        }
+                    },
+                    "properties": {
+                        "targets": {
+                            "type": "array",
+                            "items": {"$ref": "#/$defs/target"}
+                        },
+                        "mode": {"type": ["string", "null"], "enum": ["fast", null]},
+                        "opts": {
+                            "anyOf": [
+                                {"type": "object", "properties": {"a": {"type": "integer", "exclusiveMinimum": 0}}},
+                                {"type": "string", "pattern": "^[a-z]+$"}
+                            ]
+                        }
+                    },
+                    "required": ["targets"],
+                    "oneOf": [{"required": ["mode"]}]
+                }
+            }]
+        });
+        let (encoded, _) = MESSAGES_TO_GEMINI
+            .encode_request(&req, "gemini-3.8-flash-medium")
+            .unwrap();
+        let parameters = &encoded["tools"][0]["functionDeclarations"][0]["parameters"];
+
+        assert_only_gemini_schema_keys(parameters);
+        // `$ref` 内联保住了类型信息，而不是被删成空 schema。
+        assert_eq!(
+            parameters["properties"]["targets"]["items"]["properties"]["path"]["type"],
+            json!("string")
+        );
+        assert_eq!(parameters["properties"]["mode"]["nullable"], json!(true));
+    }
+
+    /// Codex CLI 默认工具集里的 Responses 内置工具（`web_search` 等）在 Gemini
+    /// 里没有等价物：应移除并保留其余 function 工具，而不是让整个请求 400。
+    #[test]
+    fn responses_builtin_tools_are_dropped_for_gemini() {
+        let req = json!({
+            "model": "gemini-3.8-flash-medium",
+            "input": [{"type": "message", "role": "user", "content": [{"type": "input_text", "text": "hi"}]}],
+            "tools": [
+                {"type": "function", "name": "exec_command", "parameters": {"type": "object", "properties": {}}},
+                {"type": "namespace", "name": "multi_agent_v1", "tools": []},
+                {"type": "web_search"}
+            ],
+            "tool_choice": "auto"
+        });
+        let (encoded, _) = RESPONSES_TO_GEMINI
+            .encode_request(&req, "gemini-3.8-flash-medium")
+            .unwrap();
+        let decls = encoded["tools"][0]["functionDeclarations"]
+            .as_array()
+            .unwrap();
+        assert_eq!(decls.len(), 1, "只应保留 function 工具");
+        assert_eq!(decls[0]["name"], json!("exec_command"));
+        assert_eq!(
+            encoded["toolConfig"]["functionCallingConfig"]["mode"],
+            "AUTO"
+        );
+    }
+
+    /// Codex CLI 路径：Gemini 的 thoughtSignature 寄生在工具调用 id 上，
+    /// Responses 协议里该 id 就是 `call_id`，回传时必须还能还原到
+    /// functionCall part，否则 Gemini 3 会以缺签名 400。
+    #[test]
+    fn responses_call_id_carries_thought_signature_back_to_gemini() {
+        const SIGNATURE: &str = "cmVzcG9uc2VzLXByb3RvY29sLXNpZ25hdHVyZS1sb25nIGVub3VnaA==";
+        let call_id = format!("call_1.{SIGNATURE}");
+        let req = json!({
+            "model": "gemini-3.8-flash-medium",
+            "input": [
+                {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "hi"}]},
+                {"type": "function_call", "id": "fc_1", "call_id": call_id, "name": "Read", "arguments": "{\"path\":\"/a\"}"},
+                {"type": "function_call_output", "call_id": call_id, "output": "ok"}
+            ],
+            "tools": [{"type": "function", "name": "Read", "parameters": {"type": "object"}}]
+        });
+        let (encoded, _) = RESPONSES_TO_GEMINI
+            .encode_request(&req, "gemini-3.8-flash-medium")
+            .unwrap();
+
+        let parts = encoded["contents"][1]["parts"]
+            .as_array()
+            .expect("助手消息应带 parts");
+        assert_eq!(parts[0]["functionCall"]["name"], json!("Read"));
+        assert_eq!(parts[0]["thoughtSignature"], json!(SIGNATURE));
+    }
+
+    /// Codex CLI 的真实请求形状（namespace / web_search 工具、text、reasoning、
+    /// include、prompt_cache_key、历史里的 function_call/reasoning items）
+    /// 必须能整体转到 Gemini，而不是被任一环节拒绝。
+    #[test]
+    fn codex_cli_responses_request_converts_to_gemini() {
+        let req = json!({
+            "model": "gemini-3.8-flash-medium",
+            "instructions": "be brief",
+            "input": [
+                {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "hi"}]},
+                {
+                    "type": "function_call",
+                    "id": "call_1",
+                    "call_id": "call_1",
+                    "name": "exec_command",
+                    "arguments": "{\"cmd\":\"ls\"}"
+                },
+                {"type": "function_call_output", "call_id": "call_1", "output": "ok"},
+                {"type": "reasoning", "summary": [{"type": "summary_text", "text": "thought"}]}
+            ],
+            "tools": [
+                {"type": "function", "name": "exec_command", "parameters": {"type": "object", "properties": {}}},
+                {"type": "namespace", "name": "multi_agent_v1", "tools": []},
+                {"type": "web_search"}
+            ],
+            "tool_choice": "auto",
+            "parallel_tool_calls": false,
+            "store": false,
+            "include": ["reasoning.encrypted_content"],
+            "prompt_cache_key": "k",
+            "text": {"verbosity": "medium"},
+            "reasoning": {"effort": "high", "summary": "auto"},
+            "stream": true
+        });
+        let (encoded, _) = RESPONSES_TO_GEMINI
+            .encode_request(&req, "gemini-3.8-flash-medium")
+            .expect("Codex CLI 形状的 Responses 请求必须能转到 Gemini");
+
+        let decls = encoded["tools"][0]["functionDeclarations"]
+            .as_array()
+            .unwrap();
+        assert_eq!(decls.len(), 1);
+        assert_eq!(decls[0]["name"], json!("exec_command"));
+        assert_eq!(encoded["contents"][0]["role"], json!("user"));
+        assert!(
+            encoded.get("systemInstruction").is_some(),
+            "instructions 应转成 systemInstruction"
+        );
+    }
+
+    /// tool_choice 指向被移除的工具时不能留下悬空引用。
+    #[test]
+    fn responses_tool_choice_for_dropped_tool_is_removed() {
+        let req = json!({
+            "model": "m",
+            "input": [{"type": "message", "role": "user", "content": [{"type": "input_text", "text": "hi"}]}],
+            "tools": [
+                {"type": "function", "name": "keep_me", "parameters": {"type": "object", "properties": {}}},
+                {"type": "web_search"}
+            ],
+            "tool_choice": {"type": "web_search"}
+        });
+        let (encoded, _) = RESPONSES_TO_GEMINI.encode_request(&req, "m").unwrap();
+        assert!(encoded.get("toolConfig").is_none());
+        assert_eq!(
+            encoded["tools"][0]["functionDeclarations"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
     }
 
     #[test]
@@ -705,17 +1015,39 @@ mod tests {
         assert!(encoded.get("toolConfig").is_none());
     }
 
+    /// 内置工具（`web_search_preview` 等）在 Gemini 里没有等价物：移除后
+    /// 请求仍可转发（Codex CLI 不会因此完全不可用），而不是整体 400。
     #[test]
-    fn responses_builtin_tools_are_rejected_before_encoding() {
+    fn responses_builtin_tools_are_dropped_before_encoding() {
         let req = json!({
             "model": "gemini-2.5-flash",
             "input": "hi",
             "tools": [{"type": "web_search_preview"}]
         });
-        let err = RESPONSES_TO_GEMINI
+        let (encoded, _) = RESPONSES_TO_GEMINI
             .encode_request(&req, "gemini-2.5-flash")
-            .unwrap_err();
-        assert!(err.json_pointers.iter().any(|p| p == "/tools/0/type"));
+            .unwrap();
+        assert!(encoded.get("tools").is_none());
+
+        // 同一请求里的 function 工具必须存活。
+        let mixed = json!({
+            "model": "gemini-2.5-flash",
+            "input": "hi",
+            "tools": [
+                {"type": "function", "name": "lookup", "parameters": {"type": "object", "properties": {}}},
+                {"type": "web_search_preview"}
+            ]
+        });
+        let (encoded, _) = RESPONSES_TO_GEMINI
+            .encode_request(&mixed, "gemini-2.5-flash")
+            .unwrap();
+        assert_eq!(
+            encoded["tools"][0]["functionDeclarations"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
     }
 
     #[test]
@@ -823,6 +1155,188 @@ mod tests {
             .feed(b"data: {\"response\":{\"promptFeedback\":{\"blockReason\":\"SAFETY\",\"blockReasonMessage\":\"blocked\"}}}\n\n")
             .unwrap_err();
         assert!(err.message.contains("SAFETY"));
+    }
+
+    /// Gemini 3 的 thoughtSignature 必须经下游 tool call id 往返后回到 functionCall part。
+    #[test]
+    fn thought_signature_round_trips_through_tool_call_id() {
+        const SIGNATURE: &str = "Q3VyaW91c2x5LWdlbmVyYXRlZC1zaWduYXR1cmUtZm9yLXJvdW5kLXRyaXA=";
+        let gemini = json!({
+            "candidates": [{
+                "content": { "parts": [{
+                    "functionCall": { "name": "Read", "args": {"file_path": "/tmp/a"} },
+                    "thoughtSignature": SIGNATURE
+                }]},
+                "finishReason": "STOP"
+            }]
+        });
+        let ctx = ConversionContext::new("id", "m", false);
+        let (chat, _) = decode_gemini_to_chat(&gemini, &ctx).unwrap();
+        let tool_call = chat["choices"][0]["message"]["tool_calls"][0].clone();
+        let id = tool_call["id"].as_str().unwrap().to_owned();
+        assert!(id.ends_with(SIGNATURE), "id 未携带签名: {id}");
+
+        // 把同一条 tool call 原样回传，functionCall part 必须带回 thoughtSignature。
+        let echo = json!({
+            "messages": [
+                {"role": "assistant", "tool_calls": [tool_call]},
+                {"role": "tool", "tool_call_id": id, "content": "{}"}
+            ],
+            "tools": [{
+                "type": "function",
+                "function": {"name": "Read", "parameters": {"type": "object"}}
+            }]
+        });
+        let (encoded, _) = encode_chat_to_gemini(&echo, "m").unwrap();
+        let part = &encoded["contents"][0]["parts"][0];
+        assert_eq!(part["thoughtSignature"], json!(SIGNATURE));
+        assert_eq!(part["functionCall"]["name"], json!("Read"));
+    }
+
+    /// 流式响应同样要把签名带在 tool call id 上。
+    #[test]
+    fn stream_tool_call_carries_thought_signature() {
+        const SIGNATURE: &str =
+            "c3RyZWFtaW5nLXNpZ25hdHVyZS1sb25nLWVub3VnaC10by1iZS1hLXNpZ25hdHVyZQ==";
+        let ctx = ConversionContext::new("chatcmpl-1", "gemini-3.8-flash-medium", true);
+        let mut decoder = GeminiToChatStreamDecoder::boxed(&ctx);
+        let chunk = json!({
+            "response": {
+                "candidates": [{
+                    "content": {
+                        "role": "model",
+                        "parts": [{
+                            "functionCall": {"name": "Read", "args": {"file_path": "/a"}},
+                            "thoughtSignature": SIGNATURE
+                        }]
+                    },
+                    "finishReason": "STOP"
+                }]
+            }
+        });
+        let frame = format!("data: {chunk}\n\n");
+        let chunks = decoder.feed(frame.as_bytes()).unwrap();
+        let joined = chunks.join("");
+        assert!(joined.contains(SIGNATURE), "流式 tool call id 未携带签名");
+        assert!(joined.contains("\"finish_reason\":\"tool_calls\""));
+    }
+
+    /// Claude Code 实走路径：Gemini 响应 → Messages 的 tool_use → 客户端回传 → Gemini 请求。
+    #[test]
+    fn thought_signature_survives_the_messages_round_trip() {
+        const SIGNATURE: &str =
+            "bWVzc2FnZXMtcHJvdG9jb2wtc2lnbmF0dXJlLWxvbmctZW5vdWdoLWZvci10ZXN0cyE=";
+        let gemini = json!({
+            "candidates": [{
+                "content": {
+                    "role": "model",
+                    "parts": [{
+                        "functionCall": {"name": "Read", "args": {"file_path": "/tmp/a"}},
+                        "thoughtSignature": SIGNATURE
+                    }]
+                },
+                "finishReason": "STOP"
+            }]
+        });
+        let ctx = ConversionContext::new("id", "gemini-3.8-flash-medium", false);
+        let (chat, _) = decode_gemini_to_chat(&gemini, &ctx).unwrap();
+        let messages = super::chat::decode_chat_response_to_messages(&chat, &ctx).unwrap();
+        let tool_use = messages["content"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|block| block["type"] == json!("tool_use"))
+            .expect("Messages 响应应含 tool_use")
+            .clone();
+        let id = tool_use["id"].as_str().unwrap().to_owned();
+        assert!(id.ends_with(SIGNATURE), "tool_use.id 未携带签名: {id}");
+
+        let echo = json!({
+            "model": "gemini-3.8-flash-medium",
+            "max_tokens": 256,
+            "messages": [
+                {"role": "assistant", "content": [tool_use]},
+                {"role": "user", "content": [{
+                    "type": "tool_result", "tool_use_id": id, "content": "ok"
+                }]}
+            ],
+            "tools": [{
+                "name": "Read",
+                "description": "read a file",
+                "input_schema": {"type": "object", "properties": {"file_path": {"type": "string"}}}
+            }]
+        });
+        let (encoded, _) = MESSAGES_TO_GEMINI
+            .encode_request(&echo, "gemini-3.8-flash-medium")
+            .unwrap();
+        let part = &encoded["contents"][0]["parts"][0];
+        assert_eq!(part["thoughtSignature"], json!(SIGNATURE));
+        assert_eq!(part["functionCall"]["name"], json!("Read"));
+    }
+
+    /// Claude Code 的安全分类器请求会带 stop_sequences（非流式），必须能转给 Gemini。
+    #[test]
+    fn anthropic_stop_sequences_map_to_gemini_stop_sequences() {
+        let req = json!({
+            "model": "gemini-3.8-flash-medium",
+            "max_tokens": 64,
+            "stop_sequences": ["</block>"],
+            "messages": [{"role": "user", "content": "hi"}]
+        });
+        let (encoded, _) = MESSAGES_TO_GEMINI
+            .encode_request(&req, "gemini-3.8-flash-medium")
+            .unwrap();
+        assert_eq!(
+            encoded["generationConfig"]["stopSequences"],
+            json!(["</block>"])
+        );
+    }
+
+    #[test]
+    fn chat_stop_maps_to_stop_sequences_and_respects_the_limit() {
+        let single = json!({
+            "messages": [{"role": "user", "content": "hi"}],
+            "stop": "END"
+        });
+        let (encoded, _) = encode_chat_to_gemini(&single, "m").unwrap();
+        assert_eq!(encoded["generationConfig"]["stopSequences"], json!(["END"]));
+
+        // Gemini 只接受最多 5 个序列，超出时必须报错而不是静默截断。
+        let many = json!({
+            "messages": [{"role": "user", "content": "hi"}],
+            "stop": ["1", "2", "3", "4", "5", "6"]
+        });
+        let err = encode_chat_to_gemini(&many, "m").unwrap_err();
+        assert!(err.json_pointers.iter().any(|p| p == "/stop"));
+
+        // 空数组表示“不限制”，不产生 stopSequences。
+        let empty = json!({
+            "messages": [{"role": "user", "content": "hi"}],
+            "stop": []
+        });
+        let (encoded, _) = encode_chat_to_gemini(&empty, "m").unwrap();
+        assert!(encoded
+            .get("generationConfig")
+            .and_then(|config| config.get("stopSequences"))
+            .is_none());
+    }
+
+    /// 只有看起来确实像签名的尾部才会被当作签名，自带 `.` 的 id 不受影响。
+    #[test]
+    fn only_signature_shaped_suffixes_are_treated_as_signatures() {
+        let base = "call_0123456789abcdef0123456789abcdef";
+        let signature = "A".repeat(40);
+        assert_eq!(
+            tool_call_id_with_signature(base, Some(&signature)),
+            format!("{base}.{signature}")
+        );
+        assert_eq!(
+            split_tool_call_id(&format!("{base}.{signature}")),
+            (base, Some(signature.as_str()))
+        );
+        assert_eq!(tool_call_id_with_signature(base, None), base);
+        assert_eq!(split_tool_call_id("call_1.foo"), ("call_1.foo", None));
+        assert_eq!(split_tool_call_id(base), (base, None));
     }
 
     #[test]

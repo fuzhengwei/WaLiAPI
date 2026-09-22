@@ -20,6 +20,33 @@ impl IdentityDirection {
     }
 }
 
+/// Responses 的 `function_call` 条目 id 必须带 `fc_` 前缀，官方上游回放历史时会
+/// 校验（`Invalid 'input[16].id' ... Expected an ID that begins with 'fc'`）。
+/// 流式 Chat→Responses 曾把上游 tool_call id 写进该字段，这类条目已落进客户端
+/// 旧会话，因此转发前统一规范成 `fc_...`：只改 id，`call_id` 原样保留。
+fn normalize_responses_function_call_item_ids(request: &mut Value) {
+    let Some(items) = request.get_mut("input").and_then(Value::as_array_mut) else {
+        return;
+    };
+    for item in items.iter_mut() {
+        if item.get("type").and_then(Value::as_str) != Some("function_call") {
+            continue;
+        }
+        let current = item.get("id").and_then(Value::as_str).unwrap_or("");
+        if current.starts_with("fc_") {
+            continue;
+        }
+        let normalized = match current.strip_prefix("call_") {
+            // `call_xxx` → `fc_xxx`：确定且可重复，同一轮重试不会换 id。
+            Some(rest) if !rest.is_empty() => format!("fc_{rest}"),
+            _ => format!("fc_{}", uuid::Uuid::new_v4().simple()),
+        };
+        if let Some(object) = item.as_object_mut() {
+            object.insert("id".to_owned(), Value::String(normalized));
+        }
+    }
+}
+
 impl CodecDirection for IdentityDirection {
     fn id(&self) -> CodecId {
         CodecId::Native
@@ -56,6 +83,9 @@ impl CodecDirection for IdentityDirection {
         // default-streaming upstreams into non-stream mode.
         if !object.contains_key("stream") {
             object.insert("stream".to_owned(), Value::Bool(false));
+        }
+        if self.protocol == Protocol::Responses {
+            normalize_responses_function_call_item_ids(&mut encoded);
         }
         let request_id = request
             .get("id")
