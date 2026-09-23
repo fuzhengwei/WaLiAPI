@@ -364,8 +364,10 @@ fn convert_message(
                     }
                     // Gemini 3 要求原样回传 functionCall 上的 thoughtSignature，
                     // 签名在 tool call id 尾部往返（见 `tool_call_id_with_signature`）。
-                    let mut part = json!({ "functionCall": { "name": name, "args": args } });
-                    if let (_, Some(signature)) = super::split_tool_call_id(id) {
+                    let (call_id, signature) = super::split_tool_call_id(id);
+                    let mut part =
+                        json!({ "functionCall": { "id": call_id, "name": name, "args": args } });
+                    if let Some(signature) = signature {
                         part["thoughtSignature"] = json!(signature);
                     }
                     parts.push(part);
@@ -408,7 +410,7 @@ fn convert_message(
             };
             contents.push(json!({
                 "role": "user",
-                "parts": [{ "functionResponse": { "name": name, "response": response } }]
+                "parts": [{ "functionResponse": { "id": super::split_tool_call_id(tool_call_id).0, "name": name, "response": response } }]
             }));
             Ok(())
         }

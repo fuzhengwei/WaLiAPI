@@ -15,7 +15,7 @@ use super::{
     LoginResult, LoginRuntime, Provider, ProviderError, ProviderKind, ProviderLoginContext,
     ProviderModels, ProviderPayload, ProviderRequest, RefreshedPayload,
 };
-use crate::db::models::{AuthAccount, ModelState};
+use crate::db::models::{AuthAccount, ModelState, QuotaLimit, QuotaState, QuotaWindow};
 use std::time::Duration;
 
 // 常量名称保留 Gemini 以匹配内部 provider；实际上游是 Antigravity Code Assist。
@@ -105,6 +105,29 @@ impl GeminiProvider {
             .filter(|s| !s.is_empty())
             .map(str::to_owned)
             .ok_or(ProviderError::Protocol)
+    }
+
+    async fn available_models(
+        &self,
+        account: &AuthAccount,
+        payload: &ProviderPayload,
+    ) -> Result<Value, ProviderError> {
+        let access = Self::access_token(payload)?;
+        let project = Self::project_id(account)?;
+        let response = self
+            .client
+            .post(self.assist_url(MODELS_PATH))
+            .bearer_auth(access)
+            .header(CONTENT_TYPE, "application/json")
+            .header(reqwest::header::USER_AGENT, user_agent())
+            .json(&json!({ "project": project }))
+            .send()
+            .await
+            .map_err(|_| ProviderError::Retryable)?;
+        if !response.status().is_success() {
+            return Err(classify_http(response.status()));
+        }
+        response.json().await.map_err(|_| ProviderError::Protocol)
     }
 
     async fn complete_login(&self, tokens: OAuthTokens) -> Result<LoginResult, ProviderError> {
@@ -420,6 +443,51 @@ fn models_from_response(body: &Value) -> Result<ProviderModels, ProviderError> {
         .collect())
 }
 
+fn quota_from_models_response(body: &Value) -> Option<QuotaState> {
+    let models = body.get("models")?.as_object()?;
+    let mut limits = Vec::new();
+    for (id, model) in models {
+        let Some(info) = model.get("quotaInfo") else {
+            continue;
+        };
+        let Some(remaining) = info.get("remainingFraction").and_then(Value::as_f64) else {
+            continue;
+        };
+        if !remaining.is_finite() || !(0.0..=1.0).contains(&remaining) {
+            continue;
+        }
+        limits.push(QuotaLimit {
+            limit_id: id.clone(),
+            limit_name: Some(
+                model
+                    .get("displayName")
+                    .and_then(Value::as_str)
+                    .filter(|name| !name.is_empty())
+                    .unwrap_or(id)
+                    .to_owned(),
+            ),
+            primary: Some(QuotaWindow {
+                used_percent: Some((1.0 - remaining) * 100.0),
+                window_minutes: None,
+                reset_at: info
+                    .get("resetTime")
+                    .and_then(Value::as_str)
+                    .filter(|time| !time.is_empty())
+                    .map(str::to_owned),
+            }),
+            secondary: None,
+            credits: None,
+        });
+    }
+    if limits.is_empty() {
+        return None;
+    }
+    Some(QuotaState {
+        limits,
+        ..QuotaState::default()
+    })
+}
+
 fn model_from_body(body: &Value) -> String {
     body.get("model")
         .and_then(Value::as_str)
@@ -554,24 +622,18 @@ impl Provider for GeminiProvider {
         account: &AuthAccount,
         payload: &ProviderPayload,
     ) -> Result<ProviderModels, ProviderError> {
-        let access = Self::access_token(payload)?;
-        let project = Self::project_id(account)?;
-        let response = self
-            .client
-            .post(self.assist_url(MODELS_PATH))
-            .bearer_auth(access)
-            .header(CONTENT_TYPE, "application/json")
-            .header(reqwest::header::USER_AGENT, user_agent())
-            .json(&json!({ "project": project }))
-            .send()
-            .await
-            .map_err(|_| ProviderError::Retryable)?;
-        if !response.status().is_success() {
-            return Err(classify_http(response.status()));
-        }
-        let body: Value = response.json().await.map_err(|_| ProviderError::Protocol)?;
+        let body = self.available_models(account, payload).await?;
         // fetchAvailableModels 成功但没有可解析模型时必须失败关闭，不能伪造静态目录。
         models_from_response(&body)
+    }
+
+    async fn fetch_quota(
+        &self,
+        account: &AuthAccount,
+        payload: &ProviderPayload,
+    ) -> Result<Option<QuotaState>, ProviderError> {
+        let body = self.available_models(account, payload).await?;
+        Ok(quota_from_models_response(&body))
     }
 }
 
@@ -664,8 +726,13 @@ mod tests {
                         s.model_requests.lock().unwrap().push((body, headers));
                         Json(json!({
                             "models": {
-                                "gemini-2.5-flash": {},
-                                "gemini-3-pro-high": {}
+                                "gemini-2.5-flash": {
+                                    "displayName": "Gemini Flash",
+                                    "quotaInfo": {"remainingFraction": 0.25, "resetTime": "2026-09-23T14:51:42Z"}
+                                },
+                                "gemini-3-pro-high": {
+                                    "quotaInfo": {"remainingFraction": 1.0}
+                                }
                             }
                         }))
                     },
@@ -922,6 +989,62 @@ mod tests {
             requests[0].1.get("user-agent").unwrap().to_str().unwrap(),
             user_agent()
         );
+    }
+
+    #[tokio::test]
+    async fn fetch_quota_reads_antigravity_model_limits() {
+        let (provider, state, _) = mock_assist(json!({})).await;
+        let quota = provider
+            .fetch_quota(&account("p"), &payload())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(!quota.exceeded);
+        assert_eq!(quota.limits.len(), 2);
+        assert_eq!(quota.limits[0].limit_id, "gemini-2.5-flash");
+        assert_eq!(quota.limits[0].limit_name.as_deref(), Some("Gemini Flash"));
+        assert_eq!(
+            quota.limits[0].primary.as_ref().unwrap().used_percent,
+            Some(75.0)
+        );
+        assert_eq!(
+            quota.limits[0]
+                .primary
+                .as_ref()
+                .unwrap()
+                .reset_at
+                .as_deref(),
+            Some("2026-09-23T14:51:42Z")
+        );
+        assert_eq!(
+            quota.limits[1].primary.as_ref().unwrap().used_percent,
+            Some(0.0)
+        );
+        assert_eq!(
+            state.model_requests.lock().unwrap()[0].0,
+            json!({"project": "p"})
+        );
+    }
+
+    #[test]
+    fn quota_parser_ignores_missing_and_invalid_fractions() {
+        let quota = quota_from_models_response(&json!({
+            "models": {
+                "missing": {},
+                "negative": {"quotaInfo": {"remainingFraction": -0.1}},
+                "too_large": {"quotaInfo": {"remainingFraction": 1.1}},
+                "zero": {"quotaInfo": {"remainingFraction": 0.0}}
+            }
+        }))
+        .unwrap();
+        assert_eq!(quota.limits.len(), 1);
+        assert_eq!(quota.limits[0].limit_id, "zero");
+        assert_eq!(
+            quota.limits[0].primary.as_ref().unwrap().used_percent,
+            Some(100.0)
+        );
+        assert!(!quota.exceeded);
+        assert!(quota_from_models_response(&json!({"models": {"empty": {}}})).is_none());
     }
 
     #[test]

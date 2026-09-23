@@ -604,8 +604,50 @@ mod tests {
             "lookup"
         );
         assert_eq!(
+            encoded["contents"][1]["parts"][0]["functionCall"]["id"],
+            "c1"
+        );
+        assert_eq!(
             encoded["contents"][2]["parts"][0]["functionResponse"]["name"],
             "lookup"
+        );
+        assert_eq!(
+            encoded["contents"][2]["parts"][0]["functionResponse"]["id"],
+            "c1"
+        );
+    }
+
+    #[test]
+    fn responses_parallel_tool_calls_keep_distinct_ids_for_antigravity() {
+        let request = json!({
+            "model": "claude-sonnet-4.6",
+            "input": [
+                {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "run both"}]},
+                {"type": "function_call", "id": "fc_1", "call_id": "call_first", "name": "exec_command", "arguments": "{}"},
+                {"type": "function_call", "id": "fc_2", "call_id": "call_second", "name": "exec_command", "arguments": "{}"},
+                {"type": "function_call_output", "call_id": "call_first", "output": "one"},
+                {"type": "function_call_output", "call_id": "call_second", "output": "two"}
+            ],
+            "tools": [{"type": "function", "name": "exec_command", "parameters": {"type": "object"}}]
+        });
+        let (encoded, _) = RESPONSES_TO_GEMINI
+            .encode_request(&request, "claude-sonnet-4.6")
+            .unwrap();
+        assert_eq!(
+            encoded["contents"][1]["parts"][0]["functionCall"]["id"],
+            "call_first"
+        );
+        assert_eq!(
+            encoded["contents"][1]["parts"][1]["functionCall"]["id"],
+            "call_second"
+        );
+        assert_eq!(
+            encoded["contents"][2]["parts"][0]["functionResponse"]["id"],
+            "call_first"
+        );
+        assert_eq!(
+            encoded["contents"][3]["parts"][0]["functionResponse"]["id"],
+            "call_second"
         );
     }
 
@@ -1164,7 +1206,7 @@ mod tests {
         let gemini = json!({
             "candidates": [{
                 "content": { "parts": [{
-                    "functionCall": { "name": "Read", "args": {"file_path": "/tmp/a"} },
+                    "functionCall": { "id": "call_original", "name": "Read", "args": {"file_path": "/tmp/a"} },
                     "thoughtSignature": SIGNATURE
                 }]},
                 "finishReason": "STOP"
@@ -1174,6 +1216,7 @@ mod tests {
         let (chat, _) = decode_gemini_to_chat(&gemini, &ctx).unwrap();
         let tool_call = chat["choices"][0]["message"]["tool_calls"][0].clone();
         let id = tool_call["id"].as_str().unwrap().to_owned();
+        assert!(id.starts_with("call_original."));
         assert!(id.ends_with(SIGNATURE), "id 未携带签名: {id}");
 
         // 把同一条 tool call 原样回传，functionCall part 必须带回 thoughtSignature。
@@ -1190,7 +1233,12 @@ mod tests {
         let (encoded, _) = encode_chat_to_gemini(&echo, "m").unwrap();
         let part = &encoded["contents"][0]["parts"][0];
         assert_eq!(part["thoughtSignature"], json!(SIGNATURE));
+        assert_eq!(part["functionCall"]["id"], "call_original");
         assert_eq!(part["functionCall"]["name"], json!("Read"));
+        assert_eq!(
+            encoded["contents"][1]["parts"][0]["functionResponse"]["id"],
+            "call_original"
+        );
     }
 
     /// 流式响应同样要把签名带在 tool call id 上。
@@ -1206,7 +1254,7 @@ mod tests {
                     "content": {
                         "role": "model",
                         "parts": [{
-                            "functionCall": {"name": "Read", "args": {"file_path": "/a"}},
+                            "functionCall": {"id": "call_stream", "name": "Read", "args": {"file_path": "/a"}},
                             "thoughtSignature": SIGNATURE
                         }]
                     },
@@ -1217,6 +1265,7 @@ mod tests {
         let frame = format!("data: {chunk}\n\n");
         let chunks = decoder.feed(frame.as_bytes()).unwrap();
         let joined = chunks.join("");
+        assert!(joined.contains("call_stream."));
         assert!(joined.contains(SIGNATURE), "流式 tool call id 未携带签名");
         assert!(joined.contains("\"finish_reason\":\"tool_calls\""));
     }
