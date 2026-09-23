@@ -24,9 +24,14 @@ const MODELS_PATH: &str = "models";
 // `/models` is a Codex client endpoint, not a WaLiAPI endpoint.  The backend
 // filters its catalog by this value, so using our own application version (for
 // example `0.1.7`) can legitimately produce an empty model list.
-const CODEX_CLIENT_VERSION: &str = "0.147.0";
+// ChatGPT 按 client_version 门控 Codex 模型目录。0.147.0 只下发 GPT-5.6，
+// 0.156.1 起包含 GPT-6 系列；该值应与当前 Codex CLI 协议版本同步。
+const CODEX_CLIENT_VERSION: &str = "0.156.1";
 const CODEX_ORIGINATOR: &str = "codex_cli_rs";
-const CODEX_USER_AGENT: &str = "codex_cli_rs/0.147.0";
+
+fn codex_user_agent() -> String {
+    format!("{CODEX_ORIGINATOR}/{CODEX_CLIENT_VERSION}")
+}
 
 /// The sole Codex provider implementation.  `with_backend_base` is intentionally
 /// test-only so production calls cannot be redirected by frontend/downstream data.
@@ -129,7 +134,8 @@ impl CodexProvider {
         );
         headers.insert(
             header::USER_AGENT,
-            header::HeaderValue::from_static(CODEX_USER_AGENT),
+            header::HeaderValue::from_str(&codex_user_agent())
+                .map_err(|_| ProviderError::InvalidPayload)?,
         );
         headers.insert(
             header::HeaderName::from_static("originator"),
@@ -246,7 +252,8 @@ impl Provider for CodexProvider {
         );
         headers.insert(
             header::USER_AGENT,
-            header::HeaderValue::from_static(CODEX_USER_AGENT),
+            header::HeaderValue::from_str(&codex_user_agent())
+                .map_err(|_| ProviderError::InvalidPayload)?,
         );
         let response = self
             .client
@@ -643,7 +650,7 @@ fn parse_reset_at(value: &str) -> Option<DateTime<Utc>> {
 #[cfg(test)]
 mod tests {
     use std::sync::{
-        atomic::{AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
         Arc,
     };
 
@@ -668,6 +675,7 @@ mod tests {
         refreshes: Arc<AtomicUsize>,
         requests: Arc<Mutex<Vec<(HeaderMap, Value)>>>,
         model_queries: Arc<Mutex<Vec<Option<String>>>>,
+        version_gated_models: Arc<AtomicBool>,
         statuses: Arc<Mutex<Vec<StatusCode>>>,
         models_status: Arc<Mutex<StatusCode>>,
     }
@@ -693,11 +701,8 @@ mod tests {
         headers: HeaderMap,
     ) -> impl IntoResponse {
         let status = *state.models_status.lock().await;
-        state
-            .model_queries
-            .lock()
-            .await
-            .push(uri.query().map(str::to_owned));
+        let query = uri.query().map(str::to_owned);
+        state.model_queries.lock().await.push(query.clone());
         state
             .requests
             .lock()
@@ -705,7 +710,18 @@ mod tests {
             .push((headers, serde_json::json!({})));
         // This is the native Codex schema: model identity is `slug`, not the
         // OpenAI-compatible `data[].id` shape.
-        (status, Json(json!({"models": [{"slug": "gpt-test"}]})))
+        let slug = if state.version_gated_models.load(Ordering::SeqCst) {
+            // 真实上游按 client_version 门控模型目录：0.147.0 只返回 GPT-5.6，
+            // 当前 Codex 0.156.1 才会下发 GPT-6。
+            if query.as_deref() == Some("client_version=0.156.1") {
+                "gpt-6-sol"
+            } else {
+                "gpt-5.6-sol"
+            }
+        } else {
+            "gpt-test"
+        };
+        (status, Json(json!({"models": [{"slug": slug}]})))
     }
 
     async fn refresh_token(State(state): State<MockState>) -> impl IntoResponse {
@@ -1087,7 +1103,7 @@ mod tests {
         assert_eq!(headers[header::AUTHORIZATION], "Bearer fixture-access");
         assert_eq!(headers["x-openai-actor-authorization"], "trusted-actor");
         assert_eq!(headers[header::ACCEPT], "application/json");
-        assert_eq!(headers[header::USER_AGENT], CODEX_USER_AGENT);
+        assert_eq!(headers[header::USER_AGENT], codex_user_agent());
         assert_eq!(headers["originator"], CODEX_ORIGINATOR);
         assert_eq!(headers["chatgpt-account-id"], "remote");
         drop(requests);
@@ -1095,6 +1111,16 @@ mod tests {
             state.model_queries.lock().await.as_slice(),
             [Some(format!("client_version={CODEX_CLIENT_VERSION}"))]
         );
+    }
+
+    #[tokio::test]
+    async fn current_client_version_unlocks_gpt6_catalog() {
+        let (provider, state) = provider(vec![]).await;
+        state.version_gated_models.store(true, Ordering::SeqCst);
+
+        let models = provider.list_models(&account(), &payload()).await.unwrap();
+
+        assert_eq!(models[0].id, "gpt-6-sol");
     }
 
     async fn repository() -> Arc<crate::db::repository::Repository> {

@@ -20,29 +20,86 @@ impl IdentityDirection {
     }
 }
 
-/// Responses 的 `function_call` 条目 id 必须带 `fc_` 前缀，官方上游回放历史时会
-/// 校验（`Invalid 'input[16].id' ... Expected an ID that begins with 'fc'`）。
-/// 流式 Chat→Responses 曾把上游 tool_call id 写进该字段，这类条目已落进客户端
-/// 旧会话，因此转发前统一规范成 `fc_...`：只改 id，`call_id` 原样保留。
-fn normalize_responses_function_call_item_ids(request: &mut Value) {
+/// 转发 Responses 历史输入前，修正旧版协议转换产生的非法条目：
+/// - `function_call.id` 必须带 `fc_` 前缀；上游 tool_call id 只属于 `call_id`。
+/// - `reasoning.content` 输入必须为空；旧明文推理迁移到 `summary`。
+/// - `store=false` 时移除没有 `encrypted_content` 的本地 `rs_*` id，避免上游查找
+///   从未持久化的 reasoning 条目。
+///
+/// 这些条目已经写入客户端旧会话，因此需要在 identity 回放路径兼容处理。
+fn normalize_responses_input_items(request: &mut Value) {
+    let store_is_disabled = request.get("store").and_then(Value::as_bool) == Some(false);
     let Some(items) = request.get_mut("input").and_then(Value::as_array_mut) else {
         return;
     };
     for item in items.iter_mut() {
-        if item.get("type").and_then(Value::as_str) != Some("function_call") {
-            continue;
-        }
-        let current = item.get("id").and_then(Value::as_str).unwrap_or("");
-        if current.starts_with("fc_") {
-            continue;
-        }
-        let normalized = match current.strip_prefix("call_") {
-            // `call_xxx` → `fc_xxx`：确定且可重复，同一轮重试不会换 id。
-            Some(rest) if !rest.is_empty() => format!("fc_{rest}"),
-            _ => format!("fc_{}", uuid::Uuid::new_v4().simple()),
-        };
-        if let Some(object) = item.as_object_mut() {
-            object.insert("id".to_owned(), Value::String(normalized));
+        match item.get("type").and_then(Value::as_str) {
+            Some("function_call") => {
+                let current = item.get("id").and_then(Value::as_str).unwrap_or("");
+                if current.starts_with("fc_") {
+                    continue;
+                }
+                let normalized = match current.strip_prefix("call_") {
+                    // `call_xxx` → `fc_xxx`：确定且可重复，同一轮重试不会换 id。
+                    Some(rest) if !rest.is_empty() => format!("fc_{rest}"),
+                    _ => format!("fc_{}", uuid::Uuid::new_v4().simple()),
+                };
+                if let Some(object) = item.as_object_mut() {
+                    object.insert("id".to_owned(), Value::String(normalized));
+                }
+            }
+            Some("reasoning") => {
+                let Some(object) = item.as_object_mut() else {
+                    continue;
+                };
+
+                // store=false 时，只有带 encrypted_content 的 reasoning 才能跨请求
+                // 回放。Chat/Messages 转换产生的 rs_* 只是本地条目 id，官方上游并未
+                // 持久化；保留它会在修正 content 后继续报 "Item ... not found"。
+                let has_encrypted_content = object
+                    .get("encrypted_content")
+                    .and_then(Value::as_str)
+                    .map(|content| !content.is_empty())
+                    .unwrap_or(false);
+                let has_legacy_content = object
+                    .get("content")
+                    .and_then(Value::as_array)
+                    .map(|content| !content.is_empty())
+                    .unwrap_or(false);
+                if !has_encrypted_content && (store_is_disabled || has_legacy_content) {
+                    object.remove("id");
+                }
+
+                let Some(content) = object.get("content").and_then(Value::as_array) else {
+                    continue;
+                };
+                if content.is_empty() {
+                    continue;
+                }
+
+                // 旧版 Chat→Responses 把明文推理放在 reasoning.content 中；
+                // 官方 Responses 输入侧要求该数组长度为 0。迁移到受支持的 summary，
+                // 既让旧会话可恢复，也避免丢掉可读推理内容。
+                let legacy_summary = content
+                    .iter()
+                    .filter(|part| {
+                        part.get("type").and_then(Value::as_str) == Some("reasoning_text")
+                    })
+                    .filter_map(|part| part.get("text").and_then(Value::as_str))
+                    .map(|text| serde_json::json!({"type": "summary_text", "text": text}))
+                    .collect::<Vec<_>>();
+                object.remove("content");
+
+                let summary_is_empty = object
+                    .get("summary")
+                    .and_then(Value::as_array)
+                    .map(|summary| summary.is_empty())
+                    .unwrap_or(true);
+                if summary_is_empty && !legacy_summary.is_empty() {
+                    object.insert("summary".to_owned(), Value::Array(legacy_summary));
+                }
+            }
+            _ => {}
         }
     }
 }
@@ -85,7 +142,7 @@ impl CodecDirection for IdentityDirection {
             object.insert("stream".to_owned(), Value::Bool(false));
         }
         if self.protocol == Protocol::Responses {
-            normalize_responses_function_call_item_ids(&mut encoded);
+            normalize_responses_input_items(&mut encoded);
         }
         let request_id = request
             .get("id")

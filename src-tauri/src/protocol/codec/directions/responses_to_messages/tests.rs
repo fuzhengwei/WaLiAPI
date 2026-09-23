@@ -175,4 +175,8 @@ fn stream_emits_complete_responses_lifecycle_for_text_reasoning_and_tool() {
     assert!(output.contains("\"text\":\"hello\""));
     assert!(output.contains("\"text\":\"think\""));
     assert!(output.contains("\"arguments\":\"{}\""));
+    assert!(output.contains("\"id\":\"msg_0\""));
+    assert!(output.contains("\"id\":\"rs_1\""));
+    assert!(output.contains("\"id\":\"fc_2\""));
+    assert!(output.contains("\"call_id\":\"call_1\""));
 }
