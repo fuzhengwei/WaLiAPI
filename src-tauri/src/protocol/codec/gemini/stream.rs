@@ -75,16 +75,23 @@ impl GeminiToChatStreamDecoder {
         }))
     }
 
-    fn emit_tool_call(&mut self, name: &str, args: &Value, signature: Option<&str>) -> String {
+    fn emit_tool_call(
+        &mut self,
+        name: &str,
+        args: &Value,
+        call_id: Option<&str>,
+        signature: Option<&str>,
+    ) -> String {
         let index = self.next_tool_index;
         self.next_tool_index += 1;
         self.saw_tool_call = true;
         let arguments = serde_json::to_string(args).unwrap_or_else(|_| "{}".into());
         // Gemini 3 的 functionCall 带 thoughtSignature，必须随 id 带回上游。
-        let id = super::tool_call_id_with_signature(
-            &format!("call_{}", uuid::Uuid::new_v4().simple()),
-            signature,
-        );
+        let base_id = call_id
+            .filter(|id| !id.is_empty())
+            .map(str::to_owned)
+            .unwrap_or_else(|| format!("call_{}", uuid::Uuid::new_v4().simple()));
+        let id = super::tool_call_id_with_signature(&base_id, signature);
         sse::data_frame(json!({
             "id": self.context.request_id,
             "object": "chat.completion.chunk",
@@ -203,7 +210,12 @@ impl StreamDecoder for GeminiToChatStreamDecoder {
                         let name = call.get("name").and_then(Value::as_str).unwrap_or("");
                         let args = call.get("args").cloned().unwrap_or(json!({}));
                         let signature = part.get("thoughtSignature").and_then(Value::as_str);
-                        out.push(self.emit_tool_call(name, &args, signature));
+                        out.push(self.emit_tool_call(
+                            name,
+                            &args,
+                            call.get("id").and_then(Value::as_str),
+                            signature,
+                        ));
                     }
                 }
             }

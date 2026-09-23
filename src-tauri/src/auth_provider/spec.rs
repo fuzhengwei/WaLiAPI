@@ -82,7 +82,7 @@ const GEMINI: ProviderSpec = ProviderSpec {
     login_methods: &[AuthLoginMode::BrowserCallback],
     supports_import: false,
     supports_export: false,
-    supports_quota: false,
+    supports_quota: true,
 };
 
 const GROK: ProviderSpec = ProviderSpec {
@@ -207,7 +207,7 @@ mod tests {
         assert_eq!(spec.login_methods, &[AuthLoginMode::BrowserCallback]);
         assert!(!spec.supports_import);
         assert!(!spec.supports_export);
-        assert!(!spec.supports_quota);
+        assert!(spec.supports_quota);
     }
 
     #[test]

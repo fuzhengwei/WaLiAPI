@@ -1401,7 +1401,7 @@ mod tests {
         assert_eq!(gemini.login_methods, vec!["browser_callback".to_owned()]);
         assert!(!gemini.supports_import);
         assert!(!gemini.supports_export);
-        assert!(!gemini.supports_quota);
+        assert!(gemini.supports_quota);
         let grok = providers.iter().find(|p| p.id == "grok").unwrap();
         assert_eq!(grok.display_name, "Grok");
         assert_eq!(grok.icon_key, "grok");

@@ -3,6 +3,7 @@ import { Fragment, useState } from "react";
 import type { ReactNode } from "react";
 import type { AuthAccount, AuthQuotaState, AuthQuotaWindow, AuthModelState } from "../../types";
 import { quotaDisplayState } from "./quotaDisplay";
+import { QuotaBlock } from "./QuotaBlock";
 import { MappingChips } from "../MappingChips";
 
 const WINDOW_MINUTES = {
@@ -130,7 +131,7 @@ function RowActions({ account, actions }: { account: AuthAccount; actions: Accou
         <ActionButton label="重新登录" onClick={actions.onRelogin} disabled={actions.pending} className="rounded-lg p-1.5 text-primary hover:bg-primary/10 disabled:opacity-50"><KeyRound size={15} /></ActionButton>
       ) : (
         <>
-          {account.provider === "codex" && <ActionButton label="刷新额度" onClick={actions.onRefreshQuota} disabled={actions.pending} className="rounded-lg p-1.5 text-muted-foreground hover:bg-primary/10 hover:text-primary disabled:opacity-50">{actions.quotaPending ? <Loader2 size={15} className="animate-spin" /> : <Gauge size={15} />}</ActionButton>}
+          {(account.provider === "codex" || account.provider === "gemini") && <ActionButton label="刷新额度" onClick={actions.onRefreshQuota} disabled={actions.pending} className="rounded-lg p-1.5 text-muted-foreground hover:bg-primary/10 hover:text-primary disabled:opacity-50">{actions.quotaPending ? <Loader2 size={15} className="animate-spin" /> : <Gauge size={15} />}</ActionButton>}
           <ActionButton label="刷新令牌" onClick={actions.onRefresh} disabled={actions.pending} className="rounded-lg p-1.5 text-muted-foreground hover:bg-muted hover:text-foreground disabled:opacity-50">{actions.pending && !actions.quotaPending ? <Loader2 size={15} className="animate-spin" /> : <RefreshCw size={15} />}</ActionButton>
           <ActionButton label="同步模型" onClick={actions.onSync} disabled={actions.pending} className="rounded-lg p-1.5 text-muted-foreground hover:bg-muted hover:text-foreground disabled:opacity-50"><RotateCw size={15} /></ActionButton>
           {account.provider === "codex" && <ActionButton label="导出 JSON" onClick={actions.onExport} disabled={actions.pending} className="rounded-lg p-1.5 text-muted-foreground hover:bg-muted hover:text-foreground disabled:opacity-50"><Download size={15} /></ActionButton>}
@@ -238,9 +239,9 @@ export function AccountList({ accounts, actionFor, onReorder }: { accounts: Auth
 
                 {/* 额度信息 */}
                 <div className="hidden items-center gap-4 lg:flex">
-                  <QuotaCell quota={account.quota} target={WINDOW_MINUTES.fiveHours} label="5H" />
-                  <QuotaCell quota={account.quota} target={WINDOW_MINUTES.week} label="周" />
-                  <QuotaCell quota={account.quota} target={WINDOW_MINUTES.month} label="月" />
+                  {account.provider === "gemini"
+                    ? <span className="text-xs text-muted-foreground">{account.quota ? `模型额度 ${account.quota.limits.length} 项` : "额度未刷新"}</span>
+                    : <><QuotaCell quota={account.quota} target={WINDOW_MINUTES.fiveHours} label="5H" /><QuotaCell quota={account.quota} target={WINDOW_MINUTES.week} label="周" /><QuotaCell quota={account.quota} target={WINDOW_MINUTES.month} label="月" /></>}
                 </div>
 
                 {/* 调度信息 */}
@@ -261,6 +262,7 @@ export function AccountList({ accounts, actionFor, onReorder }: { accounts: Auth
               {/* 展开区域（内部交互不触发行点击折叠） */}
               {expanded && (
                 <div className="mt-3 space-y-3 border-t border-slate-100 pt-3" onClick={(e) => e.stopPropagation()}>
+                  {account.provider === "gemini" && account.quota && <QuotaBlock quota={account.quota} modelQuotas />}
                   <div>
                     <div className="mb-1.5 text-xs font-semibold text-slate-500">可用模型 ({account.models.length})</div>
                     <ModelDetails models={account.models} />

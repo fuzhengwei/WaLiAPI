@@ -144,7 +144,7 @@ export function AuthChannelsPage() {
         : ["browser_callback" as const, "device_code" as const],
     supportsImport: selectedProvider === "codex",
     supportsExport: selectedProvider === "codex",
-    supportsQuota: selectedProvider === "codex",
+    supportsQuota: selectedProvider === "codex" || selectedProvider === "gemini",
   };
 
   // The pill selects which provider's accounts are shown.  `load()` re-fetches

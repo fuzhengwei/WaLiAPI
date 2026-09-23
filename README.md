@@ -83,6 +83,8 @@ WaLiAPI 提供两种部署方式：**桌面端安装**（适合个人开发者�
 
 打开 WaLiAPI →「渠道管理」→「新建渠道」→ 填写名称、Base URL、API Key、支持的模型 → 保存。
 
+使用 Antigravity OAuth 时，在「Auth 账号」登录后可查看各模型的已用、剩余额度和上游返回的重置时间；点击「刷新额度」可立即更新。额度百分比来自 Antigravity 模型目录的 `remainingFraction`，不代表具体 Token 数量。
+
 #### 3. 创建密钥
 
 「API 密钥」→「新建密钥」→ 生成 `sk-waliapi-*` 格式的本地访问令牌。
