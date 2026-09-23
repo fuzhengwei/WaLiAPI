@@ -148,6 +148,48 @@ fn responses_to_openai_drops_tool_choice_when_no_function_tools() {
 }
 
 #[test]
+fn responses_to_openai_rejects_unknown_input_item_instead_of_dropping_it() {
+    let body = serde_json::json!({
+        "model": "m",
+        "input": [{"type": "future_vendor_item", "payload": {"x": 1}}]
+    });
+    let error = responses_to_openai(&body).unwrap_err();
+    assert!(error.json_pointers.contains(&"/input/0/type".to_string()));
+}
+
+#[test]
+fn responses_to_openai_rejects_item_without_role_instead_of_dropping_it() {
+    let body = serde_json::json!({
+        "model": "m",
+        "input": [{"type": "item", "payload": {"x": 1}}]
+    });
+    let error = responses_to_openai(&body).unwrap_err();
+    assert!(error.json_pointers.contains(&"/input/0/type".to_string()));
+}
+
+#[test]
+fn responses_to_openai_maps_string_input_to_a_user_message() {
+    let body = serde_json::json!({"model": "m", "input": "hello"});
+    let converted = responses_to_openai(&body).unwrap();
+    assert_eq!(converted["messages"][0]["role"], "user");
+    assert_eq!(converted["messages"][0]["content"], "hello");
+}
+
+#[test]
+fn responses_to_openai_rejects_string_items_inside_input_array() {
+    let body = serde_json::json!({"model": "m", "input": ["hello"]});
+    let error = responses_to_openai(&body).unwrap_err();
+    assert!(error.json_pointers.contains(&"/input/0".to_string()));
+}
+
+#[test]
+fn responses_to_openai_rejects_untyped_text_items_instead_of_dropping_them() {
+    let body = serde_json::json!({"model": "m", "input": [{"text": "hello"}]});
+    let error = responses_to_openai(&body).unwrap_err();
+    assert!(error.json_pointers.contains(&"/input/0/type".to_string()));
+}
+
+#[test]
 fn responses_to_openai_keeps_tool_choice_only_with_function_tools() {
     // When the request does carry convertible function tools, tool_choice
     // passes through; the assistant tool-call message must use "" instead of

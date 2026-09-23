@@ -36,6 +36,34 @@ pub fn finish(out: Vec<super::error::RejectedField>) -> Result<(), UnsupportedFe
     }
 }
 
+/// Validate a protocol field whose wire shape is an array of strings.
+///
+/// Checking only the container is insufficient: forwarding a number/object in
+/// a stop sequence makes the upstream reject the whole request much later.
+pub fn require_string_array(
+    value: &Value,
+    pointer: &str,
+    field: &str,
+) -> Result<(), UnsupportedFeatures> {
+    let Some(items) = value.as_array() else {
+        return Err(UnsupportedFeatures::single(
+            FeatureKind::UnsupportedField,
+            pointer,
+            format!("{field} must be an array of strings"),
+        ));
+    };
+    for (index, item) in items.iter().enumerate() {
+        if !item.is_string() {
+            return Err(UnsupportedFeatures::single(
+                FeatureKind::UnsupportedField,
+                format!("{pointer}/{index}"),
+                format!("{field} array elements must be strings"),
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// Validate a Chat Completions `tool_choice` field (OpenAI shape) and produce
 /// the Anthropic-equivalent Json value.  Only explicitly mappable forms are
 /// accepted:

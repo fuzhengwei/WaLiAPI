@@ -175,6 +175,25 @@ fn messages_request_thinking_variants_map_reasoning_effort() {
 }
 
 #[test]
+fn messages_request_safeguards_dropped_fail_open() {
+    // Claude Code 2.1.280 在特定条件下会发送顶层 `safeguards`
+    // （`[{type, classifier_context}]`）。Chat / Responses / Gemini 都没有对应物，
+    // 整段拒绝会让会话直接无法继续，因此按 fail-open 丢弃并记录。
+    let body = json!({
+        "model": "m",
+        "messages": [{"role": "user", "content": "u"}],
+        "safeguards": [{"type": "classifier", "classifier_context": "ctx"}]
+    });
+    let prepared = CodecRegistry::messages_to_chat("m", &body).unwrap();
+    assert!(prepared.encoded_request.get("safeguards").is_none());
+    assert!(prepared
+        .report
+        .normalized
+        .iter()
+        .any(|pointer| pointer.contains("safeguards")));
+}
+
+#[test]
 fn messages_request_container_dropped_fail_open() {
     // container / context_management have no Chat equivalent; dropped and
     // recorded on the report, never rejected.
@@ -336,6 +355,22 @@ fn messages_request_rejects_non_array_stop_sequences() {
     assert!(reject_features(&e)
         .iter()
         .any(|c| c.contains("unsupported_feature.field")));
+}
+
+#[test]
+fn messages_request_rejects_non_string_stop_sequence_elements() {
+    for value in [json!(["END", 1]), json!([null]), json!({"END": true})] {
+        let body = json!({
+            "model": "m",
+            "messages": [{"role": "user", "content": "u"}],
+            "stop_sequences": value
+        });
+        let error = CodecRegistry::messages_to_chat("m", &body).unwrap_err();
+        assert!(error
+            .json_pointers
+            .iter()
+            .any(|pointer| pointer.starts_with("/stop_sequences")));
+    }
 }
 
 #[test]

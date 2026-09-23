@@ -34,6 +34,7 @@ pub fn responses_to_openai(
     body: &Value,
 ) -> Result<Value, crate::protocol::codec::UnsupportedFeatures> {
     const SUPPORTED_TOP_LEVEL: &[&str] = &[
+        "id",
         "model",
         "input",
         "instructions",
@@ -73,6 +74,9 @@ pub fn responses_to_openai(
                 format!("Responses field {key:?} is not supported by Responses→Chat conversion"),
             ));
         }
+    }
+    if let Some(input) = body.get("input") {
+        validate_responses_input_items(input)?;
     }
     let model = body
         .get("model")
@@ -247,10 +251,100 @@ pub fn responses_to_openai(
     Ok(openai_body)
 }
 
+/// Reject response input objects introduced by a newer Responses protocol
+/// version instead of letting `convert_responses_input_to_messages` silently
+/// drop them in its catch-all branch. Known provider-native items remain
+/// fail-open because Chat has no equivalent for them.
+fn validate_responses_input_items(
+    input: &Value,
+) -> Result<(), crate::protocol::codec::UnsupportedFeatures> {
+    if input.is_string() {
+        return Ok(());
+    }
+    let Some(items) = input.as_array() else {
+        return Err(crate::protocol::codec::UnsupportedFeatures::single(
+            crate::protocol::codec::FeatureKind::UnknownBlock,
+            "/input",
+            "Responses input must be a string or array",
+        ));
+    };
+    const KNOWN_DROPPED: &[&str] = &[
+        "reasoning",
+        "web_search_call",
+        "file_search_call",
+        "computer_call",
+        "computer_call_output",
+        "mcp_call",
+        "mcp_list_tools",
+        "mcp_approval_request",
+        "mcp_approval_response",
+        "code_interpreter_call",
+        "local_shell_call",
+        "local_shell_call_output",
+        "custom_tool_call",
+        "custom_tool_call_output",
+        "image_generation_call",
+        "item_reference",
+    ];
+    let mut rejected = Vec::new();
+    for (index, item) in items.iter().enumerate() {
+        let pointer = format!("/input/{index}");
+        if item.is_string() {
+            crate::protocol::codec::request::reject(
+                &mut rejected,
+                crate::protocol::codec::FeatureKind::UnknownBlock,
+                pointer,
+                "Responses input array items must be objects",
+            );
+            continue;
+        }
+        let Some(object) = item.as_object() else {
+            crate::protocol::codec::request::reject(
+                &mut rejected,
+                crate::protocol::codec::FeatureKind::UnknownBlock,
+                pointer,
+                "Responses input items must be objects",
+            );
+            continue;
+        };
+        let Some(item_type) = object.get("type").and_then(Value::as_str) else {
+            if object.get("type").is_none() && object.get("role").is_some() {
+                continue;
+            }
+            crate::protocol::codec::request::reject(
+                &mut rejected,
+                crate::protocol::codec::FeatureKind::UnknownBlock,
+                format!("{pointer}/type"),
+                "Responses input item is missing type",
+            );
+            continue;
+        };
+        let known = matches!(
+            item_type,
+            "message" | "function_call" | "function_call_output"
+        ) || (item_type == "item" && object.get("role").is_some())
+            || KNOWN_DROPPED.contains(&item_type);
+        if !known {
+            crate::protocol::codec::request::reject(
+                &mut rejected,
+                crate::protocol::codec::FeatureKind::UnknownBlock,
+                format!("{pointer}/type"),
+                format!("unsupported Responses input item type {item_type:?}"),
+            );
+        }
+    }
+    crate::protocol::codec::request::finish(rejected)
+}
+
 /// Convert Responses API `input` array to OpenAI `messages` array.
 /// Handles: message, function_call (assistant tool call), function_call_output (tool result)
 pub(super) fn convert_responses_input_to_messages(input: &Value) -> Value {
-    let messages = if let Some(arr) = input.as_array() {
+    let messages = if let Some(text) = input.as_str() {
+        vec![serde_json::json!({
+            "role": "user",
+            "content": text
+        })]
+    } else if let Some(arr) = input.as_array() {
         // First pass: collect all function_call call_ids and their matching outputs
         let mut call_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
         let mut output_ids: std::collections::HashSet<String> = std::collections::HashSet::new();

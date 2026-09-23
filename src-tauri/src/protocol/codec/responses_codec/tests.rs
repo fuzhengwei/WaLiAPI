@@ -409,6 +409,68 @@ fn messages_request_thinking_survives_messages_to_responses() {
 }
 
 #[test]
+fn chat_response_format_maps_to_responses_text_format() {
+    let (encoded, _) = encode_chat_to_responses(
+        &serde_json::json!({"model": "m", "messages": [], "response_format": {"type": "json_object"}}),
+        "m",
+    )
+    .unwrap();
+    assert_eq!(encoded["text"]["format"]["type"], "json_object");
+
+    // Chat 把 schema 嵌在 json_schema 子对象里，Responses 是平铺。
+    let (encoded, _) = encode_chat_to_responses(
+        &serde_json::json!({
+            "model": "m",
+            "messages": [],
+            "response_format": {
+                "type": "json_schema",
+                "json_schema": {
+                    "name": "title",
+                    "description": "a title",
+                    "strict": true,
+                    "schema": {"type": "object", "properties": {"title": {"type": "string"}}, "required": ["title"]}
+                }
+            }
+        }),
+        "m",
+    )
+    .unwrap();
+    assert_eq!(encoded["text"]["format"]["type"], "json_schema");
+    assert_eq!(encoded["text"]["format"]["name"], "title");
+    assert_eq!(encoded["text"]["format"]["description"], "a title");
+    assert_eq!(encoded["text"]["format"]["strict"], true);
+    assert_eq!(encoded["text"]["format"]["schema"]["required"][0], "title");
+    assert!(
+        encoded["text"]["format"].get("json_schema").is_none(),
+        "Responses 侧应是平铺的 format"
+    );
+}
+
+#[test]
+fn chat_response_format_text_means_no_constraint() {
+    let (encoded, context) = encode_chat_to_responses(
+        &serde_json::json!({"model": "m", "messages": [], "response_format": {"type": "text"}}),
+        "m",
+    )
+    .unwrap();
+    assert!(encoded.get("text").is_none());
+    assert!(context.normalized.contains(&"/response_format".to_string()));
+}
+
+#[test]
+fn chat_response_format_malformed_is_rejected() {
+    let error = encode_chat_to_responses(
+        &serde_json::json!({"model": "m", "messages": [], "response_format": {"type": "json_schema"}}),
+        "m",
+    )
+    .unwrap_err();
+    assert!(error
+        .json_pointers
+        .iter()
+        .any(|pointer| pointer.starts_with("/response_format")));
+}
+
+#[test]
 fn chat_sampling_fields_pass_through_or_drop_for_responses_backend() {
     let (encoded, context) = encode_chat_to_responses(
         &serde_json::json!({
@@ -450,6 +512,44 @@ fn chat_n_greater_than_one_is_rejected() {
     )
     .unwrap_err();
     assert!(error.json_pointers.contains(&"/n".to_string()));
+}
+
+#[test]
+fn chat_n_accepts_only_positive_integer_one() {
+    for value in [
+        serde_json::json!(0),
+        serde_json::json!(-1),
+        serde_json::json!(1.0),
+        serde_json::json!("1"),
+        serde_json::Value::Null,
+    ] {
+        let error = encode_chat_to_responses(
+            &serde_json::json!({"model": "m", "messages": [], "n": value}),
+            "m",
+        )
+        .unwrap_err();
+        assert!(error.json_pointers.contains(&"/n".to_string()));
+    }
+    assert!(encode_chat_to_responses(
+        &serde_json::json!({"model": "m", "messages": [], "n": 1}),
+        "m"
+    )
+    .is_ok());
+}
+
+#[test]
+fn chat_stop_rejects_non_string_array_elements() {
+    for value in [serde_json::json!(["END", 1]), serde_json::json!([null])] {
+        let error = encode_chat_to_responses(
+            &serde_json::json!({"model": "m", "messages": [], "stop": value}),
+            "m",
+        )
+        .unwrap_err();
+        assert!(error
+            .json_pointers
+            .iter()
+            .any(|pointer| pointer.starts_with("/stop")));
+    }
 }
 
 #[test]

@@ -54,7 +54,12 @@ pub fn encode_messages_to_chat(
                     "metadata"
                     | "container"
                     | "context_management"
-                    | "context_management_config" => {
+                    | "context_management_config"
+                    // Anthropic 的 `safeguards`（分类器上下文声明）在 Chat 里没有
+                    // 对应物。Claude Code 2.1.280 在特定条件下会带上它
+                    // （`safeguards: [{type, classifier_context}]`），整段拒绝会让
+                    // 用户直接无法对话，因此按 fail-open 丢弃并记录。
+                    | "safeguards" => {
                         normalized.push(format!("/{key}"));
                         let _ = value;
                     }
@@ -150,18 +155,8 @@ pub fn encode_messages_to_chat(
         chat.insert("top_p".to_string(), t.clone());
     }
     if let Some(stop) = body.get("stop_sequences") {
-        match stop {
-            Value::Array(_) => {
-                chat.insert("stop".to_string(), stop.clone());
-            }
-            _ => {
-                return Err(UnsupportedFeatures::single(
-                    FeatureKind::UnsupportedField,
-                    "/stop_sequences",
-                    "stop_sequences must be an array of strings",
-                ))
-            }
-        }
+        request::require_string_array(stop, "/stop_sequences", "stop_sequences")?;
+        chat.insert("stop".to_string(), stop.clone());
     }
     // tools
     if let Some(tools) = body.get("tools").and_then(Value::as_array) {

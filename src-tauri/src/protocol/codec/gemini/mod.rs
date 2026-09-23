@@ -73,8 +73,10 @@ impl CodecDirection for MessagesToGemini {
         request: &Value,
         model: &str,
     ) -> Result<(Value, ConversionContext), PrepareError> {
-        let (chat, _) = messages::encode_messages_to_chat(request, model)?;
-        encode_chat_to_gemini(&chat, model)
+        let (chat, first_context) = messages::encode_messages_to_chat(request, model)?;
+        let (encoded, mut context) = encode_chat_to_gemini(&chat, model)?;
+        merge_conversion_context(&mut context, &first_context);
+        Ok((encoded, context))
     }
     fn new_response_decoder(
         &self,
@@ -213,7 +215,7 @@ fn looks_like_thought_signature(value: &str) -> bool {
 /// 没有等价物，保留会让上游 400（`Gemini only supports Responses function
 /// tools`）。这里统一移除、只留 `function`，不把内置工具伪装成 function；
 /// 指向被移除工具的 `tool_choice` 一并移除，避免悬空引用。
-fn normalize_responses_for_gemini(body: &Value) -> Value {
+fn normalize_responses_for_gemini(body: &Value) -> (Value, Vec<String>) {
     let tools = body.get("tools").and_then(Value::as_array);
     let filtered_tools: Vec<Value> = tools
         .map(|items| {
@@ -253,13 +255,24 @@ fn normalize_responses_for_gemini(body: &Value) -> Value {
         })
         .unwrap_or(false);
 
+    let mut normalized_fields = Vec::new();
+    if let Some(tools) = tools {
+        for (index, tool) in tools.iter().enumerate() {
+            if tool.get("type").and_then(Value::as_str) != Some("function") {
+                normalized_fields.push(format!("/tools/{index}"));
+            }
+        }
+    }
+    if droppable_tool_choice {
+        normalized_fields.push("/tool_choice".to_owned());
+    }
     if removed_count == 0 && !droppable_tool_choice {
-        return body.clone();
+        return (body.clone(), normalized_fields);
     }
 
     let mut normalized = body.clone();
     let Some(normalized_object) = normalized.as_object_mut() else {
-        return body.clone();
+        return (body.clone(), normalized_fields);
     };
 
     if filtered_tools.is_empty() {
@@ -276,7 +289,48 @@ fn normalize_responses_for_gemini(body: &Value) -> Value {
         dropped_tool_choice = droppable_tool_choice,
         "normalized unsupported Responses tools for Antigravity Gemini conversion"
     );
-    normalized
+    (normalized, normalized_fields)
+}
+
+fn merge_conversion_context(target: &mut ConversionContext, first: &ConversionContext) {
+    target.request_id = first.request_id.clone();
+    target.stream = first.stream;
+    let mut normalized = first.normalized.clone();
+    normalized.append(&mut target.normalized);
+    target.normalized = normalized;
+}
+
+fn responses_context(request: &Value, model: &str) -> ConversionContext {
+    let request_id = request
+        .get("id")
+        .and_then(Value::as_str)
+        .filter(|id| !id.is_empty())
+        .map(str::to_owned)
+        .unwrap_or_else(|| format!("resp_{}", uuid::Uuid::new_v4().simple()));
+    let mut context = ConversionContext::new(
+        request_id,
+        model,
+        request
+            .get("stream")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
+    );
+    for field in [
+        "parallel_tool_calls",
+        "store",
+        "include",
+        "prompt_cache_key",
+        "prompt_cache_options",
+        "client_metadata",
+    ] {
+        if request.get(field).is_some() {
+            context.normalized.push(format!("/{field}"));
+        }
+    }
+    if request.pointer("/text/verbosity").is_some() {
+        context.normalized.push("/text/verbosity".to_owned());
+    }
+    context
 }
 
 fn validate_responses_for_gemini(body: &Value) -> Result<(), UnsupportedFeatures> {
@@ -397,10 +451,32 @@ fn validate_responses_for_gemini(body: &Value) -> Result<(), UnsupportedFeatures
                     });
                 }
             }
-            // 其余条目类型（`reasoning` 思考摘要、`web_search_call` 等内置调用
-            // 记录）在 Responses→Chat 转换里本就会被丢弃；Codex CLI 的历史里
-            // 很常见，不能因为历史里有就让整段请求失败。
-            Some(_) => {}
+            // 这些是 Responses 的已知内置调用/思考记录；Gemini 没有等价物，
+            // 可以按既有 fail-open 策略丢弃。未知类型必须拒绝，避免转换器
+            // 在 responses_decode.rs 的兜底分支里静默丢掉新协议对象。
+            Some(
+                "reasoning"
+                | "web_search_call"
+                | "file_search_call"
+                | "computer_call"
+                | "computer_call_output"
+                | "mcp_call"
+                | "mcp_list_tools"
+                | "mcp_approval_request"
+                | "mcp_approval_response"
+                | "code_interpreter_call"
+                | "local_shell_call"
+                | "local_shell_call_output"
+                | "custom_tool_call"
+                | "custom_tool_call_output"
+                | "image_generation_call"
+                | "item_reference",
+            ) => {}
+            Some(other) => rejected.push(super::error::RejectedField {
+                code: FeatureKind::UnknownBlock.code().to_owned(),
+                pointer: format!("{pointer}/type"),
+                message: format!("unsupported Responses input item type {other:?}"),
+            }),
             None => rejected.push(super::error::RejectedField {
                 code: FeatureKind::UnknownBlock.code().to_owned(),
                 pointer: format!("{pointer}/type"),
@@ -428,7 +504,7 @@ impl CodecDirection for ResponsesToGemini {
         request: &Value,
         model: &str,
     ) -> Result<(Value, ConversionContext), PrepareError> {
-        let normalized = normalize_responses_for_gemini(request);
+        let (normalized, first_normalized) = normalize_responses_for_gemini(request);
         validate_responses_for_gemini(&normalized)?;
         let mut chat = crate::protocol::responses_to_openai(&normalized)?;
         chat.as_object_mut()
@@ -440,7 +516,11 @@ impl CodecDirection for ResponsesToGemini {
                 )
             })?
             .insert("model".to_owned(), Value::String(model.to_owned()));
-        encode_chat_to_gemini(&chat, model)
+        let (encoded, chat_context) = encode_chat_to_gemini(&chat, model)?;
+        let mut context = responses_context(request, model);
+        context.normalized.extend(first_normalized);
+        context.normalized.extend(chat_context.normalized);
+        Ok((encoded, context))
     }
     fn new_response_decoder(
         &self,
@@ -855,6 +935,50 @@ mod tests {
             encoded["toolConfig"]["functionCallingConfig"]["mode"],
             "AUTO"
         );
+    }
+
+    #[test]
+    fn responses_to_gemini_preserves_request_context_and_normalized_fields() {
+        let req = json!({
+            "id": "resp_custom",
+            "model": "m",
+            "input": "hi",
+            "stream": true,
+            "parallel_tool_calls": false,
+            "text": {"verbosity": "medium"}
+        });
+        let (encoded, context) = RESPONSES_TO_GEMINI.encode_request(&req, "m").unwrap();
+        assert_eq!(context.request_id, "resp_custom");
+        assert!(context.stream);
+        assert_eq!(encoded["contents"][0]["parts"][0]["text"], "hi");
+        assert!(context
+            .normalized
+            .contains(&"/parallel_tool_calls".to_string()));
+        assert!(context.normalized.contains(&"/text/verbosity".to_string()));
+    }
+
+    #[test]
+    fn responses_to_gemini_rejects_unknown_input_item_types() {
+        let req = json!({
+            "model": "m",
+            "input": [{"type": "future_vendor_item", "payload": {"x": 1}}]
+        });
+        let error = RESPONSES_TO_GEMINI.encode_request(&req, "m").unwrap_err();
+        assert!(error
+            .features
+            .contains(&"unsupported_feature.unknown_block".to_string()));
+        assert!(error.json_pointers.contains(&"/input/0/type".to_string()));
+    }
+
+    #[test]
+    fn messages_to_gemini_keeps_first_stage_normalized_context() {
+        let req = json!({
+            "model": "m",
+            "messages": [{"role": "user", "content": "hi"}],
+            "safeguards": [{"type": "classifier", "classifier_context": "ctx"}]
+        });
+        let (_, context) = MESSAGES_TO_GEMINI.encode_request(&req, "m").unwrap();
+        assert!(context.normalized.contains(&"/safeguards".to_string()));
     }
 
     /// Codex CLI 路径：Gemini 的 thoughtSignature 寄生在工具调用 id 上，

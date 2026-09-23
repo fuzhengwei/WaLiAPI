@@ -21,6 +21,7 @@ const CHAT_TOP_LEVEL: &[&str] = &[
     "stop",
     "parallel_tool_calls",
     "n",
+    "response_format",
 ];
 
 /// 有 Responses 等价字段：原样透传（与 Messages→Responses 的映射保持一致）。
@@ -58,17 +59,15 @@ pub fn encode_chat_to_responses(
     })?;
     let mut rejected = Vec::new();
     let mut normalized = Vec::new();
+    // Chat `response_format` → Responses `text.format`（映射后统一写进 text）。
+    let mut text_control: Option<Value> = None;
     for (key, value) in object {
         if CHAT_DROPPED_FIELDS.contains(&key.as_str()) {
             normalized.push(format!("/{key}"));
         } else if !CHAT_TOP_LEVEL.contains(&key.as_str()) {
             request::reject(
                 &mut rejected,
-                if key == "response_format" {
-                    FeatureKind::StructuredOutput
-                } else {
-                    FeatureKind::UnsupportedField
-                },
+                FeatureKind::UnsupportedField,
                 format!("/{key}"),
                 format!("Chat field {key:?} has no Responses backend representation"),
             );
@@ -108,25 +107,32 @@ pub fn encode_chat_to_responses(
                 "Chat parallel_tool_calls must be a boolean",
             );
         } else if key == "n" {
-            if value.as_u64().unwrap_or(1) > 1 {
-                // n > 1 会改变下游拿到的候选数量，不做静默降级。
+            if value.as_u64() != Some(1) {
+                // Responses 只表达单个候选；0、负数、浮点、字符串和 null
+                // 都不是可安全归一为默认值的 `n`。
                 request::reject(
                     &mut rejected,
                     FeatureKind::UnsupportedField,
                     "/n",
-                    "Chat n > 1 has no Responses backend representation",
+                    "Chat n must be the positive integer 1 when converting to Responses",
                 );
             } else {
                 // n == 1 与默认同义：不透传，但留下审计痕迹。
                 normalized.push("/n".to_owned());
             }
-        } else if key == "stop" && !(value.is_string() || value.is_array()) {
-            request::reject(
-                &mut rejected,
-                FeatureKind::UnsupportedField,
-                "/stop",
-                "Chat stop must be a string or an array of strings",
-            );
+        } else if key == "response_format" {
+            match response_format_to_text(value, "/response_format") {
+                Ok(Some(text)) => text_control = Some(text),
+                // `{"type":"text"}` 表示无结构约束，等价于不发送。
+                Ok(None) => normalized.push("/response_format".to_owned()),
+                Err(error) => rejected.extend(error.fields),
+            }
+        } else if key == "stop" {
+            if !value.is_string() {
+                if let Err(error) = request::require_string_array(value, "/stop", "stop") {
+                    rejected.extend(error.fields);
+                }
+            }
         }
     }
 
@@ -224,6 +230,10 @@ pub fn encode_chat_to_responses(
             response.insert((*field).to_owned(), value.clone());
         }
     }
+    if let Some(text) = text_control {
+        // Responses 的结构化输出控制在 `text.format`（Chat 为顶层 `response_format`）。
+        response.insert("text".to_owned(), text);
+    }
     if !instruction_parts.is_empty() {
         response.insert(
             "instructions".to_owned(),
@@ -253,6 +263,77 @@ pub fn encode_chat_to_responses(
     );
     context.normalized = normalized;
     Ok((Value::Object(response), context))
+}
+
+/// Chat `response_format` → Responses `text.format`。
+///
+/// Chat 把 json_schema 的细节嵌在 `json_schema` 子对象里，Responses 是平铺到
+/// `text.format`；`{"type":"text"}` 表示无结构约束，等价于不发送（返回 `None`）。
+/// Codex 账号与 Grok 上游都已实测接受 `text.format` 的两种形态。
+fn response_format_to_text(
+    value: &Value,
+    pointer: &str,
+) -> Result<Option<Value>, UnsupportedFeatures> {
+    let Some(object) = value.as_object() else {
+        return Err(UnsupportedFeatures::single(
+            FeatureKind::StructuredOutput,
+            pointer,
+            "Chat response_format must be an object",
+        ));
+    };
+    match object.get("type").and_then(Value::as_str) {
+        Some("text") => Ok(None),
+        Some("json_object") => Ok(Some(serde_json::json!({
+            "format": {"type": "json_object"}
+        }))),
+        Some("json_schema") => {
+            let Some(nested) = object.get("json_schema").and_then(Value::as_object) else {
+                return Err(UnsupportedFeatures::single(
+                    FeatureKind::StructuredOutput,
+                    format!("{pointer}/json_schema"),
+                    "json_schema response_format requires a json_schema object",
+                ));
+            };
+            let name = nested
+                .get("name")
+                .and_then(Value::as_str)
+                .filter(|name| !name.is_empty())
+                .ok_or_else(|| {
+                    UnsupportedFeatures::single(
+                        FeatureKind::StructuredOutput,
+                        format!("{pointer}/json_schema/name"),
+                        "json_schema response_format requires a name",
+                    )
+                })?;
+            let schema = nested
+                .get("schema")
+                .filter(|schema| schema.is_object())
+                .ok_or_else(|| {
+                    UnsupportedFeatures::single(
+                        FeatureKind::StructuredOutput,
+                        format!("{pointer}/json_schema/schema"),
+                        "json_schema response_format requires an object schema",
+                    )
+                })?;
+            let mut format = serde_json::json!({
+                "type": "json_schema",
+                "name": name,
+                "schema": schema,
+            });
+            if let Some(description) = nested.get("description") {
+                format["description"] = description.clone();
+            }
+            if let Some(strict) = nested.get("strict") {
+                format["strict"] = strict.clone();
+            }
+            Ok(Some(serde_json::json!({"format": format})))
+        }
+        other => Err(UnsupportedFeatures::single(
+            FeatureKind::StructuredOutput,
+            format!("{pointer}/type"),
+            format!("unsupported Chat response_format type {other:?}"),
+        )),
+    }
 }
 
 struct ChatMessageParts {
