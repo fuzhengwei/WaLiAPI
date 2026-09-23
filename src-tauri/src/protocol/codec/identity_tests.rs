@@ -152,7 +152,7 @@ fn responses_identity_rewrites_legacy_function_call_item_ids() {
         items[1]["id"],
         serde_json::json!("fc_b4a5022d86db4e57b13da2dd")
     );
-    // `call_id` 是工具调用与结果之间的关联，必须原样。
+    // `call_id` 是工具调用与结果之间的关联，必须原样保留。
     assert_eq!(
         items[1]["call_id"],
         serde_json::json!("call_b4a5022d86db4e57b13da2dd")
@@ -167,6 +167,87 @@ fn responses_identity_rewrites_legacy_function_call_item_ids() {
     assert_eq!(items[3]["id"], serde_json::json!("fc_already_ok"));
     // 非 function_call 条目不受影响。
     assert!(items[0].get("id").is_none());
+}
+
+/// 旧版 Chat→Responses 会把明文推理放进 `reasoning.content`；官方 Responses
+/// 上游回放时要求该数组为空。转发前应把可读文本迁移到受支持的 summary，保留内容。
+#[test]
+fn responses_identity_migrates_legacy_reasoning_content_to_summary() {
+    let request = serde_json::json!({
+        "model": "gpt-5.6-sol",
+        "store": false,
+        "input": [
+            {
+                "type": "reasoning",
+                "id": "rs_legacy",
+                "summary": [],
+                "content": [{"type": "reasoning_text", "text": "legacy reasoning"}],
+                "encrypted_content": null
+            },
+            {
+                "type": "reasoning",
+                "id": "rs_current",
+                "summary": [{"type": "summary_text", "text": "current summary"}],
+                "encrypted_content": "opaque"
+            },
+            {
+                "type": "reasoning",
+                "id": "rs_inline_summary",
+                "summary": [{"type": "summary_text", "text": "inline summary"}],
+                "encrypted_content": null
+            },
+            {
+                "type": "message",
+                "role": "user",
+                "content": [{"type": "input_text", "text": "continue"}]
+            }
+        ]
+    });
+
+    let (encoded, _) = RESPONSES_IDENTITY
+        .encode_request(&request, "gpt-5.6-sol")
+        .expect("legacy Responses history must be encodable");
+    let items = encoded["input"].as_array().unwrap();
+
+    assert!(items[0].get("content").is_none());
+    assert_eq!(
+        items[0]["summary"],
+        serde_json::json!([{"type": "summary_text", "text": "legacy reasoning"}])
+    );
+    // 没有密文的 reasoning 不是官方上游可引用的持久化对象；store=false 下
+    // 保留旧 rs_* id 会报 "Item with id ... not found"，应作为内联 summary 发送。
+    assert!(items[0].get("id").is_none());
+    assert!(items[0]["encrypted_content"].is_null());
+    assert_eq!(
+        items[1]["summary"],
+        serde_json::json!([{"type": "summary_text", "text": "current summary"}])
+    );
+    assert_eq!(items[1]["id"], "rs_current");
+    assert_eq!(items[1]["encrypted_content"], "opaque");
+    assert!(items[2].get("id").is_none());
+    assert_eq!(
+        items[2]["summary"],
+        serde_json::json!([{"type": "summary_text", "text": "inline summary"}])
+    );
+    assert_eq!(items[3]["content"][0]["text"], "continue");
+}
+
+#[test]
+fn responses_identity_preserves_stored_reasoning_reference() {
+    let request = serde_json::json!({
+        "model": "gpt-5.6-sol",
+        "store": true,
+        "input": [{
+            "type": "reasoning",
+            "id": "rs_persisted",
+            "summary": [{"type": "summary_text", "text": "stored summary"}]
+        }]
+    });
+
+    let (encoded, _) = RESPONSES_IDENTITY
+        .encode_request(&request, "gpt-5.6-sol")
+        .expect("stored Responses history must be encodable");
+    assert_eq!(encoded["input"][0]["id"], "rs_persisted");
 }
 
 /// 非 Responses 的 identity 方向不得触碰 input。
