@@ -1,5 +1,39 @@
 # Changelog
 
+## v0.3.6 (2026-09-23)
+
+### 协议转换（codec）
+
+- 🐛 **Chat response_format 映射为 Responses text.format**：Chat Completions 请求的 `response_format` 正确映射到 Responses 协议的 `text.format`，JSON 输出约束跨协议生效（PR #136，@GululuCopa）
+- 🐛 **Messages 顶层 safeguards 按 fail-open 丢弃**：无法识别的顶层 safeguards 字段按 fail-open 丢弃，不再导致请求被上游拒绝（PR #136，@GululuCopa）
+- 🐛 **Chat→Responses 兼容常用采样字段**：客户端常用采样参数在 Chat→Responses 转换中正确透传（PR #135，@GululuCopa）
+- 🐛 **Responses function_call 条目 id 规范化**：function_call 条目 id 必须是 `fc_` 前缀，修复部分客户端解析失败（#129，@GululuCopa）
+- 🐛 **Gemini 请求转换兼容标准 JSON Schema 与 Gemini 3 工具签名**（@GululuCopa）
+- 🐛 **保留 Gemini 转换上下文并拒绝未知输入**：跨协议请求边界校验，转换上下文不丢失、未知输入直接拒绝（PR #136，@GululuCopa）
+
+### Auth 账号
+
+- 🐛 **Antigravity OAuth 修复**：修复 v0.3.6 Antigravity OAuth 授权流程（PR #128，@GululuCopa）
+- ✨ **Antigravity 模型额度展示与工具调用 ID 保留**：Auth 渠道页展示 Antigravity 模型剩余额度，工具调用 ID 跨请求保留（PR #138，@huangkemingyyds）
+- 🐛 **Grok 出站请求对齐上游约束**：出站请求对齐上游工具白名单与加密推理约束；规范化工具参数里的整数值浮点（PR #135，@GululuCopa）
+- 🐛 **流式出站改用无总超时的 HTTP 客户端**：避免长流式响应被总超时中断（PR #135，@GululuCopa）
+- 🐛 **打开系统浏览器失败单独归类 BrowserOpenFailed**：OAuth 授权时浏览器打开失败返回明确错误类型（PR #135，@GululuCopa）
+
+### Codex
+
+- 🐛 **修复旧会话回放与 GPT-6 模型同步**（PR #137，@huangkemingyyds）
+
+### 客户端与配置生成
+
+- 🐛 **修正 OpenCode / OpenClaw / Hermes 的配置生成**：客户端配置应用改为事务化，同步 `modelPolicy.allow` 避免主模型不可见（PR #135 / #136，@GululuCopa）
+- 🧪 **回放用例改用相对时间**：避免测试随 TTL 过期自失败（PR #135，@GululuCopa）
+
+### 其他
+
+- 📝 **OAuth 协议覆盖验证记录**：补充 OAuth 协议覆盖验证文档
+- 📝 **README 贡献者数据同步**：新增贡献者 黄科铭（@huangkemingyyds，PR #137 #138），按当前仓库提交记录更新全体贡献者提交数与代码变更统计
+- 🔧 **版本号统一升级至 0.3.6**（package.json / Cargo.toml / tauri.conf.json / Cargo.lock）
+
 ## v0.3.5 (2026-09-21)
 
 ### 新增渠道
