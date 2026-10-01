@@ -108,17 +108,28 @@ function ModelDetails({ models }: { models: AuthModelState[] }) {
   );
 }
 
+// 列表行内图标按钮的悬浮提示样式：定位在按钮下方居中，hover 时浮现。
+// 与 SettingsPage 的 helpTooltipCls 风格保持统一，避免引入额外组件。
+const ACTION_TOOLTIP_CLS =
+  "pointer-events-none absolute left-1/2 top-full z-50 mt-1.5 -translate-x-1/2 whitespace-nowrap rounded-md border border-border bg-card px-2 py-1 text-[11px] leading-none text-card-foreground opacity-0 shadow-md transition-opacity group-hover/actbtn:opacity-100";
+
 function ActionButton({ label, disabled, className, onClick, children }: ActionButtonProps) {
   return (
-    <button
-      type="button"
-      onClick={onClick}
-      disabled={disabled}
-      aria-label={label}
-      className={className}
-    >
-      {children}
-    </button>
+    <span className="group/actbtn relative inline-flex">
+      <button
+        type="button"
+        onClick={onClick}
+        disabled={disabled}
+        aria-label={label}
+        title={label}
+        className={className}
+      >
+        {children}
+      </button>
+      <span role="tooltip" className={ACTION_TOOLTIP_CLS}>
+        {label}
+      </span>
+    </span>
   );
 }
 

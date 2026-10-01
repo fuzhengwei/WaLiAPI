@@ -1,5 +1,15 @@
 @import "tailwindcss";
 
+/* 兼容旧版 WebKit（如 macOS 12 自带 WKWebView）：Tailwind v4 默认把断点编译为
+   `@media (width >= 48rem)` 区间语法，Safari < 16.4 无法解析会导致整条规则被丢弃
+   （典型症状：左侧边栏 hidden md:flex 永远不生效）。用老式 min-width 语法重定义
+   同名变体即可覆盖，数值与 Tailwind v4 默认断点保持一致，顺序按从小到大声明。 */
+@custom-variant sm (@media (min-width: 40rem));
+@custom-variant md (@media (min-width: 48rem));
+@custom-variant lg (@media (min-width: 64rem));
+@custom-variant xl (@media (min-width: 80rem));
+@custom-variant 2xl (@media (min-width: 96rem));
+
 @theme {
   --color-background: #f5f7fa;
   --color-foreground: #16202b;
@@ -285,3 +295,6 @@ textarea:focus {
 .wiki-markdown table { width: 100%; border-collapse: collapse; margin: 12px 0; font-size: 13px; }
 .wiki-markdown th { border-bottom: 1px solid #e2e8f0; background: #f8fafc; padding: 8px 12px; text-align: left; font-weight: 600; }
 .wiki-markdown td { border-bottom: 1px solid #f8fafc; padding: 8px 12px; }
+@media (min-width: 48rem) {
+  .md\:flex { display: flex; }
+}
