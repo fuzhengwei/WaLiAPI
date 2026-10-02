@@ -15,12 +15,15 @@ use super::{
     codex_login::{AuthFileFormat, CodexLogin},
     LoginResult, LoginRuntime, MultiImportResult, Provider, ProviderError, ProviderKind,
     ProviderLoginContext, ProviderModels, ProviderPayload, ProviderRequest, RefreshedPayload,
+    ResetCredit, ResetCreditCode, ResetCreditOutcome, ResetCreditsSnapshot,
 };
 use crate::db::models::{AuthAccount, ModelState, QuotaLimit, QuotaState, QuotaWindow};
 
 pub const CODEX_BACKEND_BASE: &str = "https://chatgpt.com/backend-api/codex";
 const RESPONSES_PATH: &str = "responses";
 const MODELS_PATH: &str = "models";
+const RESET_CREDITS_PATH: &str = "wham/rate-limit-reset-credits";
+const RESET_CONSUME_PATH: &str = "wham/rate-limit-reset-credits/consume";
 // `/models` is a Codex client endpoint, not a WaLiAPI endpoint.  The backend
 // filters its catalog by this value, so using our own application version (for
 // example `0.1.7`) can legitimately produce an empty model list.
@@ -37,6 +40,7 @@ fn codex_user_agent() -> String {
 /// test-only so production calls cannot be redirected by frontend/downstream data.
 #[derive(Clone)]
 pub struct CodexProvider {
+    #[cfg(test)]
     client: reqwest::Client,
     backend_base: String,
     login: CodexLogin,
@@ -51,6 +55,7 @@ impl Default for CodexProvider {
 impl CodexProvider {
     pub fn new() -> Self {
         Self {
+            #[cfg(test)]
             client: backend_client(),
             backend_base: CODEX_BACKEND_BASE.to_owned(),
             login: CodexLogin::new(),
@@ -60,6 +65,7 @@ impl CodexProvider {
     #[cfg(test)]
     fn with_endpoints(backend_base: String, login: CodexLogin) -> Self {
         Self {
+            #[cfg(test)]
             client: backend_client(),
             backend_base: backend_base.trim_end_matches('/').to_owned(),
             login,
@@ -68,6 +74,12 @@ impl CodexProvider {
 
     fn endpoint(&self, path: &str) -> String {
         format!("{}/{path}", self.backend_base.trim_end_matches('/'))
+    }
+
+    fn backend_root_endpoint(&self, path: &str) -> String {
+        let base = self.backend_base.trim_end_matches('/');
+        let root = base.strip_suffix("/codex").unwrap_or(base);
+        format!("{root}/{path}")
     }
 
     /// The dedicated quota-status endpoint lives at the `backend-api` root, not
@@ -97,17 +109,125 @@ impl CodexProvider {
             header::HeaderValue::from_static("application/json"),
         );
         let response = self
-            .client
+            .blocking_client()
             .get(self.usage_endpoint())
             .headers(headers)
             .send()
             .await
-            .map_err(|_| ProviderError::Retryable)?;
+            .map_err(|error| {
+                tracing::warn!(
+                    error = %error,
+                    proxy_configured = crate::adaptor::global_proxy_url().is_some(),
+                    "Codex quota request transport failed"
+                );
+                ProviderError::Retryable
+            })?;
         if !response.status().is_success() {
             return Ok(None);
         }
         let body: Value = response.json().await.map_err(|_| ProviderError::Protocol)?;
         Ok(quota_from_usage_payload(&body))
+    }
+
+    async fn list_reset_credits_inner(
+        &self,
+        account: &crate::db::models::AuthAccount,
+        payload: &ProviderPayload,
+    ) -> Result<ResetCreditsSnapshot, ProviderError> {
+        let mut headers = self.auth_headers(payload, account, &header::HeaderMap::new())?;
+        headers.insert(
+            header::ACCEPT,
+            header::HeaderValue::from_static("application/json"),
+        );
+        let endpoint = self.backend_root_endpoint(RESET_CREDITS_PATH);
+        let response = loop {
+            match self
+                .blocking_client()
+                .get(&endpoint)
+                .headers(headers.clone())
+                .send()
+                .await
+            {
+                Ok(response) => break response,
+                Err(error) => {
+                    tracing::warn!(
+                        error = %error,
+                        proxy_configured = crate::adaptor::global_proxy_url().is_some(),
+                        "Codex reset-credit list transport failed; retrying once"
+                    );
+                    // 读取卡列表是幂等 GET。代理偶发断开时只允许一次
+                    // 只读重试；消费 POST 的未知结果绝不走这条路径。
+                    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+                    match self
+                        .blocking_client()
+                        .get(&endpoint)
+                        .headers(headers)
+                        .send()
+                        .await
+                    {
+                        Ok(response) => break response,
+                        Err(error) => {
+                            tracing::warn!(
+                                error = %error,
+                                proxy_configured = crate::adaptor::global_proxy_url().is_some(),
+                                "Codex reset-credit list retry transport failed"
+                            );
+                            return Err(ProviderError::Retryable);
+                        }
+                    }
+                }
+            }
+        };
+        if !response.status().is_success() {
+            return Err(reset_http_error(response.status()));
+        }
+        let body: Value = response.json().await.map_err(|_| ProviderError::Protocol)?;
+        parse_reset_credits(&body)
+    }
+
+    async fn consume_reset_credit_inner(
+        &self,
+        account: &crate::db::models::AuthAccount,
+        payload: &ProviderPayload,
+        redeem_request_id: &str,
+        credit_id: &str,
+    ) -> Result<ResetCreditOutcome, ProviderError> {
+        if redeem_request_id.trim().is_empty() || credit_id.trim().is_empty() {
+            return Err(ProviderError::InvalidPayload);
+        }
+        let mut headers = self.auth_headers(payload, account, &header::HeaderMap::new())?;
+        headers.insert(
+            header::ACCEPT,
+            header::HeaderValue::from_static("application/json"),
+        );
+        headers.insert(
+            header::CONTENT_TYPE,
+            header::HeaderValue::from_static("application/json"),
+        );
+        let body = serde_json::json!({
+            "redeem_request_id": redeem_request_id,
+            "credit_id": credit_id,
+        });
+        let response = self
+            .blocking_client()
+            .post(self.backend_root_endpoint(RESET_CONSUME_PATH))
+            .headers(headers)
+            .json(&body)
+            .send()
+            .await
+            .map_err(|error| {
+                tracing::warn!(
+                    error = %error,
+                    proxy_configured = crate::adaptor::global_proxy_url().is_some(),
+                    "Codex reset-credit consume transport failed"
+                );
+                ProviderError::Retryable
+            })?;
+        if !response.status().is_success() {
+            return Err(reset_http_error(response.status()));
+        }
+        let body: Value = response.json().await.map_err(|_| ProviderError::Protocol)?;
+        parse_reset_outcome(&body)
     }
 
     fn auth_headers(
@@ -163,6 +283,31 @@ impl CodexProvider {
             );
         }
         Ok(headers)
+    }
+
+    /// 账号请求复用项目已有的代理感知客户端：流式响应走
+    /// `streaming_client`，额度、模型和重置卡等短请求走
+    /// `blocking_client`。代理地址始终从设置页同步的全局状态读取。
+    fn streaming_client(&self) -> reqwest::Client {
+        #[cfg(test)]
+        {
+            return self.client.clone();
+        }
+        #[cfg(not(test))]
+        {
+            crate::adaptor::streaming_client(crate::adaptor::global_proxy_url().as_deref())
+        }
+    }
+
+    fn blocking_client(&self) -> reqwest::Client {
+        #[cfg(test)]
+        {
+            return self.client.clone();
+        }
+        #[cfg(not(test))]
+        {
+            crate::adaptor::blocking_client(30, crate::adaptor::global_proxy_url().as_deref())
+        }
     }
 }
 
@@ -230,7 +375,7 @@ impl Provider for CodexProvider {
     ) -> Result<reqwest::Response, ProviderError> {
         let body = validate_backend_request(request.body)?;
         let headers = self.auth_headers(request.payload, request.account, request.headers)?;
-        self.client
+        self.streaming_client()
             .post(self.endpoint(RESPONSES_PATH))
             .headers(headers)
             .json(&body)
@@ -256,7 +401,7 @@ impl Provider for CodexProvider {
                 .map_err(|_| ProviderError::InvalidPayload)?,
         );
         let response = self
-            .client
+            .blocking_client()
             .get(self.endpoint(MODELS_PATH))
             // This is part of Codex's native `/models` request contract.  The
             // backend uses it to select models compatible with the client.
@@ -311,8 +456,28 @@ impl Provider for CodexProvider {
     ) -> Result<Option<QuotaState>, ProviderError> {
         self.fetch_quota_inner(account, payload).await
     }
+
+    async fn list_reset_credits(
+        &self,
+        account: &AuthAccount,
+        payload: &ProviderPayload,
+    ) -> Result<ResetCreditsSnapshot, ProviderError> {
+        self.list_reset_credits_inner(account, payload).await
+    }
+
+    async fn consume_reset_credit(
+        &self,
+        account: &AuthAccount,
+        payload: &ProviderPayload,
+        redeem_request_id: &str,
+        credit_id: &str,
+    ) -> Result<ResetCreditOutcome, ProviderError> {
+        self.consume_reset_credit_inner(account, payload, redeem_request_id, credit_id)
+            .await
+    }
 }
 
+#[cfg(test)]
 fn backend_client() -> reqwest::Client {
     // Disabling all optional content encodings keeps this adapter from adding a
     // request content coding implicitly.
@@ -322,6 +487,114 @@ fn backend_client() -> reqwest::Client {
         .no_deflate()
         .build()
         .expect("reqwest client construction must not fail")
+}
+
+fn reset_http_error(status: StatusCode) -> ProviderError {
+    match status {
+        StatusCode::UNAUTHORIZED => ProviderError::Unauthorized,
+        StatusCode::FORBIDDEN => ProviderError::PermissionDenied,
+        StatusCode::TOO_MANY_REQUESTS
+        | StatusCode::BAD_GATEWAY
+        | StatusCode::SERVICE_UNAVAILABLE
+        | StatusCode::GATEWAY_TIMEOUT => ProviderError::Retryable,
+        StatusCode::NOT_FOUND => ProviderError::UnsupportedFeatures {
+            pointer: "/reset_credits".into(),
+        },
+        _ if status.is_server_error() => ProviderError::Retryable,
+        _ => ProviderError::Protocol,
+    }
+}
+
+fn parse_reset_credits(body: &Value) -> Result<ResetCreditsSnapshot, ProviderError> {
+    let credits = body
+        .get("credits")
+        .or_else(|| body.get("reset_credits"))
+        .and_then(Value::as_array)
+        .ok_or(ProviderError::Protocol)?
+        .iter()
+        .filter_map(parse_reset_credit)
+        .collect::<Vec<_>>();
+    let available_count = body
+        .get("available_count")
+        .or_else(|| body.get("availableCount"))
+        .and_then(Value::as_i64);
+    Ok(ResetCreditsSnapshot {
+        available_count,
+        credits,
+    })
+}
+
+fn parse_reset_credit(value: &Value) -> Option<ResetCredit> {
+    let object = value.as_object()?;
+    let id = object
+        .get("id")
+        .or_else(|| object.get("credit_id"))
+        .or_else(|| object.get("creditId"))
+        .and_then(Value::as_str)?
+        .to_owned();
+    let timestamp = |keys: &[&str]| {
+        keys.iter().find_map(|key| {
+            object.get(*key).and_then(|value| {
+                value
+                    .as_str()
+                    .map(str::to_owned)
+                    .or_else(|| value.as_i64().map(|number| number.to_string()))
+            })
+        })
+    };
+    Some(ResetCredit {
+        id,
+        reset_type: object
+            .get("reset_type")
+            .or_else(|| object.get("type"))
+            .and_then(Value::as_str)
+            .unwrap_or("codex_rate_limits")
+            .to_owned(),
+        status: object
+            .get("status")
+            .and_then(Value::as_str)
+            .unwrap_or("available")
+            .to_owned(),
+        granted_at: timestamp(&["granted_at", "grantedAt"]),
+        expires_at: timestamp(&["expires_at", "expiresAt"]),
+        title: object
+            .get("title")
+            .and_then(Value::as_str)
+            .map(str::to_owned),
+        description: object
+            .get("description")
+            .and_then(Value::as_str)
+            .map(str::to_owned),
+    })
+}
+
+fn value_as_i64(value: &Value) -> Option<i64> {
+    value.as_i64().or_else(|| value.as_str()?.parse().ok())
+}
+
+fn parse_reset_outcome(body: &Value) -> Result<ResetCreditOutcome, ProviderError> {
+    let code = body
+        .get("code")
+        .or_else(|| body.get("result"))
+        .and_then(Value::as_str)
+        .map(str::to_ascii_lowercase)
+        .ok_or(ProviderError::Protocol)?;
+    let code = match code.as_str() {
+        "reset" => ResetCreditCode::Reset,
+        "nothing_to_reset" => ResetCreditCode::NothingToReset,
+        "no_credit" => ResetCreditCode::NoCredit,
+        "already_redeemed" => ResetCreditCode::AlreadyRedeemed,
+        _ => return Err(ProviderError::Protocol),
+    };
+    let windows_reset = body
+        .get("windows_reset")
+        .or_else(|| body.get("windowsReset"))
+        .and_then(value_as_i64)
+        .unwrap_or_default();
+    Ok(ResetCreditOutcome {
+        code,
+        windows_reset,
+    })
 }
 
 fn bearer(access_token: &str) -> Result<header::HeaderValue, ProviderError> {
@@ -672,6 +945,8 @@ mod tests {
     struct MockState {
         hits: Arc<AtomicUsize>,
         usage_hits: Arc<AtomicUsize>,
+        reset_hits: Arc<AtomicUsize>,
+        consume_hits: Arc<AtomicUsize>,
         refreshes: Arc<AtomicUsize>,
         requests: Arc<Mutex<Vec<(HeaderMap, Value)>>>,
         model_queries: Arc<Mutex<Vec<Option<String>>>>,
@@ -756,6 +1031,42 @@ mod tests {
         Json(json!({"error": "rate limited"}))
     }
 
+    async fn reset_credits(
+        State(state): State<MockState>,
+        headers: HeaderMap,
+    ) -> impl IntoResponse {
+        state.reset_hits.fetch_add(1, Ordering::SeqCst);
+        assert_eq!(headers[header::AUTHORIZATION], "Bearer fixture-access");
+        assert_eq!(headers["chatgpt-account-id"], "remote");
+        Json(json!({
+            "available_count": 1,
+            "credits": [{
+                "id": "credit-fixture",
+                "reset_type": "codex_rate_limits",
+                "status": "available",
+                "granted_at": 1780000000,
+                "expires_at": 1790000000,
+                "title": "Codex reset",
+                "description": "fixture"
+            }]
+        }))
+    }
+
+    async fn consume_reset(
+        State(state): State<MockState>,
+        headers: HeaderMap,
+        body: Bytes,
+    ) -> impl IntoResponse {
+        state.consume_hits.fetch_add(1, Ordering::SeqCst);
+        assert_eq!(headers[header::AUTHORIZATION], "Bearer fixture-access");
+        let body: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(body["credit_id"], "credit-fixture");
+        assert!(body["redeem_request_id"]
+            .as_str()
+            .is_some_and(|value| !value.is_empty()));
+        Json(json!({"code": "reset", "windows_reset": 2}))
+    }
+
     async fn provider(statuses: Vec<StatusCode>) -> (CodexProvider, MockState) {
         let state = MockState {
             statuses: Arc::new(Mutex::new(statuses)),
@@ -765,6 +1076,14 @@ mod tests {
             .route("/backend-api/codex/responses", post(responses))
             .route("/backend-api/codex/models", get(models))
             .route("/backend-api/wham/usage", get(usage))
+            .route(
+                "/backend-api/wham/rate-limit-reset-credits",
+                get(reset_credits),
+            )
+            .route(
+                "/backend-api/wham/rate-limit-reset-credits/consume",
+                post(consume_reset),
+            )
             .route("/oauth/token", post(refresh_token))
             .with_state(state.clone());
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -1571,5 +1890,53 @@ mod tests {
         // Weekly plus window normalized from seconds.
         assert_eq!(primary.window_minutes, Some(10_080));
         assert_eq!(primary.used_percent, Some(58.0));
+    }
+
+    #[tokio::test]
+    async fn reset_credit_contract_uses_fixed_paths_headers_and_body() {
+        let (provider, state) = provider(vec![]).await;
+        let account = account();
+        let payload = payload();
+        let snapshot = provider
+            .list_reset_credits(&account, &payload)
+            .await
+            .unwrap();
+        assert_eq!(state.reset_hits.load(Ordering::SeqCst), 1);
+        assert_eq!(snapshot.available_count, Some(1));
+        assert_eq!(snapshot.credits[0].id, "credit-fixture");
+        let outcome = provider
+            .consume_reset_credit(&account, &payload, "request-fixture", "credit-fixture")
+            .await
+            .unwrap();
+        assert_eq!(state.consume_hits.load(Ordering::SeqCst), 1);
+        assert_eq!(outcome.code, ResetCreditCode::Reset);
+        assert_eq!(outcome.windows_reset, 2);
+    }
+
+    #[test]
+    fn reset_credit_unknown_code_fails_closed() {
+        assert!(matches!(
+            parse_reset_outcome(&json!({"code":"unexpected"})),
+            Err(ProviderError::Protocol)
+        ));
+    }
+
+    #[test]
+    fn reset_credit_timestamps_accept_wire_string_values() {
+        let snapshot = parse_reset_credits(&json!({
+            "available_count": 1,
+            "credits": [{
+                "id": "fixture",
+                "reset_type": "codex_rate_limits",
+                "status": "available",
+                "granted_at": "2026-09-01T00:00:00Z",
+                "expires_at": "2026-10-04T23:59:59Z"
+            }]
+        }))
+        .unwrap();
+        assert_eq!(
+            snapshot.credits[0].expires_at.as_deref(),
+            Some("2026-10-04T23:59:59Z")
+        );
     }
 }

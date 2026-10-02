@@ -1,17 +1,19 @@
 use std::{collections::HashMap, sync::Arc};
 
-use chrono::{DateTime, Duration, Utc};
+use chrono::{DateTime, Duration, TimeZone, Utc};
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 use tokio::sync::Mutex;
+use uuid::Uuid;
 
 use crate::{
     auth_provider::{
         AuthAccountSummary, AuthenticatedLogin, LoginRuntime, LoginTarget, ProviderError,
         ProviderKind, ProviderLoginContext, ProviderPayload, ProviderRegistry, ProviderRequest,
-        ReplacementContext,
+        ReplacementContext, ResetCredit, ResetCreditCode,
     },
     db::{
-        models::{AuthAccount, AuthAccountUpsert, ModelStates},
+        models::{AuthAccount, AuthAccountUpsert, AuthResetOperation, ModelStates},
         repository::Repository,
     },
 };
@@ -31,6 +33,53 @@ impl Clock for SystemClock {
     }
 }
 
+#[derive(Clone, Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ResetCreditDto {
+    pub id: String,
+    pub reset_type: String,
+    pub status: String,
+    pub granted_at: Option<String>,
+    pub expires_at: Option<String>,
+    pub title: Option<String>,
+    pub description: Option<String>,
+}
+
+#[derive(Clone, Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ResetCreditsSnapshotDto {
+    pub available_count: Option<i64>,
+    pub credits: Vec<ResetCreditDto>,
+    pub fallback_url: String,
+}
+
+#[derive(Clone, Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ResetOperationResultDto {
+    pub operation_id: String,
+    pub status: String,
+    pub code: Option<String>,
+    pub quota_refresh_status: Option<String>,
+    pub windows_reset: i64,
+    pub fallback_url: String,
+}
+
+const CODEX_USAGE_FALLBACK_URL: &str = "https://chatgpt.com/codex/settings/usage";
+
+impl From<ResetCredit> for ResetCreditDto {
+    fn from(value: ResetCredit) -> Self {
+        Self {
+            id: value.id,
+            reset_type: value.reset_type,
+            status: value.status,
+            granted_at: value.granted_at,
+            expires_at: value.expires_at,
+            title: value.title,
+            description: value.description,
+        }
+    }
+}
+
 /// Repository orchestration around generic providers.  One mutex per account
 /// serializes refresh-token rotation.  The lock is held through re-read and
 /// persistence so concurrent callers cannot overwrite a newer refresh token.
@@ -39,6 +88,7 @@ pub struct AuthService {
     registry: ProviderRegistry,
     clock: Arc<dyn Clock>,
     refresh_locks: Mutex<HashMap<String, Arc<Mutex<()>>>>,
+    reset_locks: Mutex<HashMap<String, Arc<Mutex<()>>>>,
 }
 
 impl AuthService {
@@ -56,6 +106,7 @@ impl AuthService {
             registry,
             clock,
             refresh_locks: Mutex::new(HashMap::new()),
+            reset_locks: Mutex::new(HashMap::new()),
         }
     }
 
@@ -442,6 +493,187 @@ impl AuthService {
         self.probe_quota(account_id).await
     }
 
+    /// 查询账号绑定的 Codex 重置卡。能力、账号状态和凭据都在发网前校验。
+    pub async fn list_reset_credits(
+        &self,
+        account_id: &str,
+    ) -> Result<ResetCreditsSnapshotDto, ProviderError> {
+        let account = self.reset_account(account_id).await?;
+        let payload = Self::payload_for(&account)?;
+        let provider = self.registry.provider_for_name(&account.provider)?;
+        let snapshot = provider.list_reset_credits(&account, &payload).await?;
+        Ok(ResetCreditsSnapshotDto {
+            available_count: snapshot.available_count,
+            credits: snapshot.credits.into_iter().map(Into::into).collect(),
+            fallback_url: CODEX_USAGE_FALLBACK_URL.to_owned(),
+        })
+    }
+
+    /// 消费前重新查询并校验卡片，随后以本地账号锁串行化一次上游 POST。
+    /// Retryable/协议未知错误只会留下 unknown 状态，绝不自动重发。
+    pub async fn consume_reset_credit(
+        &self,
+        account_id: &str,
+        credit_id: &str,
+        operation_id: Option<&str>,
+    ) -> Result<ResetOperationResultDto, ProviderError> {
+        let operation_id = operation_id
+            .map(str::to_owned)
+            .unwrap_or_else(|| Uuid::new_v4().to_string());
+        if uuid::Uuid::parse_str(&operation_id).is_err() || credit_id.trim().is_empty() {
+            return Err(ProviderError::InvalidPayload);
+        }
+        if let Ok(existing) = self
+            .repository
+            .get_auth_reset_operation(account_id, &operation_id)
+            .await
+        {
+            return Ok(operation_result_from_row(existing));
+        }
+        let lock = {
+            let mut locks = self.reset_locks.lock().await;
+            locks
+                .entry(account_id.to_owned())
+                .or_insert_with(|| Arc::new(Mutex::new(())))
+                .clone()
+        };
+        let _guard = lock.lock().await;
+        if let Ok(existing) = self
+            .repository
+            .get_auth_reset_operation(account_id, &operation_id)
+            .await
+        {
+            return Ok(operation_result_from_row(existing));
+        }
+        if let Ok(Some(existing)) = self
+            .repository
+            .get_open_auth_reset_operation(account_id)
+            .await
+        {
+            return Ok(operation_result_from_row(existing));
+        }
+
+        let account = self.reset_account(account_id).await?;
+        let payload = Self::payload_for(&account)?;
+        let provider = self.registry.provider_for_name(&account.provider)?;
+        let snapshot = provider.list_reset_credits(&account, &payload).await?;
+        let now = self.clock.now();
+        let credit = snapshot
+            .credits
+            .iter()
+            .find(|credit| credit.id == credit_id)
+            .filter(|credit| credit.status.eq_ignore_ascii_case("available"))
+            .filter(|credit| credit.reset_type == "codex_rate_limits")
+            .filter(|credit| {
+                credit.expires_at.as_deref().map_or(true, |expires| {
+                    parse_reset_time(expires).is_some_and(|time| time > now)
+                })
+            })
+            .ok_or(ProviderError::InvalidPayload)?;
+        let redeem_request_id = Uuid::new_v4().to_string();
+        let operation = AuthResetOperation {
+            id: operation_id.clone(),
+            account_id: account_id.to_owned(),
+            credit_id_hash: hash_reset_credit_id(&credit.id),
+            redeem_request_id: redeem_request_id.clone(),
+            status: "pending".to_owned(),
+            upstream_code: None,
+            error_class: None,
+            quota_refresh_status: None,
+            created_at: now.to_rfc3339(),
+            updated_at: now.to_rfc3339(),
+        };
+        self.repository
+            .create_auth_reset_operation(&operation)
+            .await
+            .map_err(|_| ProviderError::Storage)?;
+
+        let outcome = match provider
+            .consume_reset_credit(&account, &payload, &redeem_request_id, &credit.id)
+            .await
+        {
+            Ok(outcome) => outcome,
+            Err(error) => {
+                let status = if matches!(error, ProviderError::Retryable | ProviderError::Protocol)
+                {
+                    "unknown"
+                } else {
+                    "failed"
+                };
+                let _ = self
+                    .repository
+                    .update_auth_reset_operation(
+                        &operation_id,
+                        status,
+                        None,
+                        Some(error_code(&error)),
+                        None,
+                    )
+                    .await;
+                return Err(error);
+            }
+        };
+        let status = outcome.code.as_str();
+        let quota_refresh_status = if matches!(
+            outcome.code,
+            ResetCreditCode::Reset | ResetCreditCode::AlreadyRedeemed
+        ) {
+            match self.refresh_quota(account_id).await {
+                Ok(_) => Some("refreshed"),
+                Err(_) => Some("failed"),
+            }
+        } else {
+            None
+        };
+        self.repository
+            .update_auth_reset_operation(
+                &operation_id,
+                status,
+                Some(status),
+                None,
+                quota_refresh_status,
+            )
+            .await
+            .map_err(|_| ProviderError::Storage)?;
+        Ok(ResetOperationResultDto {
+            operation_id,
+            status: status.to_owned(),
+            code: Some(status.to_owned()),
+            quota_refresh_status: quota_refresh_status.map(str::to_owned),
+            windows_reset: outcome.windows_reset,
+            fallback_url: CODEX_USAGE_FALLBACK_URL.to_owned(),
+        })
+    }
+
+    /// 只读取已有操作，不使用新幂等键，也不重放消费请求。
+    pub async fn resume_reset_operation(
+        &self,
+        account_id: &str,
+        operation_id: &str,
+    ) -> Result<ResetOperationResultDto, ProviderError> {
+        if uuid::Uuid::parse_str(operation_id).is_err() {
+            return Err(ProviderError::InvalidPayload);
+        }
+        let operation = self
+            .repository
+            .get_auth_reset_operation(account_id, operation_id)
+            .await
+            .map_err(|_| ProviderError::Storage)?;
+        Ok(operation_result_from_row(operation))
+    }
+
+    async fn reset_account(&self, account_id: &str) -> Result<AuthAccount, ProviderError> {
+        let account = self.get_account(account_id).await?;
+        let supports = crate::auth_provider::spec::provider_spec_by_name(&account.provider)
+            .is_some_and(|spec| spec.supports_reset_credit);
+        if !supports || account.status != "active" || account.disabled != 0 {
+            return Err(ProviderError::UnsupportedFeatures {
+                pointer: "/reset_credits".into(),
+            });
+        }
+        Ok(account)
+    }
+
     async fn probe_quota(&self, account_id: &str) -> Result<AuthAccountSummary, ProviderError> {
         let account = self.get_account(account_id).await?;
         let supports_quota = crate::auth_provider::spec::provider_spec_by_name(&account.provider)
@@ -746,6 +978,47 @@ impl AuthService {
                     .unwrap_or(false)
             })
             .unwrap_or(true)
+    }
+}
+
+fn hash_reset_credit_id(credit_id: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(credit_id.as_bytes());
+    hex::encode(hasher.finalize())
+}
+
+fn parse_reset_time(value: &str) -> Option<DateTime<Utc>> {
+    value
+        .parse::<i64>()
+        .ok()
+        .and_then(|seconds| Utc.timestamp_opt(seconds, 0).single())
+        .or_else(|| {
+            DateTime::parse_from_rfc3339(value)
+                .ok()
+                .map(|time| time.with_timezone(&Utc))
+        })
+}
+
+fn error_code(error: &ProviderError) -> &'static str {
+    match error {
+        ProviderError::Unauthorized => "unauthorized",
+        ProviderError::PermissionDenied => "permission_denied",
+        ProviderError::Retryable => "retryable",
+        ProviderError::Protocol => "protocol",
+        ProviderError::InvalidPayload => "invalid_payload",
+        ProviderError::UnsupportedFeatures { .. } => "unsupported",
+        _ => "provider_error",
+    }
+}
+
+fn operation_result_from_row(operation: AuthResetOperation) -> ResetOperationResultDto {
+    ResetOperationResultDto {
+        operation_id: operation.id,
+        status: operation.status.clone(),
+        code: operation.upstream_code,
+        quota_refresh_status: operation.quota_refresh_status,
+        windows_reset: 0,
+        fallback_url: CODEX_USAGE_FALLBACK_URL.to_owned(),
     }
 }
 

@@ -72,10 +72,13 @@ pub async fn fetch_upstream_models(
     }
 
     // 出站代理：草稿渠道的 config.proxy（global/direct/custom）与全局设置一致解析。
+    // 未填写 proxy 时也必须回退到全局代理；否则模型同步会意外直连，
+    // 在本机只能通过代理访问上游时会让所有同步请求失败。
     let proxy_url = crate::adaptor::ProxySetting::from_extra(
         input.config.as_ref().unwrap_or(&serde_json::Value::Null),
     )
-    .and_then(|p| p.resolve());
+    .map(|p| p.resolve())
+    .unwrap_or_else(crate::adaptor::global_proxy_url);
     let client = crate::adaptor::with_proxy(
         reqwest::Client::builder().timeout(std::time::Duration::from_secs(timeout_secs.max(1))),
         proxy_url.as_deref(),

@@ -1,0 +1,210 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>WaLiAPI · Codex 重置卡原型</title>
+  <style>
+    :root {
+      --page: #f6f9fc;
+      --surface: #fff;
+      --ink: #17233d;
+      --muted: #73829d;
+      --line: #e7edf6;
+      --green: #0ea56c;
+      --green-dark: #078356;
+      --green-soft: #e5f8ef;
+      --blue-soft: #edf4ff;
+      --orange: #f3a217;
+      --red: #ff4c57;
+      --shadow: 0 12px 30px rgba(49, 75, 117, .10);
+    }
+
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      color: var(--ink);
+      background: radial-gradient(circle at 50% -10%, #fff 0, var(--page) 58%);
+      font: 14px/1.5 -apple-system, BlinkMacSystemFont, "SF Pro Display", "PingFang SC", "Microsoft YaHei", sans-serif;
+    }
+    button { font: inherit; }
+    button:focus-visible { outline: 3px solid rgba(14, 165, 108, .35); outline-offset: 2px; }
+
+    .shell { min-height: 100vh; padding: 22px 28px 46px; }
+    .topbar { display: flex; align-items: center; justify-content: space-between; gap: 18px; margin-bottom: 20px; }
+    .providers { display: flex; align-items: center; flex-wrap: wrap; gap: 9px; }
+    .provider {
+      display: inline-flex; align-items: center; gap: 8px; padding: 9px 15px;
+      border: 1px solid #e1e8f3; border-radius: 999px; color: #5f7396; background: rgba(255,255,255,.72);
+      box-shadow: 0 3px 12px rgba(52, 78, 118, .05); cursor: pointer;
+    }
+    .provider.active { color: white; border-color: var(--green); background: linear-gradient(135deg, #0aa169, #0b8e60); box-shadow: 0 7px 17px rgba(8, 149, 100, .23); }
+    .provider .mark { font-size: 17px; font-weight: 700; }
+    .provider .count { padding: 1px 6px; border-radius: 999px; color: var(--green); background: white; font-size: 11px; font-weight: 700; }
+    .provider.active .count { color: var(--green-dark); }
+    .planned { font-size: 11px; color: #9aa6ba; background: #f3f6fa; padding: 2px 7px; border-radius: 999px; }
+    .refresh-all { display: inline-flex; align-items: center; gap: 9px; padding: 11px 17px; color: var(--ink); background: white; border: 1px solid var(--line); border-radius: 13px; box-shadow: var(--shadow); font-weight: 700; cursor: pointer; }
+
+    .subhead { color: #617492; font-size: 15px; margin: 0 0 14px; }
+    .warning { display: flex; align-items: center; gap: 10px; padding: 13px 16px; color: #f14954; background: #fff0f2; border: 1px solid #ffe0e4; border-radius: 15px; margin-bottom: 12px; }
+    .warning strong { color: #f5a400; }
+    .account-list { display: grid; gap: 10px; }
+    .account-row { display: grid; grid-template-columns: 34px 34px minmax(220px, 1.25fr) minmax(290px, 1fr) auto; align-items: center; gap: 16px; min-height: 92px; padding: 14px 18px; background: rgba(255,255,255,.9); border: 1px solid #edf1f7; border-radius: 17px; box-shadow: 0 4px 16px rgba(47, 73, 116, .045); }
+    .handle { color: #c1ccdd; font-size: 20px; letter-spacing: -5px; }
+    .index { display: grid; place-items: center; width: 30px; height: 30px; background: #f2f5fa; border-radius: 10px; color: #617392; font-weight: 700; }
+    .identity { min-width: 0; }
+    .identity-title { display: flex; align-items: center; gap: 9px; flex-wrap: wrap; font-size: 16px; font-weight: 700; }
+    .status { display: inline-flex; align-items: center; gap: 5px; color: var(--green); background: var(--green-soft); border-radius: 999px; padding: 2px 8px; font-size: 11px; }
+    .status::before { content: ""; width: 6px; height: 6px; border-radius: 99px; background: var(--green); }
+    .plan { color: #9e54e3; background: #f3e8ff; border-radius: 999px; padding: 2px 9px; font-size: 11px; }
+    .email { margin-top: 4px; color: #8a9ab5; }
+    .limits { display: flex; gap: 18px; min-width: 0; }
+    .limit { min-width: 150px; flex: 1; }
+    .limit-head { display: flex; justify-content: space-between; margin-bottom: 6px; font-weight: 700; }
+    .limit-head small { color: var(--muted); font-weight: 500; }
+    .bar { height: 7px; overflow: hidden; background: #e8eef5; border-radius: 99px; }
+    .bar > i { display: block; height: 100%; border-radius: inherit; background: linear-gradient(90deg, #16b778, #078d5e); }
+    .limit-date { margin-top: 5px; color: #667d9f; font-size: 12px; }
+    .actions { display: flex; align-items: center; gap: 7px; }
+    .icon-btn { display: grid; place-items: center; width: 31px; height: 31px; color: #6e83a4; background: transparent; border: 0; border-radius: 9px; cursor: pointer; font-weight: 700; }
+    .icon-btn:hover { background: #eef7f3; color: var(--green-dark); }
+    .reset-btn { color: #6d83a5; border: 1px solid #dfe7f1; background: #f8fbff; border-radius: 9px; font-size: 13px; }
+    .reset-btn:hover { border-color: #9be0c5; background: var(--green-soft); }
+
+    .veil { position: fixed; inset: 0; display: grid; place-items: center; padding: 22px; background: rgba(24, 36, 59, .57); backdrop-filter: blur(6px); }
+    .modal { width: min(100%, 620px); max-height: min(760px, calc(100vh - 44px)); overflow: auto; padding: 25px; background: white; border-radius: 21px; box-shadow: 0 25px 70px rgba(17, 30, 55, .26); }
+    .modal.narrow { width: min(100%, 540px); }
+    .modal-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; }
+    .brand-title { display: flex; align-items: center; gap: 11px; }
+    .brand-logo { display: grid; place-items: center; width: 34px; height: 34px; border-radius: 11px; color: white; background: #111827; font-weight: 800; }
+    h2 { margin: 0; font-size: 20px; }
+    .modal-sub { margin: 4px 0 0 45px; color: var(--muted); }
+    .close { border: 0; background: transparent; color: #7285a2; font-size: 25px; cursor: pointer; line-height: 1; }
+    .credit-list { display: grid; gap: 10px; margin: 22px 0; }
+    .credit { display: grid; grid-template-columns: 26px 36px 1fr auto; align-items: center; gap: 10px; padding: 12px 13px; border: 1px solid #e4ebf4; border-radius: 12px; cursor: pointer; }
+    .credit.selected { border: 2px solid #91dfbd; background: #f5fdf9; padding: 11px 12px; }
+    .credit.disabled { cursor: not-allowed; opacity: .53; }
+    .radio { width: 19px; height: 19px; border: 2px solid #d1dbe8; border-radius: 50%; }
+    .credit.selected .radio { border: 5px solid var(--green); }
+    .ticket { display: grid; place-items: center; width: 34px; height: 34px; border-radius: 8px; color: var(--green); background: var(--green-soft); font-size: 19px; }
+    .credit-title { font-weight: 700; }
+    .credit-meta { margin-top: 2px; color: #7387a5; font-size: 12px; }
+    .expiry { color: #f14651; font-size: 12px; white-space: nowrap; }
+    .modal-foot { display: flex; justify-content: space-between; align-items: center; gap: 12px; }
+    .count-note { color: #71829b; }
+    .buttons { display: flex; gap: 10px; }
+    .btn { min-width: 100px; padding: 10px 17px; border: 1px solid #e0e8f2; border-radius: 11px; background: white; color: #5c7191; cursor: pointer; font-weight: 700; }
+    .btn.primary { color: white; border-color: var(--green); background: linear-gradient(135deg, #0ba871, #078d5d); }
+    .confirm-card { margin: 22px 0 14px; padding: 17px; background: #f5f9fd; border: 1px solid #e6edf6; border-radius: 14px; }
+    .detail { display: grid; grid-template-columns: 95px 1fr; gap: 8px 18px; margin-top: 15px; color: #6e819e; }
+    .detail b { color: var(--ink); font-weight: 600; }
+    .notice { display: flex; gap: 10px; padding: 12px 13px; color: #ad6a09; background: #fff7e8; border-radius: 10px; }
+    .success { text-align: center; padding: 12px 0 5px; }
+    .success-mark { display: grid; place-items: center; width: 70px; height: 70px; margin: 0 auto 12px; color: white; background: #12b77a; border: 11px solid #e5f8ef; border-radius: 50%; font-size: 31px; }
+    .success p { margin: 5px 0 20px; color: var(--muted); }
+    .result { display: grid; grid-template-columns: 1fr 1fr; gap: 10px 20px; text-align: left; padding: 16px; background: #f7fafc; border-radius: 13px; color: #71829b; }
+    .result b { color: var(--ink); }
+    .result .full { grid-column: 1 / -1; }
+    [hidden] { display: none !important; }
+
+    @media (max-width: 980px) {
+      .shell { padding: 16px; }
+      .topbar { align-items: flex-start; flex-direction: column; }
+      .account-row { grid-template-columns: 26px 30px 1fr auto; }
+      .limits { grid-column: 3 / -1; }
+    }
+    @media (max-width: 640px) {
+      .account-row { grid-template-columns: 24px 28px 1fr; gap: 9px; }
+      .limits { grid-column: 2 / -1; flex-direction: column; gap: 8px; }
+      .actions { grid-column: 2 / -1; justify-content: flex-end; }
+      .modal { padding: 19px; }
+      .credit { grid-template-columns: 22px 31px 1fr; }
+      .expiry { grid-column: 3; }
+      .modal-foot { align-items: flex-end; flex-direction: column; }
+    }
+  </style>
+</head>
+<body>
+  <main class="shell">
+    <header class="topbar">
+      <nav class="providers" aria-label="Auth provider">
+        <button class="provider active"><span class="mark">⌘</span> Codex <span class="count">3</span><span>●</span></button>
+        <button class="provider"><span class="mark">☾</span> Kimi Code</button>
+        <button class="provider"><span class="mark">G</span> Antigravity</button>
+        <button class="provider"><span class="mark">＋</span> Grok</button>
+        <button class="provider">Claude <span class="planned">规划中</span></button>
+        <button class="provider">Kiro <span class="planned">规划中</span></button>
+      </nav>
+      <button class="refresh-all" type="button">⟳ <span>刷新全部额度</span></button>
+    </header>
+
+    <p class="subhead">登录后作为路由候选并消耗订阅额度；开启 Auth 账号优先后，将优先使用。</p>
+    <div class="warning"><span>ⓘ</span><strong>⚠</strong><span>风险提示：此提供商使用的订阅 / OAuth 会话未获官方授权用于代理 / 路由器使用。账户可能被限制或封禁。使用风险自负。</span></div>
+
+    <section class="account-list" aria-label="Codex accounts">
+      <article class="account-row">
+        <span class="handle">⁝⁝</span><span class="index">1</span>
+        <div class="identity"><div class="identity-title">hsq_hi@126.com <span class="status">正常</span><span class="plan">plus</span></div><div class="email">hsq_hi@126.com</div></div>
+        <div class="limits"><div class="limit"><div class="limit-head"><span>100%</span><small>—</small></div><div class="bar"><i style="width:100%"></i></div><div class="limit-date">重置 10/30 22:53</div></div></div>
+        <div class="actions"><button class="icon-btn reset-btn" type="button" data-open="select" aria-label="使用重置卡">Ⓡ</button><button class="icon-btn">↻</button><button class="icon-btn">P0</button><button class="icon-btn">W1</button><button class="icon-btn">⌄</button></div>
+      </article>
+      <article class="account-row">
+        <span class="handle">⁝⁝</span><span class="index">2</span>
+        <div class="identity"><div class="identity-title">286@qq.com <span class="status">正常</span><span class="plan">plus</span></div><div class="email">286@qq.com</div></div>
+        <div class="limits"><div class="limit"><div class="limit-head"><span>47%</span><small>—</small></div><div class="bar"><i style="width:47%"></i></div><div class="limit-date">重置 10/1 02:01</div></div><div class="limit"><div class="limit-head"><span style="color:#f09a0c">5%</span><small>—</small></div><div class="bar"><i style="width:5%;background:#f1a217"></i></div><div class="limit-date">重置 10/4 11:47</div></div></div>
+        <div class="actions"><button class="icon-btn reset-btn" type="button" data-open="select" aria-label="使用重置卡">Ⓡ</button><button class="icon-btn">↻</button><button class="icon-btn">P0</button><button class="icon-btn">W1</button><button class="icon-btn">⌄</button></div>
+      </article>
+      <article class="account-row">
+        <span class="handle">⁝⁝</span><span class="index">3</span>
+        <div class="identity"><div class="identity-title">2068346641@qq.com <span class="status">正常</span><span class="plan">plus</span></div><div class="email">2068346641@qq.com</div></div>
+        <div class="limits"><div class="limit"><div class="limit-head"><span>100%</span><small>—</small></div><div class="bar"><i style="width:100%"></i></div><div class="limit-date">重置 10/1 03:34</div></div><div class="limit"><div class="limit-head"><span>100%</span><small>—</small></div><div class="bar"><i style="width:100%"></i></div><div class="limit-date">重置 10/7 22:53</div></div></div>
+        <div class="actions"><button class="icon-btn reset-btn" type="button" data-open="select" aria-label="使用重置卡">Ⓡ</button><button class="icon-btn">↻</button><button class="icon-btn">P0</button><button class="icon-btn">W1</button><button class="icon-btn">⌄</button></div>
+      </article>
+    </section>
+  </main>
+
+  <div class="veil" id="select-modal" hidden>
+    <section class="modal" role="dialog" aria-modal="true" aria-labelledby="select-title">
+      <div class="modal-head"><div><div class="brand-title"><span class="brand-logo">◎</span><h2 id="select-title">选择重置卡</h2></div><p class="modal-sub">从该账号下的可用重置卡中选择一张进行使用</p></div><button class="close" data-close aria-label="关闭">×</button></div>
+      <div class="credit-list">
+        <label class="credit selected"><span class="radio"></span><span class="ticket">▣</span><span><span class="credit-title">重置卡 #1024 <em class="status">可使用</em></span><span class="credit-meta">适用于 GPT（ChatGPT / GPT-4 / GPT-4o 等）</span></span><span class="expiry">2026-10-04 23:59 到期</span></label>
+        <label class="credit"><span class="radio"></span><span class="ticket" style="color:#2e76df;background:#edf4ff">▣</span><span><span class="credit-title">重置卡 #0987 <em class="status">可使用</em></span><span class="credit-meta">适用于 GPT（ChatGPT / GPT-4 / GPT-4o 等）</span></span><span class="expiry">2026-10-28 23:59 到期</span></label>
+        <label class="credit disabled"><span class="radio"></span><span class="ticket" style="color:#ed9b1c;background:#fff5df">▣</span><span><span class="credit-title">重置卡 #0765</span><span class="credit-meta">适用于 GPT（已过期）</span></span><span class="expiry">2026-09-30 23:59 过期</span></label>
+      </div>
+      <div class="modal-foot"><span class="count-note">共 3 张重置卡</span><div class="buttons"><button class="btn" data-close>取消</button><button class="btn primary" data-next>下一步</button></div></div>
+    </section>
+  </div>
+
+  <div class="veil" id="confirm-modal" hidden>
+    <section class="modal narrow" role="dialog" aria-modal="true" aria-labelledby="confirm-title">
+      <div class="modal-head"><div class="brand-title"><span class="brand-logo">◎</span><h2 id="confirm-title">确认使用重置卡</h2></div><button class="close" data-close aria-label="关闭">×</button></div>
+      <div class="confirm-card"><div class="credit-title">🎟️　重置卡 #1024 <em class="status">可使用</em></div><div class="detail"><span>过期时间</span><b>2026-10-04 23:59</b><span>剩余次数</span><b>1 次</b><span>来源</span><b>活动赠送</b></div></div>
+      <div class="notice">ⓘ <span>使用后将立即重置该账号的 GPT 额度，是否确认使用？</span></div>
+      <div class="modal-foot" style="justify-content:flex-end;margin-top:18px"><div class="buttons"><button class="btn" data-close>取消</button><button class="btn primary" data-confirm>确认使用</button></div></div>
+    </section>
+  </div>
+
+  <div class="veil" id="success-modal" hidden>
+    <section class="modal narrow" role="dialog" aria-modal="true" aria-labelledby="success-title">
+      <div class="modal-head"><span></span><button class="close" data-close aria-label="关闭">×</button></div>
+      <div class="success"><div class="success-mark">✓</div><h2 id="success-title">重置成功</h2><p>该账号的 GPT 额度已重置，可以继续使用。</p><div class="result"><span>账号</span><b>286@qq.com</b><span>使用的重置卡</span><b>#1024</b><span class="full">使用时间　<b>2026-10-01 12:00</b></span></div><div class="buttons" style="justify-content:flex-end;margin-top:18px"><button class="btn primary" data-close>我知道了</button></div></div>
+    </section>
+  </div>
+
+  <script>
+    const select = document.querySelector('#select-modal');
+    const confirm = document.querySelector('#confirm-modal');
+    const success = document.querySelector('#success-modal');
+    const closeAll = () => [select, confirm, success].forEach((node) => { node.hidden = true; });
+    document.querySelectorAll('[data-open="select"]').forEach((button) => button.addEventListener('click', () => { closeAll(); select.hidden = false; }));
+    document.querySelectorAll('[data-close]').forEach((button) => button.addEventListener('click', closeAll));
+    document.querySelector('[data-next]').addEventListener('click', () => { select.hidden = true; confirm.hidden = false; });
+    document.querySelector('[data-confirm]').addEventListener('click', () => { confirm.hidden = true; success.hidden = false; });
+    document.querySelectorAll('.credit:not(.disabled)').forEach((credit) => credit.addEventListener('click', () => {
+      document.querySelectorAll('.credit').forEach((item) => item.classList.remove('selected'));
+      credit.classList.add('selected');
+    }));
+    document.addEventListener('keydown', (event) => { if (event.key === 'Escape') closeAll(); });
+  </script>
+</body>
+</html>

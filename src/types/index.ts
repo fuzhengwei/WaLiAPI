@@ -329,6 +329,32 @@ export interface AuthProviderInfo {
   supportsImport: boolean;
   supportsExport: boolean;
   supportsQuota: boolean;
+  supportsResetCredit?: boolean;
+}
+
+export interface AuthResetCredit {
+  id: string;
+  resetType: string;
+  status: string;
+  grantedAt: string | null;
+  expiresAt: string | null;
+  title: string | null;
+  description: string | null;
+}
+
+export interface AuthResetCreditsSnapshot {
+  availableCount: number | null;
+  credits: AuthResetCredit[];
+  fallbackUrl: string;
+}
+
+export interface AuthResetOperationResult {
+  operationId: string;
+  status: string;
+  code: "reset" | "nothing_to_reset" | "no_credit" | "already_redeemed" | string | null;
+  quotaRefreshStatus: "refreshed" | "failed" | null;
+  windowsReset: number;
+  fallbackUrl: string;
 }
 
 export interface DeviceVerification {

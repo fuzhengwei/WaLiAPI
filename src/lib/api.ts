@@ -14,7 +14,7 @@ import type {
   DraftChannelTestInput, DraftChannelTestResult,
   UpstreamModelsResult,
   AuthAccount, AuthLoginSessionStatus, AuthLoginStart, AuthMutationResult, AuthLogoutResult, AuthExportResult,
-  AuthQuotaStatus, AuthUpdateInput,
+  AuthQuotaStatus, AuthUpdateInput, AuthResetCreditsSnapshot, AuthResetOperationResult,
   AuthProviderInfo, AuthLoginMethod,
   PromptTemplate,
 } from "../types";
@@ -161,6 +161,15 @@ export const authApi = {
   logout: (id: string) => invoke<AuthLogoutResult>("auth_logout", { id }),
   refreshToken: (id: string) => invoke<AuthAccount>("auth_refresh_token", { id }),
   refreshQuota: (id: string) => invoke<AuthAccount>("auth_refresh_quota", { id }),
+  listResetCredits: (id: string) => invoke<AuthResetCreditsSnapshot>("auth_list_reset_credits", { id }),
+  consumeResetCredit: (id: string, creditId: string, operationId?: string) =>
+    invoke<AuthResetOperationResult>("auth_consume_reset_credit", {
+      id,
+      creditId,
+      operationId: operationId ?? null,
+    }),
+  resumeResetOperation: (id: string, operationId: string) =>
+    invoke<AuthResetOperationResult>("auth_resume_reset_operation", { id, operationId }),
   syncModels: (id: string) => invoke<AuthAccount>("auth_sync_models", { id }),
   exportJson: (id: string, path: string) => invoke<AuthExportResult>("auth_export_json", { id, path }),
   /** Web 版：导出 auth.json 内容，由浏览器触发下载。 */

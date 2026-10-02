@@ -50,6 +50,7 @@ pub struct ProviderSpec {
     pub supports_import: bool,
     pub supports_export: bool,
     pub supports_quota: bool,
+    pub supports_reset_credit: bool,
 }
 
 const CODEX: ProviderSpec = ProviderSpec {
@@ -61,6 +62,7 @@ const CODEX: ProviderSpec = ProviderSpec {
     supports_import: true,
     supports_export: true,
     supports_quota: true,
+    supports_reset_credit: true,
 };
 
 const KIMI: ProviderSpec = ProviderSpec {
@@ -72,6 +74,7 @@ const KIMI: ProviderSpec = ProviderSpec {
     supports_import: false,
     supports_export: false,
     supports_quota: false,
+    supports_reset_credit: false,
 };
 
 const GEMINI: ProviderSpec = ProviderSpec {
@@ -83,6 +86,7 @@ const GEMINI: ProviderSpec = ProviderSpec {
     supports_import: false,
     supports_export: false,
     supports_quota: true,
+    supports_reset_credit: false,
 };
 
 const GROK: ProviderSpec = ProviderSpec {
@@ -94,6 +98,7 @@ const GROK: ProviderSpec = ProviderSpec {
     supports_import: false,
     supports_export: false,
     supports_quota: false,
+    supports_reset_credit: false,
 };
 
 const REGISTERED: &[&ProviderSpec] = &[&CODEX, &KIMI, &GEMINI, &GROK];

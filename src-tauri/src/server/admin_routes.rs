@@ -518,7 +518,8 @@ async fn dispatch(shared: &SharedState, cmd: &str, args: Value) -> Result<Value,
                 arg(&args, "model")?,
                 arg(&args, "question")?,
                 arg(&args, "searchMode")?,
-            ).await,
+            )
+            .await,
         ),
         "get_api_keys" => to_json(commands::api_key::get_api_keys(state).await),
         "get_api_key_full" => {
@@ -641,6 +642,26 @@ async fn dispatch(shared: &SharedState, cmd: &str, args: Value) -> Result<Value,
         "auth_refresh_quota" => {
             to_json(commands::auth::auth_refresh_quota(arg(&args, "id")?, state).await)
         }
+        "auth_list_reset_credits" => {
+            to_json(commands::auth::auth_list_reset_credits(arg(&args, "id")?, state).await)
+        }
+        "auth_consume_reset_credit" => to_json(
+            commands::auth::auth_consume_reset_credit(
+                arg(&args, "id")?,
+                arg(&args, "creditId")?,
+                arg(&args, "operationId")?,
+                state,
+            )
+            .await,
+        ),
+        "auth_resume_reset_operation" => to_json(
+            commands::auth::auth_resume_reset_operation(
+                arg(&args, "id")?,
+                arg(&args, "operationId")?,
+                state,
+            )
+            .await,
+        ),
         "auth_sync_models" => {
             to_json(commands::auth::auth_sync_models(arg(&args, "id")?, state).await)
         }
@@ -779,7 +800,11 @@ async fn dispatch(shared: &SharedState, cmd: &str, args: Value) -> Result<Value,
             to_json(commands::knowledge_base::get_knowledge_bases(state).await)
         }
         "get_knowledge_embedding_capability" => to_json(
-            commands::knowledge_base::get_knowledge_embedding_capability(state, arg(&args, "model")?).await,
+            commands::knowledge_base::get_knowledge_embedding_capability(
+                state,
+                arg(&args, "model")?,
+            )
+            .await,
         ),
         "create_knowledge_base" => to_json(
             commands::knowledge_base::create_knowledge_base(state, arg(&args, "input")?).await,

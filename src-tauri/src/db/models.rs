@@ -558,6 +558,21 @@ pub struct AuthAccount {
     pub updated_at: String,
 }
 
+/// 重置卡消费的本地审计状态。完整卡 ID 永不落库。
+#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
+pub struct AuthResetOperation {
+    pub id: String,
+    pub account_id: String,
+    pub credit_id_hash: String,
+    pub redeem_request_id: String,
+    pub status: String,
+    pub upstream_code: Option<String>,
+    pub error_class: Option<String>,
+    pub quota_refresh_status: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
 impl AuthAccount {
     pub fn model_states(&self) -> Result<ModelStates, serde_json::Error> {
         serde_json::from_str(&self.model_states_json)

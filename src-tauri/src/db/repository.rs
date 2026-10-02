@@ -1435,6 +1435,91 @@ impl Repository {
         Ok(())
     }
 
+    pub async fn create_auth_reset_operation(
+        &self,
+        operation: &AuthResetOperation,
+    ) -> Result<AuthResetOperation, sqlx::Error> {
+        sqlx::query(
+            "INSERT INTO auth_reset_operations \
+             (id, account_id, credit_id_hash, redeem_request_id, status, created_at, updated_at) \
+             VALUES (?, ?, ?, ?, ?, ?, ?)",
+        )
+        .bind(&operation.id)
+        .bind(&operation.account_id)
+        .bind(&operation.credit_id_hash)
+        .bind(&operation.redeem_request_id)
+        .bind(&operation.status)
+        .bind(&operation.created_at)
+        .bind(&operation.updated_at)
+        .execute(&self.pool)
+        .await?;
+        self.get_auth_reset_operation(&operation.account_id, &operation.id)
+            .await
+    }
+
+    pub async fn get_auth_reset_operation(
+        &self,
+        account_id: &str,
+        id: &str,
+    ) -> Result<AuthResetOperation, sqlx::Error> {
+        sqlx::query_as::<_, AuthResetOperation>(
+            "SELECT * FROM auth_reset_operations WHERE account_id = ? AND id = ?",
+        )
+        .bind(account_id)
+        .bind(id)
+        .fetch_one(&self.pool)
+        .await
+    }
+
+    pub async fn get_auth_reset_operation_by_redeem(
+        &self,
+        account_id: &str,
+        redeem_request_id: &str,
+    ) -> Result<Option<AuthResetOperation>, sqlx::Error> {
+        sqlx::query_as::<_, AuthResetOperation>(
+            "SELECT * FROM auth_reset_operations WHERE account_id = ? AND redeem_request_id = ?",
+        )
+        .bind(account_id)
+        .bind(redeem_request_id)
+        .fetch_optional(&self.pool)
+        .await
+    }
+
+    pub async fn get_open_auth_reset_operation(
+        &self,
+        account_id: &str,
+    ) -> Result<Option<AuthResetOperation>, sqlx::Error> {
+        sqlx::query_as::<_, AuthResetOperation>(
+            "SELECT * FROM auth_reset_operations WHERE account_id = ? AND status IN ('pending', 'unknown') ORDER BY updated_at DESC LIMIT 1",
+        )
+        .bind(account_id)
+        .fetch_optional(&self.pool)
+        .await
+    }
+
+    pub async fn update_auth_reset_operation(
+        &self,
+        id: &str,
+        status: &str,
+        upstream_code: Option<&str>,
+        error_class: Option<&str>,
+        quota_refresh_status: Option<&str>,
+    ) -> Result<(), sqlx::Error> {
+        sqlx::query(
+            "UPDATE auth_reset_operations SET status = ?, upstream_code = ?, error_class = ?, \
+             quota_refresh_status = ?, updated_at = ? WHERE id = ?",
+        )
+        .bind(status)
+        .bind(upstream_code)
+        .bind(error_class)
+        .bind(quota_refresh_status)
+        .bind(now_iso())
+        .bind(id)
+        .execute(&self.pool)
+        .await
+        .map(|_| ())
+    }
+
     pub async fn mark_invalid(
         &self,
         id: &str,

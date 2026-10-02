@@ -15,6 +15,7 @@ use uuid::Uuid;
 use crate::{
     auth_provider::{
         codex_login::{CodexLogin, TauriLoginRuntime, CODEX_IMPORT_NOTICE},
+        service::{ResetCreditsSnapshotDto, ResetOperationResultDto},
         AuthAccountSummary, LoginRuntime, LoginStep, ProviderError, ProviderKind, ProviderPayload,
     },
     db::{
@@ -462,6 +463,32 @@ fn safe_error(error: ProviderError) -> String {
     }
 }
 
+fn reset_safe_error(error: ProviderError) -> String {
+    match error {
+        ProviderError::UnsupportedFeatures { .. } => {
+            "Codex 重置卡接口暂不可用，请打开 https://chatgpt.com/codex/settings/usage 查看额度。"
+                .to_owned()
+        }
+        ProviderError::Unauthorized => "Codex 登录态已失效，请重新登录。".to_owned(),
+        ProviderError::PermissionDenied => "Codex 账号没有重置额度权限。".to_owned(),
+        ProviderError::InvalidPayload => "重置卡已失效或不属于当前账号。".to_owned(),
+        ProviderError::Retryable => {
+            "重置请求结果未知，请稍后查看操作状态，不要重复提交；官方用量页：https://chatgpt.com/codex/settings/usage".to_owned()
+        }
+        ProviderError::Protocol => {
+            "Codex 重置接口返回了无法识别的结果，请打开官方用量页核对。".to_owned()
+        }
+        _ => "重置额度操作失败，请稍后重试。".to_owned(),
+    }
+}
+
+fn reset_list_safe_error(error: ProviderError) -> String {
+    match error {
+        ProviderError::Retryable => "重置卡查询失败，请检查「设置 → 服务配置」中的网络代理是否正在运行；本次没有发送消费请求。".to_owned(),
+        other => reset_safe_error(other),
+    }
+}
+
 fn storage_error() -> String {
     "Auth account storage operation failed".to_owned()
 }
@@ -733,6 +760,7 @@ pub struct AuthProviderDto {
     pub supports_import: bool,
     pub supports_export: bool,
     pub supports_quota: bool,
+    pub supports_reset_credit: bool,
 }
 
 /// Registered providers available for interactive login (renderer-safe spec).
@@ -753,6 +781,7 @@ pub async fn auth_providers_list() -> Result<Vec<AuthProviderDto>, String> {
             supports_import: spec.supports_import,
             supports_export: spec.supports_export,
             supports_quota: spec.supports_quota,
+            supports_reset_credit: spec.supports_reset_credit,
         })
         .collect())
 }
@@ -993,6 +1022,51 @@ pub async fn auth_refresh_quota(
         .await
         .map_err(safe_error)
         .and_then(|summary| AuthAccountDto::try_from(summary).map_err(safe_error))
+}
+
+#[tauri::command]
+pub async fn auth_list_reset_credits(
+    id: String,
+    state: tauri::State<'_, Arc<AppState>>,
+) -> Result<ResetCreditsSnapshotDto, String> {
+    validate_account_id(&id)?;
+    state
+        .auth_service
+        .list_reset_credits(&id)
+        .await
+        .map_err(reset_list_safe_error)
+}
+
+#[tauri::command]
+pub async fn auth_consume_reset_credit(
+    id: String,
+    credit_id: String,
+    operation_id: Option<String>,
+    state: tauri::State<'_, Arc<AppState>>,
+) -> Result<ResetOperationResultDto, String> {
+    validate_account_id(&id)?;
+    if credit_id.trim().is_empty() || credit_id.len() > 512 {
+        return Err("Invalid reset credit".to_owned());
+    }
+    state
+        .auth_service
+        .consume_reset_credit(&id, &credit_id, operation_id.as_deref())
+        .await
+        .map_err(reset_safe_error)
+}
+
+#[tauri::command]
+pub async fn auth_resume_reset_operation(
+    id: String,
+    operation_id: String,
+    state: tauri::State<'_, Arc<AppState>>,
+) -> Result<ResetOperationResultDto, String> {
+    validate_account_id(&id)?;
+    state
+        .auth_service
+        .resume_reset_operation(&id, &operation_id)
+        .await
+        .map_err(reset_safe_error)
 }
 
 #[tauri::command]

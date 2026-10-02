@@ -22,7 +22,8 @@ pub use spec::{AuthLoginMode, AuthNonStreamFraming, ProviderSpec};
 pub use types::{
     AuthAccountSummary, AuthenticatedLogin, LoginResult, MultiImportResult, ProviderError,
     ProviderKind, ProviderLoginContext, ProviderModels, ProviderPayload, ProviderRequest,
-    RefreshedPayload, ReplacementContext,
+    RefreshedPayload, ReplacementContext, ResetCredit, ResetCreditCode, ResetCreditOutcome,
+    ResetCreditsSnapshot,
 };
 
 /// 流式出站客户端：只限制连接建立时间，**不设总超时**。
@@ -155,6 +156,30 @@ pub trait Provider: Send + Sync {
         _payload: &ProviderPayload,
     ) -> Result<Option<QuotaState>, ProviderError> {
         Ok(None)
+    }
+
+    /// 查询 provider 提供的额度重置卡。未实现的 provider 在发网前失败。
+    async fn list_reset_credits(
+        &self,
+        _account: &AuthAccount,
+        _payload: &ProviderPayload,
+    ) -> Result<ResetCreditsSnapshot, ProviderError> {
+        Err(ProviderError::UnsupportedFeatures {
+            pointer: "/reset_credits/list".into(),
+        })
+    }
+
+    /// 消费一张额度重置卡。调用方必须传入持久化的幂等键。
+    async fn consume_reset_credit(
+        &self,
+        _account: &AuthAccount,
+        _payload: &ProviderPayload,
+        _redeem_request_id: &str,
+        _credit_id: &str,
+    ) -> Result<ResetCreditOutcome, ProviderError> {
+        Err(ProviderError::UnsupportedFeatures {
+            pointer: "/reset_credits/consume".into(),
+        })
     }
 }
 

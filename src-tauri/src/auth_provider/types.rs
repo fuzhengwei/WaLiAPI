@@ -225,6 +225,50 @@ pub struct RefreshedPayload {
     pub next_retry_after: Option<String>,
 }
 
+/// Codex 重置卡的安全摘要。`id` 仅作为本次页面操作的上游选择值，
+/// 不会写入日志或数据库；持久化层只保存其单向哈希。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ResetCredit {
+    pub id: String,
+    pub reset_type: String,
+    pub status: String,
+    pub granted_at: Option<String>,
+    pub expires_at: Option<String>,
+    pub title: Option<String>,
+    pub description: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ResetCreditsSnapshot {
+    pub available_count: Option<i64>,
+    pub credits: Vec<ResetCredit>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ResetCreditCode {
+    Reset,
+    NothingToReset,
+    NoCredit,
+    AlreadyRedeemed,
+}
+
+impl ResetCreditCode {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Reset => "reset",
+            Self::NothingToReset => "nothing_to_reset",
+            Self::NoCredit => "no_credit",
+            Self::AlreadyRedeemed => "already_redeemed",
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ResetCreditOutcome {
+    pub code: ResetCreditCode,
+    pub windows_reset: i64,
+}
+
 /// Where a login result should land.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum LoginTarget {

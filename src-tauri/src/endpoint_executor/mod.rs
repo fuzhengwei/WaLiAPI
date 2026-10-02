@@ -1086,11 +1086,14 @@ async fn send_request(
 ) -> Result<reqwest::Response, AttemptFailure> {
     let is_gemini = identity.legacy_executor_override.as_deref() == Some("gemini_native");
     let stream = is_stream_body(&attempt.encoded_body);
-    // 渠道级出站代理：从渠道 config JSON 的 proxy 键解析（global/direct/custom）。
+    // 渠道级出站代理：从渠道 config JSON 的 proxy 键解析
+    //（global/direct/custom）。未填写 proxy 时跟随全局设置；显式
+    // direct 仍保持直连。
     let proxy_url = crate::adaptor::ProxySetting::from_extra(
         &serde_json::from_str::<serde_json::Value>(&channel.config).unwrap_or_default(),
     )
-    .and_then(|p| p.resolve());
+    .map(|p| p.resolve())
+    .unwrap_or_else(crate::adaptor::global_proxy_url);
     let c = client(channel.timeout_secs, stream, proxy_url.as_deref());
 
     if is_gemini {
