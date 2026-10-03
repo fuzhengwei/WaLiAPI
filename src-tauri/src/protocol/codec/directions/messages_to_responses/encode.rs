@@ -84,13 +84,40 @@ pub fn encode_request(
         out.insert("stop".into(), v.clone());
     }
     if let Some(v) = o.get("tools") {
-        out.insert("tools".into(), tools(v, "/tools")?);
-    }
-    if let Some(v) = o.get("tool_choice") {
-        let (choice, parallel) = tool_choice(v, "/tool_choice")?;
-        out.insert("tool_choice".into(), choice);
-        if !parallel {
-            out.insert("parallel_tool_calls".into(), Value::Bool(false));
+        let (converted_tools, skipped_builtin_names) = tools(v, "/tools")?;
+        if !converted_tools.is_empty() {
+            out.insert("tools".into(), Value::Array(converted_tools.clone()));
+        }
+        if !skipped_builtin_names.is_empty() {
+            normalized.push("/tools".into());
+        }
+        if let Some(v) = o.get("tool_choice") {
+            let forced_builtin = matches!(v.get("type").and_then(Value::as_str), Some("tool"))
+                && v.get("name").and_then(Value::as_str).is_some_and(|name| {
+                    skipped_builtin_names
+                        .iter()
+                        .any(|candidate| candidate == name)
+                });
+            if forced_builtin {
+                return Err(bad(
+                    FeatureKind::BuiltinTool,
+                    "/tool_choice/name",
+                    "built-in tool has no direct mapping",
+                ));
+            }
+            if !converted_tools.is_empty() {
+                let (choice, parallel) = tool_choice(v, "/tool_choice")?;
+                out.insert("tool_choice".into(), choice);
+                if !parallel {
+                    out.insert("parallel_tool_calls".into(), Value::Bool(false));
+                }
+            } else if matches!(v.get("type").and_then(Value::as_str), Some("any")) {
+                return Err(bad(
+                    FeatureKind::BuiltinTool,
+                    "/tool_choice/type",
+                    "built-in tool has no direct mapping",
+                ));
+            }
         }
     }
     if let Some(e) = thinking_effort(o) {
@@ -297,19 +324,28 @@ fn image_input(v: &Value, p: &str) -> Result<Value, UnsupportedFeatures> {
         )),
     }
 }
-fn tools(v: &Value, p: &str) -> Result<Value, UnsupportedFeatures> {
+fn tools(v: &Value, p: &str) -> Result<(Vec<Value>, Vec<String>), UnsupportedFeatures> {
+    let mut converted = Vec::new();
+    let mut skipped_builtin_names = Vec::new();
     v.as_array()
         .ok_or_else(|| bad(FeatureKind::UnsupportedField, p, "tools must be an array"))?
         .iter()
         .enumerate()
-        .map(|(i, t)| {
+        .try_for_each(|(i, t)| {
             let q = format!("{p}/{i}");
-            if matches!(t.get("type").and_then(Value::as_str),Some(x)if x!="custom") {
-                return Err(bad(
-                    FeatureKind::BuiltinTool,
-                    format!("{q}/type"),
-                    "built-in tool has no direct mapping",
-                ));
+            let tool_type = t.get("type").and_then(Value::as_str).unwrap_or("custom");
+            if tool_type != "custom" {
+                if !is_anthropic_builtin_tool_type(tool_type) {
+                    return Err(bad(
+                        FeatureKind::BuiltinTool,
+                        format!("{q}/type"),
+                        "built-in tool has no direct mapping",
+                    ));
+                }
+                if let Some(name) = t.get("name").and_then(Value::as_str) {
+                    skipped_builtin_names.push(name.to_string());
+                }
+                return Ok(());
             }
             let name = required(t, "name", &q)?;
             let schema = t.get("input_schema").ok_or_else(|| {
@@ -330,10 +366,26 @@ fn tools(v: &Value, p: &str) -> Result<Value, UnsupportedFeatures> {
             if let Some(d) = t.get("description") {
                 o["description"] = d.clone();
             }
-            Ok(o)
-        })
-        .collect::<Result<Vec<_>, _>>()
-        .map(Value::Array)
+            converted.push(o);
+            Ok(())
+        })?;
+    Ok((converted, skipped_builtin_names))
+}
+
+fn is_anthropic_builtin_tool_type(tool_type: &str) -> bool {
+    const BUILTIN_TOOL_PREFIXES: &[&str] = &[
+        "web_search",
+        "computer_use",
+        "computer",
+        "text_editor",
+        "code_execution",
+        "bash",
+        "code_analysis",
+        "mcp_connector",
+    ];
+    BUILTIN_TOOL_PREFIXES
+        .iter()
+        .any(|prefix| tool_type == *prefix || tool_type.starts_with(&format!("{prefix}_")))
 }
 fn tool_choice(v: &Value, p: &str) -> Result<(Value, bool), UnsupportedFeatures> {
     let o = v.as_object().ok_or_else(|| {

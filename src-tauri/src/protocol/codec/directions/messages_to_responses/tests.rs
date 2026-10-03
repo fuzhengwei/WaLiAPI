@@ -48,6 +48,54 @@ fn request_preserves_tool_result_id() {
 }
 
 #[test]
+fn request_skips_builtin_tools_fail_open() {
+    let (out, context) = encode_request(
+        &serde_json::json!({
+            "messages": [{"role": "user", "content": "hi"}],
+            "tools": [
+                {"type": "web_search_20250305", "name": "web_search", "max_uses": 8},
+                {
+                    "name": "lookup",
+                    "description": "lookup",
+                    "input_schema": {"type": "object"}
+                }
+            ],
+            "tool_choice": {"type": "auto"}
+        }),
+        "m",
+    )
+    .unwrap();
+    assert_eq!(
+        out["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|tool| tool["name"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        vec!["lookup"]
+    );
+    assert_eq!(out["tool_choice"], "auto");
+    assert!(context.normalized.iter().any(|pointer| pointer == "/tools"));
+}
+
+#[test]
+fn request_rejects_forced_builtin_tool() {
+    let error = encode_request(
+        &serde_json::json!({
+            "messages": [{"role": "user", "content": "hi"}],
+            "tools": [{"type": "web_search_20250305", "name": "web_search"}],
+            "tool_choice": {"type": "tool", "name": "web_search"}
+        }),
+        "m",
+    )
+    .unwrap_err();
+    assert!(error
+        .json_pointers
+        .iter()
+        .any(|pointer| pointer == "/tool_choice/name"));
+}
+
+#[test]
 fn request_maps_in_band_system_message_to_developer() {
     let (out, _) = encode_request(
         &serde_json::json!({"messages":[

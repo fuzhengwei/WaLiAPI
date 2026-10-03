@@ -348,17 +348,19 @@ impl Repository {
         // current row values.
         let (identity, legacy_type_out, legacy_base_out) =
             if protocol_ok && provider_ok && base_ok && eps_ok {
+                let protocol = protocol.clone().unwrap_or_default();
                 let identity = ChannelIdentity {
-                    protocol: protocol.clone().unwrap_or_default(),
+                    protocol: protocol.clone(),
                     provider: provider.clone().unwrap_or_default(),
-                    native_base_url: native_base_url.clone().unwrap_or_default(),
+                    native_base_url: crate::core::channel_identity::normalize_native_base_url(
+                        protocol.as_str(),
+                        native_base_url.as_deref().unwrap_or_default(),
+                    ),
                     native_endpoints: native_endpoints.clone().unwrap_or_default(),
                     identity_revision: current_revision.max(1),
                     legacy_executor_override: None,
-                    executor_kind: crate::core::channel_identity::derive_executor_kind(
-                        protocol.as_deref().unwrap_or(""),
-                    )
-                    .to_string(),
+                    executor_kind: crate::core::channel_identity::derive_executor_kind(&protocol)
+                        .to_string(),
                     inferred: false,
                 };
                 let (lt, lb) = crate::core::channel_identity::new_to_legacy(&identity);
