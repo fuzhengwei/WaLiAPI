@@ -4,7 +4,11 @@
 //! place that knows the fixed Codex backend paths and response-header quota wire
 //! format; it never accepts a caller-supplied backend URL in production.
 
-use std::collections::BTreeMap;
+use std::{
+    collections::BTreeMap,
+    sync::{Arc, RwLock},
+    time::{Duration as StdDuration, Instant},
+};
 
 use async_trait::async_trait;
 use chrono::{DateTime, Duration, TimeZone, Utc};
@@ -21,16 +25,37 @@ use crate::db::models::{AuthAccount, ModelState, QuotaLimit, QuotaState, QuotaWi
 pub const CODEX_BACKEND_BASE: &str = "https://chatgpt.com/backend-api/codex";
 const RESPONSES_PATH: &str = "responses";
 const MODELS_PATH: &str = "models";
-// `/models` is a Codex client endpoint, not a WaLiAPI endpoint.  The backend
-// filters its catalog by this value, so using our own application version (for
-// example `0.1.7`) can legitimately produce an empty model list.
-// ChatGPT 按 client_version 门控 Codex 模型目录。0.147.0 只下发 GPT-5.6，
-// 0.156.1 起包含 GPT-6 系列；该值应与当前 Codex CLI 协议版本同步。
-const CODEX_CLIENT_VERSION: &str = "0.156.1";
+const CODEX_DEFAULT_CLIENT_VERSION: &str = "0.162.0";
+const CODEX_VERSION_METADATA_URL: &str = "https://registry.npmjs.org/@openai%2fcodex/latest";
+const CODEX_VERSION_REFRESH_INTERVAL: StdDuration = StdDuration::from_secs(6 * 60 * 60);
 const CODEX_ORIGINATOR: &str = "codex_cli_rs";
 
-fn codex_user_agent() -> String {
-    format!("{CODEX_ORIGINATOR}/{CODEX_CLIENT_VERSION}")
+#[derive(Debug, Clone)]
+struct ClientVersionCache {
+    version: String,
+    checked_at: Option<Instant>,
+}
+
+fn codex_user_agent(client_version: &str) -> String {
+    format!("{CODEX_ORIGINATOR}/{client_version}")
+}
+
+fn normalize_client_version(value: &str) -> Option<String> {
+    let mut parts = value.trim().split(['.', '-']);
+    let major = parts.next()?.parse::<u64>().ok()?;
+    let minor = parts.next()?.parse::<u64>().ok()?;
+    let patch = parts.next()?.parse::<u64>().ok()?;
+    Some(format!("{major}.{minor}.{patch}"))
+}
+
+fn compare_client_versions(left: &str, right: &str) -> std::cmp::Ordering {
+    let parse = |value: &str| {
+        value
+            .split('.')
+            .map(|part| part.parse::<u64>().unwrap_or(0))
+            .collect::<Vec<_>>()
+    };
+    parse(left).cmp(&parse(right))
 }
 
 /// The sole Codex provider implementation.  `with_backend_base` is intentionally
@@ -40,6 +65,8 @@ pub struct CodexProvider {
     client: reqwest::Client,
     backend_base: String,
     login: CodexLogin,
+    client_version: Arc<RwLock<ClientVersionCache>>,
+    client_version_refresh_lock: Arc<tokio::sync::Mutex<()>>,
 }
 
 impl Default for CodexProvider {
@@ -50,24 +77,123 @@ impl Default for CodexProvider {
 
 impl CodexProvider {
     pub fn new() -> Self {
+        let version = std::env::var("WALIAPI_CODEX_CLIENT_VERSION")
+            .ok()
+            .and_then(|value| normalize_client_version(&value))
+            .unwrap_or_else(|| CODEX_DEFAULT_CLIENT_VERSION.to_owned());
         Self {
             client: backend_client(),
             backend_base: CODEX_BACKEND_BASE.to_owned(),
             login: CodexLogin::new(),
+            client_version: Arc::new(RwLock::new(ClientVersionCache {
+                version,
+                checked_at: None,
+            })),
+            client_version_refresh_lock: Arc::new(tokio::sync::Mutex::new(())),
         }
     }
 
     #[cfg(test)]
     fn with_endpoints(backend_base: String, login: CodexLogin) -> Self {
+        let version = std::env::var("WALIAPI_CODEX_CLIENT_VERSION")
+            .ok()
+            .and_then(|value| normalize_client_version(&value))
+            .unwrap_or_else(|| CODEX_DEFAULT_CLIENT_VERSION.to_owned());
         Self {
             client: backend_client(),
             backend_base: backend_base.trim_end_matches('/').to_owned(),
             login,
+            client_version: Arc::new(RwLock::new(ClientVersionCache {
+                version,
+                checked_at: None,
+            })),
+            client_version_refresh_lock: Arc::new(tokio::sync::Mutex::new(())),
         }
     }
 
     fn endpoint(&self, path: &str) -> String {
         format!("{}/{path}", self.backend_base.trim_end_matches('/'))
+    }
+
+    fn current_client_version(&self) -> String {
+        self.client_version
+            .read()
+            .map(|cache| cache.version.clone())
+            .unwrap_or_else(|_| CODEX_DEFAULT_CLIENT_VERSION.to_owned())
+    }
+
+    fn set_client_version(&self, version: String, checked_at: Option<Instant>) {
+        if let Ok(mut cache) = self.client_version.write() {
+            cache.version = version;
+            cache.checked_at = checked_at;
+        }
+    }
+
+    async fn refresh_client_version(&self) -> String {
+        if let Some(version) = std::env::var("WALIAPI_CODEX_CLIENT_VERSION")
+            .ok()
+            .and_then(|value| normalize_client_version(&value))
+        {
+            self.set_client_version(version.clone(), None);
+            return version;
+        }
+
+        if self.backend_base != CODEX_BACKEND_BASE {
+            return self.current_client_version();
+        }
+
+        let now = Instant::now();
+        let fresh = self
+            .client_version
+            .read()
+            .ok()
+            .and_then(|cache| cache.checked_at)
+            .is_some_and(|checked_at| {
+                now.duration_since(checked_at) < CODEX_VERSION_REFRESH_INTERVAL
+            });
+        if fresh {
+            return self.current_client_version();
+        }
+
+        let _guard = self.client_version_refresh_lock.lock().await;
+        let now = Instant::now();
+        let fresh = self
+            .client_version
+            .read()
+            .ok()
+            .and_then(|cache| cache.checked_at)
+            .is_some_and(|checked_at| {
+                now.duration_since(checked_at) < CODEX_VERSION_REFRESH_INTERVAL
+            });
+        if fresh {
+            return self.current_client_version();
+        }
+
+        let latest = match self
+            .client
+            .get(CODEX_VERSION_METADATA_URL)
+            .timeout(StdDuration::from_secs(5))
+            .send()
+            .await
+        {
+            Ok(response) if response.status().is_success() => {
+                response.json::<Value>().await.ok().and_then(|body| {
+                    body.get("version")
+                        .and_then(Value::as_str)
+                        .and_then(normalize_client_version)
+                })
+            }
+            _ => None,
+        };
+
+        let version = latest
+            .filter(|candidate| {
+                compare_client_versions(candidate, &self.current_client_version())
+                    == std::cmp::Ordering::Greater
+            })
+            .map_or_else(|| self.current_client_version(), |candidate| candidate);
+        self.set_client_version(version.clone(), Some(Instant::now()));
+        version
     }
 
     /// The dedicated quota-status endpoint lives at the `backend-api` root, not
@@ -134,7 +260,7 @@ impl CodexProvider {
         );
         headers.insert(
             header::USER_AGENT,
-            header::HeaderValue::from_str(&codex_user_agent())
+            header::HeaderValue::from_str(&codex_user_agent(&self.current_client_version()))
                 .map_err(|_| ProviderError::InvalidPayload)?,
         );
         headers.insert(
@@ -244,6 +370,7 @@ impl Provider for CodexProvider {
         account: &AuthAccount,
         payload: &ProviderPayload,
     ) -> Result<ProviderModels, ProviderError> {
+        let client_version = self.refresh_client_version().await;
         let headers = self.auth_headers(payload, account, &header::HeaderMap::new())?;
         let mut headers = headers;
         headers.insert(
@@ -252,7 +379,7 @@ impl Provider for CodexProvider {
         );
         headers.insert(
             header::USER_AGENT,
-            header::HeaderValue::from_str(&codex_user_agent())
+            header::HeaderValue::from_str(&codex_user_agent(&client_version))
                 .map_err(|_| ProviderError::InvalidPayload)?,
         );
         let response = self
@@ -260,7 +387,7 @@ impl Provider for CodexProvider {
             .get(self.endpoint(MODELS_PATH))
             // This is part of Codex's native `/models` request contract.  The
             // backend uses it to select models compatible with the client.
-            .query(&[("client_version", CODEX_CLIENT_VERSION)])
+            .query(&[("client_version", client_version)])
             .headers(headers)
             .send()
             .await
@@ -712,8 +839,13 @@ mod tests {
         // OpenAI-compatible `data[].id` shape.
         let slug = if state.version_gated_models.load(Ordering::SeqCst) {
             // 真实上游按 client_version 门控模型目录：0.147.0 只返回 GPT-5.6，
-            // 当前 Codex 0.156.1 才会下发 GPT-6。
-            if query.as_deref() == Some("client_version=0.156.1") {
+            // 0.156.1 起才会下发 GPT-6。
+            let version = query
+                .as_deref()
+                .and_then(|value| value.strip_prefix("client_version="))
+                .and_then(normalize_client_version)
+                .unwrap_or_else(|| "0.0.0".into());
+            if compare_client_versions(&version, "0.156.1") != std::cmp::Ordering::Less {
                 "gpt-6-sol"
             } else {
                 "gpt-5.6-sol"
@@ -1185,13 +1317,19 @@ mod tests {
         assert_eq!(headers[header::AUTHORIZATION], "Bearer fixture-access");
         assert_eq!(headers["x-openai-actor-authorization"], "trusted-actor");
         assert_eq!(headers[header::ACCEPT], "application/json");
-        assert_eq!(headers[header::USER_AGENT], codex_user_agent());
+        assert_eq!(
+            headers[header::USER_AGENT],
+            codex_user_agent(&provider.current_client_version())
+        );
         assert_eq!(headers["originator"], CODEX_ORIGINATOR);
         assert_eq!(headers["chatgpt-account-id"], "remote");
         drop(requests);
         assert_eq!(
             state.model_queries.lock().await.as_slice(),
-            [Some(format!("client_version={CODEX_CLIENT_VERSION}"))]
+            [Some(format!(
+                "client_version={}",
+                provider.current_client_version()
+            ))]
         );
     }
 
@@ -1203,6 +1341,36 @@ mod tests {
         let models = provider.list_models(&account(), &payload()).await.unwrap();
 
         assert_eq!(models[0].id, "gpt-6-sol");
+    }
+
+    #[test]
+    fn client_version_is_normalized_to_three_numeric_parts() {
+        assert_eq!(
+            normalize_client_version(" 0.163.0 "),
+            Some("0.163.0".into())
+        );
+        assert_eq!(normalize_client_version("v0.163.0"), None);
+        assert_eq!(normalize_client_version("0.163"), None);
+        assert_eq!(
+            normalize_client_version("0.163.0-beta.1"),
+            Some("0.163.0".into())
+        );
+    }
+
+    #[test]
+    fn client_versions_are_compared_numerically() {
+        assert_eq!(
+            compare_client_versions("0.163.0", "0.162.99"),
+            std::cmp::Ordering::Greater
+        );
+        assert_eq!(
+            compare_client_versions("0.162.0", "0.162.0"),
+            std::cmp::Ordering::Equal
+        );
+        assert_eq!(
+            compare_client_versions("0.9.0", "0.10.0"),
+            std::cmp::Ordering::Less
+        );
     }
 
     async fn repository() -> Arc<crate::db::repository::Repository> {

@@ -134,10 +134,14 @@ pub fn resolve_channel_identity(row: &ChannelIdentityRow) -> ChannelIdentity {
     {
         let protocol = row.protocol.as_deref().unwrap_or("").to_string();
         let provider = row.provider.as_deref().unwrap_or("").to_string();
+        let native_base_url = normalize_native_base_url(
+            &protocol,
+            row.native_base_url.as_deref().unwrap_or_default(),
+        );
         return ChannelIdentity {
             protocol: protocol.clone(),
             provider: provider.clone(),
-            native_base_url: row.native_base_url.clone().unwrap_or_default(),
+            native_base_url,
             native_endpoints: endpoints,
             identity_revision,
             legacy_executor_override: row.legacy_executor_override.clone(),
@@ -155,6 +159,17 @@ pub fn resolve_channel_identity(row: &ChannelIdentityRow) -> ChannelIdentity {
         row.legacy_executor_override.as_deref(),
         identity_revision,
     )
+}
+
+pub(crate) fn normalize_native_base_url(protocol: &str, native_base_url: &str) -> String {
+    if protocol != "anthropic" {
+        return native_base_url.to_string();
+    }
+    let trimmed = native_base_url.trim().trim_end_matches('/');
+    if trimmed.is_empty() || trimmed.ends_with("/v1") {
+        return trimmed.to_string();
+    }
+    format!("{trimmed}/v1")
 }
 
 fn parse_endpoints(raw: Option<&str>) -> Vec<String> {
@@ -763,7 +778,10 @@ mod tests {
         let id = resolve_channel_identity(&r);
         assert_eq!(id.protocol, "anthropic");
         assert_eq!(id.provider, "zhipu");
-        assert_eq!(id.native_base_url, "https://open.bigmodel.cn/api/anthropic");
+        assert_eq!(
+            id.native_base_url,
+            "https://open.bigmodel.cn/api/anthropic/v1"
+        );
         assert!(!id.inferred);
     }
 
