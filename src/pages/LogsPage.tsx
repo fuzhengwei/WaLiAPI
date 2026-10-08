@@ -4,8 +4,8 @@ import { logApi } from "../lib/api";
 import type { RequestLog, SecurityFinding } from "../types";
 import { formatTime, formatDuration, formatNumber } from "../lib/constants";
 import { writeClipboard } from "../lib/runtime";
-import { safeJsonParse } from "../lib/json";
 import { unescapeText } from "../lib/text";
+import { formatToolArguments } from "../lib/toolArguments";
 import {
   ScrollText, RefreshCw, Trash2, ChevronDown, ChevronRight, AlertCircle,
   Bot, User, Wrench, Terminal, Eye, FileCode2, Image, ArrowRightLeft, ArrowUp, ArrowDown, ArrowDownLeft, ArrowUpRight, Shield, Timer, Coins,
@@ -140,15 +140,6 @@ function extractToolCalls(msg: Record<string, unknown>): ToolCall[] {
     }
   }
   return result;
-}
-
-function formatArguments(args?: string): string {
-  if (!args) return "{}";
-  try {
-    return JSON.stringify(JSON.parse(args), null, 2);
-  } catch {
-    return args;
-  }
 }
 
 /**
@@ -1525,24 +1516,8 @@ function LogDetail({ log }: { log: RequestLog }) {
                                   const toolKey = `msg-${i}-${tci}`;
                                   const isToolExpanded = expandedToolCalls.has(toolKey);
                                   const isCopyingToolKey = copyingTool === toolKey;
-                                  const formattedArgs = (() => {
-                                    try {
-                                      if (typeof tc.function?.arguments === 'string') {
-                                        return JSON.stringify(JSON.parse(tc.function.arguments), null, 2);
-                                      }
-                                      return JSON.stringify(tc.function?.arguments, null, 2);
-                                    } catch {
-                                      return String(tc.function?.arguments);
-                                    }
-                                  })();
-                                  const fullJson = JSON.stringify({
-                                    id: tc.id,
-                                    type: tc.type,
-                                    function: {
-                                      name: tc.function?.name,
-                                      arguments: tc.function?.arguments ? (typeof tc.function.arguments === 'string' ? safeJsonParse(tc.function.arguments, tc.function.arguments) : tc.function.arguments) : undefined,
-                                    }
-                                  }, null, 2);
+                                  const formattedArgs = formatToolArguments(tc.function?.arguments);
+                                  const fullJson = JSON.stringify(tc, null, 2);
 
                                   return (
                                     <div key={toolKey} className="py-2">
@@ -1573,7 +1548,7 @@ function LogDetail({ log }: { log: RequestLog }) {
                                                 : 'bg-gradient-to-r from-slate-100 to-slate-200 text-slate-700 hover:from-indigo-50 hover:to-indigo-100 hover:text-indigo-700 hover:shadow-md hover:-translate-y-0.5'
                                             }`}
                                           >
-                                            {isCopyingToolKey ? '✅ 已复制' : '📋 复制'}
+                                            {isCopyingToolKey ? '✅ 已复制' : '📋 复制原始 JSON'}
                                           </button>
                                           <button
                                             onClick={() => {
@@ -1584,12 +1559,15 @@ function LogDetail({ log }: { log: RequestLog }) {
                                             }}
                                             className="group relative text-[8px] px-1.5 py-0 rounded-full font-medium transition-all duration-200 flex items-center gap-0.5 overflow-hidden bg-gradient-to-r from-slate-100 to-slate-200 text-slate-700 hover:from-indigo-50 hover:to-indigo-100 hover:text-indigo-700 hover:shadow-md hover:-translate-y-0.5"
                                           >
-                                            {isToolExpanded ? '↑ 收起' : '↓ 详情'}
+                                            {isToolExpanded ? '可读视图' : '原始 JSON'}
                                           </button>
                                         </div>
                                       </div>
                                       <div className="bg-slate-50 rounded border border-slate-200 overflow-hidden">
-                                        <pre className="max-w-full overflow-y-auto overflow-x-hidden text-[10px] font-mono text-slate-700 whitespace-pre-wrap break-all p-1.5 max-h-[120px] [overflow-wrap:anywhere]">
+                                        <div className="px-3 py-1.5 border-b border-slate-200 text-[10px] text-slate-500">
+                                          {isToolExpanded ? '原始工具调用 JSON' : '工具参数（可读视图）'}
+                                        </div>
+                                        <pre className="max-w-full overflow-y-auto overflow-x-hidden text-xs leading-6 font-mono text-slate-700 whitespace-pre-wrap break-words p-3 max-h-[360px] [overflow-wrap:anywhere]">
                                           {isToolExpanded ? fullJson : formattedArgs}
                                         </pre>
                                       </div>
@@ -1874,20 +1852,13 @@ function LogDetail({ log }: { log: RequestLog }) {
 
                           {/* Tool calls detail */}
                           {toolCalls.length > 0 && (
-                            <div className="mt-1 divide-y divide-slate-200">
+                            <div className="px-3 py-2 min-w-0 divide-y divide-slate-200">
                               {toolCalls.map((tc, tci) => {
                                 const toolKey = `${i}-${tci}`;
                                 const isToolExpanded = expandedToolCalls.has(toolKey);
                                 const isCopyingToolKey = copyingTool === toolKey;
-                                const formattedArgs = formatArguments(tc.function?.arguments);
-                                const fullJson = JSON.stringify({
-                                  id: tc.id,
-                                  type: tc.type,
-                                  function: {
-                                    name: tc.function?.name,
-                                    arguments: typeof tc.function?.arguments === 'string' ? safeJsonParse(tc.function.arguments, tc.function.arguments) : tc.function?.arguments,
-                                  }
-                                }, null, 2);
+                                const formattedArgs = formatToolArguments(tc.function?.arguments);
+                                const fullJson = JSON.stringify(tc, null, 2);
 
                                   return (
                                     <div key={toolKey} className="py-2">
@@ -1918,7 +1889,7 @@ function LogDetail({ log }: { log: RequestLog }) {
                                                 : 'bg-gradient-to-r from-slate-100 to-slate-200 text-slate-700 hover:from-indigo-50 hover:to-indigo-100 hover:text-indigo-700 hover:shadow-md hover:-translate-y-0.5'
                                             }`}
                                           >
-                                            {isCopyingToolKey ? '✅ 已复制' : '📋 复制'}
+                                            {isCopyingToolKey ? '✅ 已复制' : '📋 复制原始 JSON'}
                                           </button>
                                           <button
                                             onClick={() => {
@@ -1929,12 +1900,15 @@ function LogDetail({ log }: { log: RequestLog }) {
                                             }}
                                             className="group relative text-[8px] px-1.5 py-0 rounded-full font-medium transition-all duration-200 flex items-center gap-0.5 overflow-hidden bg-gradient-to-r from-slate-100 to-slate-200 text-slate-700 hover:from-indigo-50 hover:to-indigo-100 hover:text-indigo-700 hover:shadow-md hover:-translate-y-0.5"
                                           >
-                                            {isToolExpanded ? '↑ 收起' : '↓ 详情'}
+                                            {isToolExpanded ? '可读视图' : '原始 JSON'}
                                           </button>
                                         </div>
                                       </div>
                                       <div className="bg-slate-50 rounded border border-slate-200 overflow-hidden">
-                                        <pre className="max-w-full overflow-y-auto overflow-x-hidden text-[10px] font-mono text-slate-700 whitespace-pre-wrap break-all p-1.5 max-h-[120px] [overflow-wrap:anywhere]">
+                                        <div className="px-3 py-1.5 border-b border-slate-200 text-[10px] text-slate-500">
+                                          {isToolExpanded ? '原始工具调用 JSON' : '工具参数（可读视图）'}
+                                        </div>
+                                        <pre className="max-w-full overflow-y-auto overflow-x-hidden text-xs leading-6 font-mono text-slate-700 whitespace-pre-wrap break-words p-3 max-h-[360px] [overflow-wrap:anywhere]">
                                           {isToolExpanded ? fullJson : formattedArgs}
                                         </pre>
                                       </div>
