@@ -41,9 +41,51 @@ interface ToolCall {
   };
 }
 
+type ResponsesInputItem = Record<string, unknown> & {
+  type?: string;
+  id?: string;
+  call_id?: string;
+  role?: string;
+  content?: unknown;
+  input?: unknown;
+  output?: unknown;
+  name?: string;
+  arguments?: string;
+};
+
+function isResponsesToolCall(item: Record<string, unknown>): boolean {
+  return item.type === "function_call" || item.type === "custom_tool_call";
+}
+
+function normalizeResponsesInputItem(item: ResponsesInputItem, index: number): Record<string, unknown> {
+  const type = typeof item.type === "string" ? item.type : "";
+  const role = typeof item.role === "string" ? item.role : type || "item";
+  let content = item.content;
+
+  if (type === "reasoning" && typeof item.encrypted_content === "string") {
+    content = "[encrypted reasoning]";
+  } else if (item.content === undefined && item.output !== undefined) {
+    content = item.output;
+  } else if (item.content === undefined && item.input !== undefined) {
+    content = item.input;
+  }
+
+  return {
+    ...item,
+    role,
+    content,
+    _source: "responses" as const,
+    _index: index,
+  };
+}
+
 /** Extract all tool/function names from a message object */
 function extractToolNames(msg: Record<string, unknown>): string[] {
   const names: string[] = [];
+  if (msg._source === "responses" && isResponsesToolCall(msg)) {
+    const name = typeof msg.name === "string" && msg.name ? msg.name : String(msg.type);
+    names.push(name);
+  }
   // Anthropic tool_use blocks in content array
   if (Array.isArray(msg.content)) {
     for (const block of msg.content as Array<Record<string, unknown>>) {
@@ -70,6 +112,18 @@ function extractToolNames(msg: Record<string, unknown>): string[] {
 /** Extract tool_calls details from a message object */
 function extractToolCalls(msg: Record<string, unknown>): ToolCall[] {
   const result: ToolCall[] = [];
+  if (msg._source === "responses" && isResponsesToolCall(msg)) {
+    const argumentsValue = typeof msg.arguments === "string" ? msg.arguments : msg.input;
+    result.push({
+      id: typeof msg.id === "string" ? msg.id : (typeof msg.call_id === "string" ? msg.call_id : undefined),
+      type: typeof msg.type === "string" ? msg.type : undefined,
+      function: {
+        name: typeof msg.name === "string" && msg.name ? msg.name : String(msg.type),
+        arguments: typeof argumentsValue === "string" ? argumentsValue : JSON.stringify(argumentsValue),
+      },
+    });
+    return result;
+  }
   if (Array.isArray(msg.tool_calls)) {
     for (const tc of msg.tool_calls as Array<Record<string, unknown>>) {
       const fn = tc.function as Record<string, unknown> | undefined;
@@ -110,6 +164,7 @@ function contentToString(content: unknown): string {
         if (block && typeof block === "object" && !Array.isArray(block)) {
           const b = block as Record<string, unknown>;
           if (typeof b.text === "string" && b.text) return b.text;
+          if (typeof b.type === "string" && (b.type === "input_text" || b.type === "output_text") && typeof b.text === "string") return b.text;
           if (typeof b.type === "string") return `[${b.type}]`;
           return "";
         }
@@ -132,7 +187,7 @@ function getContentPreview(msg: Record<string, unknown>, maxLen: number = 140): 
     // Anthropic-style content blocks
     const parts: string[] = [];
     for (const block of content as Array<Record<string, unknown>>) {
-      if (block.type === "text" && typeof block.text === "string") {
+      if ((block.type === "text" || block.type === "input_text" || block.type === "output_text") && typeof block.text === "string") {
         const compacted = block.text.replace(/\n+/g, " ").trim();
         const t = compacted.length > maxLen ? compacted.slice(0, maxLen) + "…" : compacted;
         parts.push(t);
@@ -159,6 +214,9 @@ function getContentPreview(msg: Record<string, unknown>, maxLen: number = 140): 
   }
   if (msg.tool_calls) return `🔧 ${extractToolNames(msg).join(", ")}`;
   if (msg.function_call) return `🔧 ${(msg.function_call as Record<string, unknown>).name as string}`;
+  if (msg._source === "responses" && isResponsesToolCall(msg)) {
+    return `🔧 ${extractToolNames(msg).join(", ")}`;
+  }
   // content 为 undefined 时 JSON.stringify 返回 undefined，需兜底为空串
   const str = JSON.stringify(content) ?? "";
   const compacted = str.replace(/\n+/g, " ").trim();
@@ -175,12 +233,80 @@ function collectAllToolNames(messages: Array<Record<string, unknown>>): string[]
 }
 
 /** Role icon + color mapping */
+/** 兼容旧版 Responses 逐帧审计：从原始 SSE 恢复标准响应卡片数据。 */
+function choicesFromStreamSegments(segments: Array<{ seq: number; content: string }>): Array<Record<string, unknown>> {
+  const contentParts: string[] = [];
+  const reasoningParts: string[] = [];
+  const toolCalls: Array<Record<string, unknown>> = [];
+  const seenToolIds = new Set<string>();
+
+  for (const segment of segments) {
+    for (const line of segment.content.split("\n")) {
+      if (!line.startsWith("data:")) continue;
+      const payload = line.slice(5).trim();
+      if (!payload || payload === "[DONE]") continue;
+      let event: Record<string, unknown>;
+      try { event = JSON.parse(payload) as Record<string, unknown>; } catch { continue; }
+
+      const type = typeof event.type === "string" ? event.type : "";
+      if ((type === "response.output_text.delta" || type === "response.text.delta") && typeof event.delta === "string") {
+        contentParts.push(event.delta);
+      } else if (
+        (type === "response.reasoning_summary_text.delta" || type === "response.reasoning_text.delta") &&
+        typeof event.delta === "string"
+      ) {
+        reasoningParts.push(event.delta);
+      } else if (type === "response.output_item.done" && event.item && typeof event.item === "object") {
+        const item = event.item as Record<string, unknown>;
+        const itemType = typeof item.type === "string" ? item.type : "";
+        if (itemType === "function_call" || itemType === "custom_tool_call") {
+          const id = typeof item.call_id === "string" ? item.call_id : String(item.id ?? "");
+          if (!id || seenToolIds.has(id)) continue;
+          seenToolIds.add(id);
+          const args = typeof item.arguments === "string" ? item.arguments : item.input;
+          toolCalls.push({
+            id,
+            type: "function",
+            function: {
+              name: typeof item.name === "string" ? item.name : itemType,
+              arguments: typeof args === "string" ? args : JSON.stringify(args),
+            },
+          });
+        }
+      } else if ((type === "response.completed" || type === "response.done") && event.response && typeof event.response === "object") {
+        const response = event.response as Record<string, unknown>;
+        const output = Array.isArray(response.output) ? response.output as Array<Record<string, unknown>> : [];
+        for (const item of output) {
+          const blocks = Array.isArray(item.content) ? item.content as Array<Record<string, unknown>> : [];
+          for (const block of blocks) {
+            if (typeof block.text === "string" && !contentParts.length) contentParts.push(block.text);
+          }
+        }
+      }
+    }
+  }
+
+  const message: Record<string, unknown> = { role: "assistant" };
+  if (contentParts.length) message.content = contentParts.join("");
+  if (reasoningParts.length) message.reasoning_content = reasoningParts.join("");
+  if (toolCalls.length) message.tool_calls = toolCalls;
+  if (!contentParts.length && !reasoningParts.length && !toolCalls.length) return [];
+  return [{ index: 0, message, finish_reason: "stop" }];
+}
+
 const ROLE_META: Record<string, { icon: typeof Bot; color: string; bg: string; label: string }> = {
   system:    { icon: Terminal,   color: "text-slate-600",    bg: "bg-slate-100",  label: "System" },
+  developer: { icon: Terminal,   color: "text-purple-600",   bg: "bg-purple-50",  label: "Developer" },
   user:      { icon: User,       color: "text-blue-600",     bg: "bg-blue-50",    label: "User" },
   assistant: { icon: Bot,        color: "text-emerald-600",  bg: "bg-emerald-50", label: "AI" },
   tool:      { icon: Wrench,     color: "text-amber-600",    bg: "bg-amber-50",   label: "Tool" },
   function:  { icon: Wrench,     color: "text-amber-600",    bg: "bg-amber-50",   label: "Func" },
+  reasoning: { icon: Brain,      color: "text-violet-600",   bg: "bg-violet-50",  label: "Reasoning" },
+  custom_tool_call: { icon: Wrench, color: "text-amber-600", bg: "bg-amber-50",   label: "Custom Tool" },
+  function_call:    { icon: Wrench, color: "text-amber-600", bg: "bg-amber-50",   label: "Function" },
+  custom_tool_call_output: { icon: Wrench, color: "text-amber-600", bg: "bg-amber-50", label: "Tool Output" },
+  function_call_output:    { icon: Wrench, color: "text-amber-600", bg: "bg-amber-50", label: "Function Output" },
+  additional_tools: { icon: FileCode2, color: "text-purple-600", bg: "bg-purple-50", label: "Additional Tools" },
 };
 function getRoleMeta(role: string) {
   return ROLE_META[role] || { icon: FileCode2, color: "text-purple-600", bg: "bg-purple-50", label: role };
@@ -877,28 +1003,14 @@ function LogDetail({ log }: { log: RequestLog }) {
         }
       : null;
 
-  // Support both Chat Completions (messages) and Responses API (input) formats
+  // Support Chat Completions (messages), Responses array input, and Responses string input.
   const rawMessages: Array<Record<string, unknown>> = parsed && Array.isArray(parsed.messages) ? parsed.messages : [];
-  const rawInput: Array<Record<string, unknown>> = parsed && Array.isArray(parsed.input) ? parsed.input : [];
-  // Normalize Responses API input items to a common message-like structure for display
+  const rawInput: Array<ResponsesInputItem> = parsed && Array.isArray(parsed.input) ? parsed.input : [];
   const messages: Array<Record<string, unknown>> = rawMessages.length > 0
     ? rawMessages
-    : rawInput.map((item, idx) => {
-        // Responses API input items have: role, content (array of {type, text})
-        const role = item.role as string || 'user';
-        const contentArr = Array.isArray(item.content) ? item.content as Array<Record<string, unknown>> : [];
-        // Extract text from content parts (input_text / output_text / text types)
-        const textParts = contentArr
-          .filter(p => p.type === 'input_text' || p.type === 'output_text' || p.type === 'text')
-          .map(p => p.text as string)
-          .join('\n');
-        return {
-          role,
-          content: textParts || '',
-          _source: 'responses' as const,
-          _index: idx,
-        };
-      });
+    : typeof parsed?.input === "string"
+      ? [{ role: "user", content: parsed.input, _source: "responses" as const, _index: 0 }]
+      : rawInput.map(normalizeResponsesInputItem);
   const [messagesExpanded, setMessagesExpanded] = useState(messages.length <= 5);
   const allToolNames = useMemo(() => collectAllToolNames(messages), [messages]);
   const modelRequested = (parsed?.model as string) || log.model;
@@ -912,12 +1024,16 @@ function LogDetail({ log }: { log: RequestLog }) {
     let totalInputChars = 0;
     let hasImage = false;
     for (const msg of messages) {
-      const r = (msg.role as string) || "unknown";
+      const role = typeof msg.role === "string" ? msg.role : "unknown";
+      const type = typeof msg.type === "string" ? msg.type : "message";
+      const r = type === "message" ? role : type;
       roles.set(r, (roles.get(r) || 0) + 1);
       if (typeof msg.content === "string") totalInputChars += msg.content.length;
       if (Array.isArray(msg.content)) {
         for (const b of msg.content as Array<Record<string, unknown>>) {
-          if (b.type === "text" && typeof b.text === "string") totalInputChars += b.text.length;
+          if ((b.type === "text" || b.type === "input_text" || b.type === "output_text") && typeof b.text === "string") {
+            totalInputChars += b.text.length;
+          }
           if (b.type === "image") hasImage = true;
         }
       }
@@ -944,6 +1060,7 @@ function LogDetail({ log }: { log: RequestLog }) {
     : null;
 
   // Parse response choices
+  const legacyChoices = useMemo(() => choicesFromStreamSegments(streamSegments), [streamSegments]);
   let parsedChoices: Array<Record<string, unknown>> | null = null;
   let prettyChoices = log.response_choices || "";
   let choicesParseError = false;
@@ -953,6 +1070,10 @@ function LogDetail({ log }: { log: RequestLog }) {
       prettyChoices = JSON.stringify(parsedChoices, null, 2);
     }
   } catch { choicesParseError = true; }
+  if (!parsedChoices && legacyChoices.length) {
+    parsedChoices = legacyChoices;
+    prettyChoices = JSON.stringify(parsedChoices, null, 2);
+  }
 
   const [responseChoicesExpanded, setResponseChoicesExpanded] = useState(
     !parsedChoices || parsedChoices.length <= 5
@@ -1692,6 +1813,7 @@ function LogDetail({ log }: { log: RequestLog }) {
                         )}
 
                         {/* Content section */}
+                        {(content.length > 0 || toolCalls.length === 0) && (
                         <div className="px-3 py-2">
                           <div className="flex items-center justify-between gap-1.5 mb-1">
                             <div className="flex items-center gap-1.5">
@@ -1747,6 +1869,8 @@ function LogDetail({ log }: { log: RequestLog }) {
                               unescapeText(content)
                             )}
                           </div>
+                        </div>
+                        )}
 
                           {/* Tool calls detail */}
                           {toolCalls.length > 0 && (
@@ -1820,7 +1944,6 @@ function LogDetail({ log }: { log: RequestLog }) {
                             </div>
                           )}
                         </div>
-                      </div>
                     );
                   })}
                 </div>
