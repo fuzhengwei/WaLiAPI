@@ -2962,6 +2962,7 @@ async fn drill_backup_and_restore_file_db_preserves_everything() {
         .connect_with(crate::db::sqlite_connect_options(&dir))
         .await
         .expect("open file db");
+    assert!(crate::db::enable_wal_best_effort(&pool).await, "WAL 应启用");
     sqlx::migrate!("./migrations")
         .run(&pool)
         .await

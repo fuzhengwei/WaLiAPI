@@ -804,9 +804,20 @@ async fn model_success_rate_reflects_remaining_channels_after_partial_reset() {
 
     let t = "2026-09-04T08:15:00.000Z";
     // 同一模型 m1 走两个渠道:c1 1成功1失败,c2 1成功1失败。
-    repo.create_log(&log("a", Some("k1"), Some("c1"), "m1", 200, 10, 1, 11, 5, t))
-        .await
-        .unwrap();
+    repo.create_log(&log(
+        "a",
+        Some("k1"),
+        Some("c1"),
+        "m1",
+        200,
+        10,
+        1,
+        11,
+        5,
+        t,
+    ))
+    .await
+    .unwrap();
     repo.create_log(&log("b", Some("k1"), Some("c1"), "m1", 500, 0, 0, 0, 1, t))
         .await
         .unwrap();

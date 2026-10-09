@@ -439,9 +439,15 @@ mod tests {
         let out = rewrite_record(record.as_bytes());
         let text = String::from_utf8(out.clone()).unwrap();
         assert!(text.contains(r#"\"yield_time_ms\":4000}"#), "{text}");
-        assert!(text.ends_with("\r\n\r\n"), "record 终止符必须保留: {text:?}");
+        assert!(
+            text.ends_with("\r\n\r\n"),
+            "record 终止符必须保留: {text:?}"
+        );
         // 改写后的字节仍能被同一套切分器切成一条完整 record。
-        assert_eq!(crate::protocol::codec::sse::record_end(&out), Some(out.len()));
+        assert_eq!(
+            crate::protocol::codec::sse::record_end(&out),
+            Some(out.len())
+        );
     }
 
     #[test]

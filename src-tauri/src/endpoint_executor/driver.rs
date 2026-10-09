@@ -92,7 +92,11 @@ async fn channel_key_slots(channel: &Channel, repo: &Repository) -> Vec<Channel>
     };
     let primary_ok = !channel.api_key.is_empty() && channel.primary_key_enabled();
     if extra_keys.is_empty() {
-        return if primary_ok { vec![channel.clone()] } else { Vec::new() };
+        return if primary_ok {
+            vec![channel.clone()]
+        } else {
+            Vec::new()
+        };
     }
     // Build weighted pool: primary key (weight = channel.weight) + extras.
     let mut pool: Vec<(String, i64)> = Vec::new();

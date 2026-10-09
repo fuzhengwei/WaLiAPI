@@ -43,11 +43,13 @@ impl FileFixture {
     }
 
     async fn connect(dir: &std::path::Path) -> SqlitePool {
-        SqlitePoolOptions::new()
+        let pool = SqlitePoolOptions::new()
             .max_connections(5)
             .connect_with(crate::db::sqlite_connect_options(&dir.join("probe.db")))
             .await
-            .unwrap()
+            .unwrap();
+        assert!(crate::db::enable_wal_best_effort(&pool).await, "WAL 应启用");
+        pool
     }
 
     async fn writes(&self) -> i64 {
