@@ -4,8 +4,9 @@ import { logApi } from "../lib/api";
 import type { RequestLog, SecurityFinding } from "../types";
 import { formatTime, formatDuration, formatNumber } from "../lib/constants";
 import { writeClipboard } from "../lib/runtime";
-import { unescapeText } from "../lib/text";
-import { formatToolArguments } from "../lib/toolArguments";
+import { contentToString, requestLogSource, responseLogSource } from "../lib/auditLog";
+import AuditTextPanel from "../components/logs/AuditTextPanel";
+import AuditToolCall from "../components/logs/AuditToolCall";
 import {
   ScrollText, RefreshCw, Trash2, ChevronDown, ChevronRight, AlertCircle,
   Bot, User, Wrench, Terminal, Eye, FileCode2, Image, ArrowRightLeft, ArrowUp, ArrowDown, ArrowDownLeft, ArrowUpRight, Shield, Timer, Coins,
@@ -140,31 +141,6 @@ function extractToolCalls(msg: Record<string, unknown>): ToolCall[] {
     }
   }
   return result;
-}
-
-/**
- * 消息 content 字段转可展示字符串：undefined/null → ""；数组（Anthropic 内容块）按块拼接文本；
- * 其余类型 JSON 序列化。防止 undefined 调 .replace 或数组被当作字符串断言导致渲染崩溃。
- */
-function contentToString(content: unknown): string {
-  if (typeof content === "string") return content;
-  if (content === undefined || content === null) return "";
-  if (Array.isArray(content)) {
-    return content
-      .map((block) => {
-        if (block && typeof block === "object" && !Array.isArray(block)) {
-          const b = block as Record<string, unknown>;
-          if (typeof b.text === "string" && b.text) return b.text;
-          if (typeof b.type === "string" && (b.type === "input_text" || b.type === "output_text") && typeof b.text === "string") return b.text;
-          if (typeof b.type === "string") return `[${b.type}]`;
-          return "";
-        }
-        return String(block);
-      })
-      .filter(Boolean)
-      .join("\n");
-  }
-  return JSON.stringify(content) ?? "";
 }
 
 /** Get a short preview of message content */
@@ -938,16 +914,17 @@ function UpstreamTypeBadge({ upstreamType }: { upstreamType: RequestLog["upstrea
 function LogDetail({ log }: { log: RequestLog }) {
   const [jsonExpanded, setJsonExpanded] = useState(false);
   const [responseJsonExpanded, setResponseJsonExpanded] = useState(false);
+  const [sourceView, setSourceView] = useState(false);
   const [findings, setFindings] = useState<SecurityFinding[]>([]);
   const [expandedChoices, setExpandedChoices] = useState<Set<string>>(new Set());
   const [expandedMessages, setExpandedMessages] = useState<Set<number>>(new Set());
   const [copyingMessageKey, setCopyingMessageKey] = useState<string | null>(null);
   const [copyingThinkingKey, setCopyingThinkingKey] = useState<string | null>(null);
   const [copyingContentKey, setCopyingContentKey] = useState<string | null>(null);
-  const [expandedToolCalls, setExpandedToolCalls] = useState<Set<string>>(new Set());
-  const [copyingTool, setCopyingTool] = useState<string | null>(null);
-  const [copiedJsonKey, setCopiedJsonKey] = useState<string | null>(null);
   const [streamSegments, setStreamSegments] = useState<Array<{ seq: number; content: string }>>([]);
+  const [segmentsLoading, setSegmentsLoading] = useState(log.is_stream);
+  const [segmentsError, setSegmentsError] = useState(false);
+  const [segmentsReload, setSegmentsReload] = useState(0);
 
   useEffect(() => {
     if (log.risk_score > 0) {
@@ -959,13 +936,21 @@ function LogDetail({ log }: { log: RequestLog }) {
 
   // 流式请求懒加载已生成内容段（detailed 策略下由服务端随落账写入溢出表）
   useEffect(() => {
+    let cancelled = false;
+    setStreamSegments([]);
+    setSegmentsError(false);
+    setSegmentsLoading(log.is_stream);
     if (log.is_stream) {
-      logApi.getStreamSegments(log.id).then(setStreamSegments).catch(() => setStreamSegments([]));
-    } else {
-      setStreamSegments([]);
+      logApi.getStreamSegments(log.id)
+        .then(segments => { if (!cancelled) setStreamSegments(segments); })
+        .catch(() => { if (!cancelled) setSegmentsError(true); })
+        .finally(() => { if (!cancelled) setSegmentsLoading(false); });
     }
-  }, [log.id, log.is_stream]);
-  const streamSegmentsText = streamSegments.map(s => s.content).join("");
+    return () => { cancelled = true; };
+  }, [log.id, log.is_stream, segmentsReload]);
+  const requestSource = requestLogSource(log.request_body);
+  const responseSource = useMemo(() => responseLogSource(log.response_choices, streamSegments), [log.response_choices, streamSegments]);
+  const streamSegmentsText = streamSegments.length > 0 ? responseSource.text || "" : "";
 
   // Parse request body
   let parsed: Record<string, unknown> | null = null;
@@ -1057,8 +1042,9 @@ function LogDetail({ log }: { log: RequestLog }) {
   let choicesParseError = false;
   try {
     if (log.response_choices) {
-      parsedChoices = JSON.parse(log.response_choices) as Array<Record<string, unknown>>;
-      prettyChoices = JSON.stringify(parsedChoices, null, 2);
+      const choices: unknown = JSON.parse(log.response_choices);
+      parsedChoices = Array.isArray(choices) ? choices : null;
+      prettyChoices = JSON.stringify(choices, null, 2);
     }
   } catch { choicesParseError = true; }
   if (!parsedChoices && legacyChoices.length) {
@@ -1355,60 +1341,72 @@ function LogDetail({ log }: { log: RequestLog }) {
             )}
             {activeTab === "response" && <span className="absolute bottom-0 left-0 right-0 h-0.5 bg-emerald-500" />}
           </button>
+        </div>
+        <div className="flex flex-wrap items-center gap-2 border-b border-slate-200 px-4 py-2">
+          <button
+            onClick={() => setSourceView(false)}
+            aria-pressed={!sourceView}
+            className={`rounded-md px-2 py-1 text-xs font-medium ${!sourceView ? "bg-blue-50 text-blue-600" : "text-slate-500 hover:text-slate-700"}`}
+          >
+            可读视图
+          </button>
+          <button
+            onClick={() => setSourceView(true)}
+            aria-pressed={sourceView}
+            className={`rounded-md px-2 py-1 text-xs font-medium ${sourceView ? "bg-blue-50 text-blue-600" : "text-slate-500 hover:text-slate-700"}`}
+          >
+            源数据
+          </button>
           <div className="flex-1" />
-          {/* Tab-specific actions */}
-          {activeTab === "request" && messages.length > 0 && (
+          {!sourceView && activeTab === "request" && log.request_body && messages.length > 0 && (
             <button
               onClick={() => setJsonExpanded(!jsonExpanded)}
-              className="mr-3 text-xs text-blue-500 hover:text-blue-600 transition-colors font-medium"
+              className="text-xs text-blue-500 hover:text-blue-600 transition-colors font-medium"
             >
-              {jsonExpanded ? "返回缩略视图" : "查看原始 JSON"}
+              {jsonExpanded ? "返回消息列表" : "请求 JSON（格式化）"}
             </button>
           )}
-          {activeTab === "response" && parsedChoices && parsedChoices.length > 0 && (
+          {!sourceView && activeTab === "response" && (log.response_choices || legacyChoices.length > 0) && (
             <button
               onClick={() => setResponseJsonExpanded(!responseJsonExpanded)}
-              className="mr-3 text-xs text-blue-500 hover:text-blue-600 transition-colors font-medium"
+              className="text-xs text-blue-500 hover:text-blue-600 transition-colors font-medium"
             >
-              {responseJsonExpanded ? "返回缩略视图" : "查看原始 JSON"}
+              {responseJsonExpanded ? "返回响应列表" : "响应摘要 JSON"}
             </button>
           )}
         </div>
 
         {/* Tab content */}
         <div className="p-4">
+          {sourceView && activeTab === "request" && <AuditTextPanel key="request-source" {...requestSource} />}
+          {sourceView && activeTab === "response" && (
+            segmentsLoading ? (
+              <p className="text-xs text-slate-500">正在加载保存的下游 SSE…</p>
+            ) : segmentsError ? (
+              <div role="alert" className="flex items-center gap-2 text-xs text-red-600">
+                源数据加载失败，不能确认是否保存了 SSE。
+                <button onClick={() => setSegmentsReload(value => value + 1)} className="text-blue-600">重试</button>
+              </div>
+            ) : <AuditTextPanel key="response-source" {...responseSource} />
+          )}
+          {!sourceView && (
+            <p className="mb-3 text-[11px] leading-relaxed text-slate-500">
+              可读视图为格式化展示，长消息预览可能截断，工具参数可能展开转义；核对保存内容请切换「源数据」。
+              {activeTab === "request" ? "请求入库前会进行日志脱敏，简要日志还可能裁剪消息。" : "响应列表和摘要 JSON 由保存的响应提取重组，不代表原始 HTTP 响应。"}
+            </p>
+          )}
 
       {/* ── Request Tab Content ── */}
-      {activeTab === "request" && (
+      {!sourceView && activeTab === "request" && (
       <>
       {messages.length > 0 ? (
         <div>
           <div className="flex items-center justify-between mb-2">
-            <span className="text-xs font-medium text-slate-600">消息列表 ({messages.length} 条)</span>
+            <span className="text-xs font-medium text-slate-600">{jsonExpanded ? "请求 JSON（格式化展示）" : `消息列表 (${messages.length} 条)`}</span>
           </div>
 
           {jsonExpanded ? (
-            <div className="relative">
-              <pre className="max-h-[420px] w-full max-w-full overflow-y-auto overflow-x-hidden rounded-xl bg-slate-50 border border-slate-200 p-3 pr-16 text-xs font-mono whitespace-pre-wrap break-all [overflow-wrap:anywhere] text-slate-700">
-                {pretty}
-              </pre>
-              <button
-                onClick={async () => {
-                  try {
-                    await writeClipboard(pretty);
-                    setCopiedJsonKey('request-messages');
-                    setTimeout(() => setCopiedJsonKey(null), 1500);
-                  } catch {}
-                }}
-                className={`absolute top-2 right-2 text-[10px] px-1.5 py-0.5 rounded-full transition-all shadow-sm ${
-                  copiedJsonKey === 'request-messages'
-                    ? 'bg-emerald-100 border-emerald-300 text-emerald-700'
-                    : 'bg-white/90 border border-slate-200 text-slate-600 hover:bg-blue-50 hover:text-blue-600 hover:border-blue-300'
-                }`}
-              >
-                {copiedJsonKey === 'request-messages' ? '✅ 已复制' : '📋 复制'}
-              </button>
-            </div>
+            <AuditTextPanel title="格式化请求" text={pretty} copyLabel="复制格式化 JSON" />
           ) : (
             <div className="border border-slate-200 rounded-xl overflow-hidden bg-white">
               {messagesExpanded && (
@@ -1419,16 +1417,7 @@ function LogDetail({ log }: { log: RequestLog }) {
                     const Icon = meta.icon;
                     const isExpanded = expandedMessages.has(i);
                     const preview = getContentPreview(msg, 140);
-                    // Check if getContentPreview truncated the content
-                    const fullContent = (() => {
-                      const content = msg.content;
-                      if (typeof content === "string") {
-                        // 还原入库时转义的换行/制表符并统一行尾
-                        return unescapeText(content);
-                      }
-                      // 非字符串（undefined/数组/对象）统一转可展示字符串，undefined 时为 ""
-                      return contentToString(content);
-                    })();
+                    const fullContent = contentToString(msg.content);
                     const isLongContent = fullContent.length > 140;
                     const messageKey = `msg-${i}`;
 
@@ -1494,86 +1483,23 @@ function LogDetail({ log }: { log: RequestLog }) {
                         {/* Content section */}
                         <div className="px-3 py-2 min-w-0">
                           <div className="min-w-0 text-xs text-slate-700 leading-snug whitespace-pre-wrap break-words [overflow-wrap:anywhere]">
-                            {!isExpanded
-                              ? preview
-                              : fullContent
-                            }
+                            {isLongContent && !isExpanded ? preview : fullContent}
                           </div>
                           {/* Tool calls detail */}
                           {(() => {
-                            // Extract tool calls from message
-                            let toolCalls: any[] = [];
+                            let toolCalls: ToolCall[] = [];
                             if (Array.isArray(msg.tool_calls)) {
                               toolCalls = msg.tool_calls;
                             } else if (msg.tool_call) {
-                              toolCalls = [msg.tool_call];
+                              toolCalls = [msg.tool_call as ToolCall];
+                            } else if (msg._source === "responses") {
+                              toolCalls = extractToolCalls(msg);
                             }
                             if (toolCalls.length === 0) return null;
 
                             return (
                               <div className="mt-2 divide-y divide-slate-200">
-                                {toolCalls.map((tc, tci) => {
-                                  const toolKey = `msg-${i}-${tci}`;
-                                  const isToolExpanded = expandedToolCalls.has(toolKey);
-                                  const isCopyingToolKey = copyingTool === toolKey;
-                                  const formattedArgs = formatToolArguments(tc.function?.arguments);
-                                  const fullJson = JSON.stringify(tc, null, 2);
-
-                                  return (
-                                    <div key={toolKey} className="py-2">
-                                      <div className="flex items-center justify-between gap-2 mb-1">
-                                        <div className="flex items-center gap-1.5 min-w-0">
-                                          <span className="inline-flex items-center gap-0.5 rounded-md bg-slate-100 border border-slate-200 px-1.5 py-0.5 text-[10px] font-semibold text-slate-700">
-                                            <span>🔧</span>
-                                            {tc.function?.name}
-                                          </span>
-                                          {tc.id && (
-                                            <span className="text-[10px] text-slate-400 font-mono truncate">{tc.id}</span>
-                                          )}
-                                        </div>
-                                        <div className="flex items-center gap-1">
-                                          <button
-                                            onClick={async () => {
-                                              setCopyingTool(toolKey);
-                                              try {
-                                                await writeClipboard(fullJson);
-                                                setTimeout(() => setCopyingTool(null), 1000);
-                                              } catch {
-                                                setCopyingTool(null);
-                                              }
-                                            }}
-                                            className={`group relative text-[8px] px-1.5 py-0 rounded-full font-medium transition-all duration-200 flex items-center gap-0.5 overflow-hidden ${
-                                              isCopyingToolKey
-                                                ? 'bg-emerald-100 text-emerald-700'
-                                                : 'bg-gradient-to-r from-slate-100 to-slate-200 text-slate-700 hover:from-indigo-50 hover:to-indigo-100 hover:text-indigo-700 hover:shadow-md hover:-translate-y-0.5'
-                                            }`}
-                                          >
-                                            {isCopyingToolKey ? '✅ 已复制' : '📋 复制原始 JSON'}
-                                          </button>
-                                          <button
-                                            onClick={() => {
-                                              const newSet = new Set(expandedToolCalls);
-                                              if (newSet.has(toolKey)) newSet.delete(toolKey);
-                                              else newSet.add(toolKey);
-                                              setExpandedToolCalls(newSet);
-                                            }}
-                                            className="group relative text-[8px] px-1.5 py-0 rounded-full font-medium transition-all duration-200 flex items-center gap-0.5 overflow-hidden bg-gradient-to-r from-slate-100 to-slate-200 text-slate-700 hover:from-indigo-50 hover:to-indigo-100 hover:text-indigo-700 hover:shadow-md hover:-translate-y-0.5"
-                                          >
-                                            {isToolExpanded ? '可读视图' : '原始 JSON'}
-                                          </button>
-                                        </div>
-                                      </div>
-                                      <div className="bg-slate-50 rounded border border-slate-200 overflow-hidden">
-                                        <div className="px-3 py-1.5 border-b border-slate-200 text-[10px] text-slate-500">
-                                          {isToolExpanded ? '原始工具调用 JSON' : '工具参数（可读视图）'}
-                                        </div>
-                                        <pre className="max-w-full overflow-y-auto overflow-x-hidden text-xs leading-6 font-mono text-slate-700 whitespace-pre-wrap break-words p-3 max-h-[360px] [overflow-wrap:anywhere]">
-                                          {isToolExpanded ? fullJson : formattedArgs}
-                                        </pre>
-                                      </div>
-                                    </div>
-                                  );
-                                })}
+                                {toolCalls.map((toolCall, toolIndex) => <AuditToolCall key={`msg-${i}-${toolIndex}`} toolCall={toolCall} />)}
                               </div>
                             );
                           })()}
@@ -1600,78 +1526,29 @@ function LogDetail({ log }: { log: RequestLog }) {
           )}
         </div>
       ) : log.request_body ? (
-        <div>
-          <div className="flex items-center justify-between mb-2">
-            <span className="text-xs text-slate-500">请求内容 ({sizeLabel})</span>
-          </div>
-          {jsonExpanded ? (
-            <div className="relative">
-              <pre className="max-h-[420px] w-full max-w-full overflow-y-auto overflow-x-hidden rounded-xl bg-slate-50 border border-slate-200 p-3 pr-16 text-xs font-mono whitespace-pre-wrap break-all [overflow-wrap:anywhere] text-slate-700">
-                {pretty}
-              </pre>
-              <button
-                onClick={async () => {
-                  try {
-                    await writeClipboard(pretty);
-                    setCopiedJsonKey('request-body');
-                    setTimeout(() => setCopiedJsonKey(null), 1500);
-                  } catch {}
-                }}
-                className={`absolute top-2 right-2 text-[10px] px-1.5 py-0.5 rounded-full transition-all shadow-sm ${
-                  copiedJsonKey === 'request-body'
-                    ? 'bg-emerald-100 border-emerald-300 text-emerald-700'
-                    : 'bg-white/90 border border-slate-200 text-slate-600 hover:bg-blue-50 hover:text-blue-600 hover:border-blue-300'
-                }`}
-              >
-                {copiedJsonKey === 'request-body' ? '✅ 已复制' : '📋 复制'}
-              </button>
-            </div>
-          ) : (
-            <div className="text-xs text-slate-500">点击「展开全部」查看原始 JSON</div>
-          )}
-        </div>
+        <AuditTextPanel title={parseError ? "保存的请求内容（无法解析）" : `请求 JSON（格式化展示，${sizeLabel}）`} text={pretty} copyLabel={parseError ? "复制原文" : "复制格式化 JSON"} />
       ) : (
         <div className="text-xs text-slate-400">无请求内容记录</div>
       )}
 
       {parseError && (
-        <div className="text-xs text-amber-500">⚠ JSON 解析失败，显示原始内容</div>
+        <div className="text-xs text-amber-500">⚠ JSON 解析失败，显示保存的内容</div>
       )}
       </>
       )}
 
       {/* ── Response Tab Content ── */}
-      {activeTab === "response" && (
+      {!sourceView && activeTab === "response" && (
       <>
       {/* ── Response Choices Timeline ── */}
       {parsedChoices && parsedChoices.length > 0 ? (
         <div>
           <div className="flex items-center justify-between mb-2">
-            <span className="text-xs font-medium text-slate-600">选择列表 ({parsedChoices.length} 条)</span>
+            <span className="text-xs font-medium text-slate-600">{responseJsonExpanded ? "响应摘要 JSON（格式化展示）" : `响应列表 (${parsedChoices.length} 条)`}</span>
           </div>
 
           {responseJsonExpanded ? (
-            <div className="relative">
-              <pre className="max-h-[420px] w-full max-w-full overflow-y-auto overflow-x-hidden rounded-xl bg-slate-50 border border-slate-200 p-3 pr-16 text-xs font-mono whitespace-pre-wrap break-all [overflow-wrap:anywhere] text-slate-700">
-                {prettyChoices}
-              </pre>
-              <button
-                onClick={async () => {
-                  try {
-                    await writeClipboard(prettyChoices);
-                    setCopiedJsonKey('response-choices');
-                    setTimeout(() => setCopiedJsonKey(null), 1500);
-                  } catch {}
-                }}
-                className={`absolute top-2 right-2 text-[10px] px-1.5 py-0.5 rounded-full transition-all shadow-sm ${
-                  copiedJsonKey === 'response-choices'
-                    ? 'bg-emerald-100 border-emerald-300 text-emerald-700'
-                    : 'bg-white/90 border border-slate-200 text-slate-600 hover:bg-blue-50 hover:text-blue-600 hover:border-blue-300'
-                }`}
-              >
-                {copiedJsonKey === 'response-choices' ? '✅ 已复制' : '📋 复制'}
-              </button>
-            </div>
+            <AuditTextPanel title="格式化响应摘要" text={prettyChoices} copyLabel="复制格式化 JSON" />
           ) : (
             <div className="border border-slate-200 rounded-xl overflow-hidden bg-white">
               {responseChoicesExpanded && (
@@ -1743,7 +1620,7 @@ function LogDetail({ log }: { log: RequestLog }) {
                                    onClick={async () => {
                                      const thinkingKey = `thinking-${i}`;
                                      try {
-                                       await writeClipboard(unescapeText(reasoningContent));
+                                       await writeClipboard(reasoningContent);
                                        setCopyingThinkingKey(thinkingKey);
                                        setTimeout(() => setCopyingThinkingKey(null), 1000);
                                      } catch {
@@ -1781,10 +1658,10 @@ function LogDetail({ log }: { log: RequestLog }) {
                             <div className="min-w-0 text-xs text-slate-700 leading-snug whitespace-pre-wrap break-words [overflow-wrap:anywhere]">
                               {reasoningContent.length > 200 ? (
                                 reasoningExpanded ? (
-                                  unescapeText(reasoningContent)
+                                  reasoningContent
                                 ) : reasoningPreviewTruncated
                               ) : (
-                                unescapeText(reasoningContent)
+                                reasoningContent
                               )}
                             </div>
                           </div>
@@ -1803,7 +1680,7 @@ function LogDetail({ log }: { log: RequestLog }) {
                                 onClick={async () => {
                                   const contentKey = `content-${i}`;
                                   try {
-                                    await writeClipboard(unescapeText(content));
+                                    await writeClipboard(content);
                                     setCopyingContentKey(contentKey);
                                     setTimeout(() => setCopyingContentKey(null), 1000);
                                   } catch {
@@ -1841,10 +1718,10 @@ function LogDetail({ log }: { log: RequestLog }) {
                           <div className="min-w-0 text-xs text-slate-700 leading-snug whitespace-pre-wrap break-words [overflow-wrap:anywhere]">
                             {content.length > 300 ? (
                               contentExpanded ? (
-                                unescapeText(content)
+                                content
                               ) : getContentPreview(message, 300)
                             ) : (
-                              unescapeText(content)
+                              content
                             )}
                           </div>
                         </div>
@@ -1853,68 +1730,7 @@ function LogDetail({ log }: { log: RequestLog }) {
                           {/* Tool calls detail */}
                           {toolCalls.length > 0 && (
                             <div className="px-3 py-2 min-w-0 divide-y divide-slate-200">
-                              {toolCalls.map((tc, tci) => {
-                                const toolKey = `${i}-${tci}`;
-                                const isToolExpanded = expandedToolCalls.has(toolKey);
-                                const isCopyingToolKey = copyingTool === toolKey;
-                                const formattedArgs = formatToolArguments(tc.function?.arguments);
-                                const fullJson = JSON.stringify(tc, null, 2);
-
-                                  return (
-                                    <div key={toolKey} className="py-2">
-                                      <div className="flex items-center justify-between gap-2 mb-1">
-                                        <div className="flex items-center gap-1.5 min-w-0">
-                                          <span className="inline-flex items-center gap-0.5 rounded-md bg-slate-100 border border-slate-200 px-1.5 py-0.5 text-[10px] font-semibold text-slate-700">
-                                            <span>🔧</span>
-                                            {tc.function?.name}
-                                          </span>
-                                          {tc.id && (
-                                            <span className="text-[10px] text-slate-400 font-mono truncate">{tc.id}</span>
-                                          )}
-                                        </div>
-                                        <div className="flex items-center gap-1">
-                                          <button
-                                            onClick={async () => {
-                                              setCopyingTool(toolKey);
-                                              try {
-                                                await writeClipboard(fullJson);
-                                                setTimeout(() => setCopyingTool(null), 1000);
-                                              } catch {
-                                                setCopyingTool(null);
-                                              }
-                                            }}
-                                            className={`group relative text-[8px] px-1.5 py-0 rounded-full font-medium transition-all duration-200 flex items-center gap-0.5 overflow-hidden ${
-                                              isCopyingToolKey
-                                                ? 'bg-emerald-100 text-emerald-700'
-                                                : 'bg-gradient-to-r from-slate-100 to-slate-200 text-slate-700 hover:from-indigo-50 hover:to-indigo-100 hover:text-indigo-700 hover:shadow-md hover:-translate-y-0.5'
-                                            }`}
-                                          >
-                                            {isCopyingToolKey ? '✅ 已复制' : '📋 复制原始 JSON'}
-                                          </button>
-                                          <button
-                                            onClick={() => {
-                                              const newSet = new Set(expandedToolCalls);
-                                              if (newSet.has(toolKey)) newSet.delete(toolKey);
-                                              else newSet.add(toolKey);
-                                              setExpandedToolCalls(newSet);
-                                            }}
-                                            className="group relative text-[8px] px-1.5 py-0 rounded-full font-medium transition-all duration-200 flex items-center gap-0.5 overflow-hidden bg-gradient-to-r from-slate-100 to-slate-200 text-slate-700 hover:from-indigo-50 hover:to-indigo-100 hover:text-indigo-700 hover:shadow-md hover:-translate-y-0.5"
-                                          >
-                                            {isToolExpanded ? '可读视图' : '原始 JSON'}
-                                          </button>
-                                        </div>
-                                      </div>
-                                      <div className="bg-slate-50 rounded border border-slate-200 overflow-hidden">
-                                        <div className="px-3 py-1.5 border-b border-slate-200 text-[10px] text-slate-500">
-                                          {isToolExpanded ? '原始工具调用 JSON' : '工具参数（可读视图）'}
-                                        </div>
-                                        <pre className="max-w-full overflow-y-auto overflow-x-hidden text-xs leading-6 font-mono text-slate-700 whitespace-pre-wrap break-words p-3 max-h-[360px] [overflow-wrap:anywhere]">
-                                          {isToolExpanded ? fullJson : formattedArgs}
-                                        </pre>
-                                      </div>
-                                    </div>
-                                  );
-                                })}
+                              {toolCalls.map((toolCall, toolIndex) => <AuditToolCall key={`response-${i}-${toolIndex}`} toolCall={toolCall} />)}
                             </div>
                           )}
                         </div>
@@ -1939,61 +1755,9 @@ function LogDetail({ log }: { log: RequestLog }) {
           )}
         </div>
       ) : log.response_choices ? (
-        <div>
-          <div className="flex items-center justify-between mb-2">
-            <span className="text-xs text-slate-500">响应内容</span>
-          </div>
-          {responseJsonExpanded ? (
-            <div className="relative">
-              <pre className="max-h-[420px] w-full max-w-full overflow-y-auto overflow-x-hidden rounded-xl bg-slate-50 border border-slate-200 p-3 pr-16 text-xs font-mono whitespace-pre-wrap break-all [overflow-wrap:anywhere] text-slate-700">
-                {prettyChoices}
-              </pre>
-              <button
-                onClick={async () => {
-                  try {
-                    await writeClipboard(prettyChoices);
-                    setCopiedJsonKey('response-body');
-                    setTimeout(() => setCopiedJsonKey(null), 1500);
-                  } catch {}
-                }}
-                className={`absolute top-2 right-2 text-[10px] px-1.5 py-0.5 rounded-full transition-all shadow-sm ${
-                  copiedJsonKey === 'response-body'
-                    ? 'bg-emerald-100 border-emerald-300 text-emerald-700'
-                    : 'bg-white/90 border border-slate-200 text-slate-600 hover:bg-blue-50 hover:text-blue-600 hover:border-blue-300'
-                }`}
-              >
-                {copiedJsonKey === 'response-body' ? '✅ 已复制' : '📋 复制'}
-              </button>
-            </div>
-          ) : (
-            <div className="text-xs text-slate-500">点击「展开全部」查看原始 JSON</div>
-          )}
-        </div>
+        <AuditTextPanel title={choicesParseError ? "保存的响应摘要（无法解析）" : "响应摘要 JSON（格式化展示）"} text={prettyChoices} copyLabel={choicesParseError ? "复制保存的摘要" : "复制格式化 JSON"} />
       ) : streamSegmentsText ? (
-        <div>
-          <div className="flex items-center justify-between mb-2">
-            <span className="text-xs font-medium text-slate-500">流式生成内容（含中断前已生成部分，{streamSegments.length} 段）</span>
-            <button
-              onClick={async () => {
-                try {
-                  await writeClipboard(streamSegmentsText);
-                  setCopiedJsonKey('stream-segments');
-                  setTimeout(() => setCopiedJsonKey(null), 1500);
-                } catch {}
-              }}
-              className={`text-[10px] px-1.5 py-0.5 rounded-full transition-all shadow-sm ${
-                copiedJsonKey === 'stream-segments'
-                  ? 'bg-emerald-100 border-emerald-300 text-emerald-700'
-                  : 'bg-white/90 border border-slate-200 text-slate-600 hover:bg-blue-50 hover:text-blue-600 hover:border-blue-300'
-              }`}
-            >
-              {copiedJsonKey === 'stream-segments' ? '✅ 已复制' : '📋 复制'}
-            </button>
-          </div>
-          <pre className="max-h-[420px] w-full max-w-full overflow-y-auto overflow-x-hidden rounded-xl bg-slate-50 border border-slate-200 p-3 text-xs font-mono whitespace-pre-wrap break-all [overflow-wrap:anywhere] text-slate-700">
-            {streamSegmentsText}
-          </pre>
-        </div>
+        <AuditTextPanel {...responseSource} />
       ) : (
         <div className="flex flex-col items-center justify-center py-8 text-center">
           <ScrollText className="h-8 w-8 text-slate-300 mb-2" />
