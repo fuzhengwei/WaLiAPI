@@ -275,19 +275,30 @@ pub async fn search_knowledge_base(
     state: State<'_, Arc<AppState>>,
     input: KbSearchInput,
 ) -> Result<Vec<SearchResult>, String> {
-    crate::services::knowledge::retriever::search_query(
+    let query = crate::services::knowledge::handlers::SearchQuery {
+        q: input.query,
+        kb_id: input.kb_id,
+        top_k: input.top_k,
+        search_mode: Some(input.search_mode.unwrap_or_else(|| "vector".into())),
+        vector_weight: input.vector_weight,
+        keyword_weight: input.keyword_weight,
+        diagnostics: false,
+        timeout_ms: None,
+        allow_keyword_fallback: false,
+        allow_vector_fallback: false,
+        strict_retrieval: false,
+        candidate_k: None,
+    };
+    crate::services::knowledge::handlers::search_internal(
         &state.db.pool,
-        input.kb_id.as_deref(),
-        &input.query,
-        input.top_k,
-        input.search_mode.as_deref().unwrap_or("vector"),
-        input.vector_weight.unwrap_or(0.7),
-        input.keyword_weight.unwrap_or(0.3),
-        crate::services::knowledge::retriever::FusionMode::parse(
-            &state.settings.get_str("kb.fusion_mode", "rrf"),
-        ),
+        &state.settings,
+        &query,
+        "",
+        false,
     )
     .await
+    .map(|response| response.data)
+    .map_err(|error| error.to_string())
 }
 
 #[derive(Debug, Deserialize)]

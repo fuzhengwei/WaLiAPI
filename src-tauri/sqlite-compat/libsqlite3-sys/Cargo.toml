@@ -1,0 +1,31 @@
+[package]
+name = "libsqlite3-sys"
+version = "0.30.1"
+edition = "2021"
+license = "MIT"
+publish = false
+description = "WaLiAPI SQLx 0.8 SQLite FFI compatibility facade"
+
+# 不声明 links 或 build.rs；只有官方实际包编译并链接 sqlite3。
+[dependencies]
+sqlite_sys = { package = "libsqlite3-sys", version = "=0.37.0", default-features = false, features = ["column_metadata"] }
+
+[features]
+default = ["min_sqlite_version_3_14_0"]
+min_sqlite_version_3_14_0 = ["sqlite_sys/min_sqlite_version_3_34_1"]
+pkg-config = ["sqlite_sys/pkg-config"]
+vcpkg = ["sqlite_sys/vcpkg"]
+buildtime_bindgen = ["sqlite_sys/buildtime_bindgen"]
+bundled = ["sqlite_sys/bundled"]
+bundled_bindings = ["sqlite_sys/bundled_bindings"]
+bundled-windows = ["sqlite_sys/bundled-windows"]
+bundled-sqlcipher = ["sqlite_sys/bundled-sqlcipher"]
+bundled-sqlcipher-vendored-openssl = ["sqlite_sys/bundled-sqlcipher-vendored-openssl"]
+sqlcipher = ["sqlite_sys/sqlcipher"]
+preupdate_hook = ["sqlite_sys/preupdate_hook"]
+session = ["sqlite_sys/session"]
+unlock_notify = ["sqlite_sys/unlock_notify"]
+loadable_extension = ["sqlite_sys/loadable_extension"]
+in_gecko = ["sqlite_sys/in_gecko"]
+wasm32-wasi-vfs = ["sqlite_sys/wasm32-wasi-vfs"]
+with-asan = ["sqlite_sys/with-asan"]

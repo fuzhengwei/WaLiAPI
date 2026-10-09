@@ -2956,14 +2956,10 @@ async fn drill_backup_and_restore_file_db_preserves_everything() {
         "wali-t10-backup-copy-{}.db",
         uuid::Uuid::new_v4().simple()
     ));
-    let dir_str = dir.to_str().unwrap().to_string();
-    let backup_str = backup_path.to_str().unwrap().to_string();
-
-    // 1. Create + migrate a FILE-backed DB.  `?mode=rwc` allows sqlx to create
-    //    the file (matches `db::Database::new`).
+    // 1. 按生产选项创建文件库，包括 WAL；不以 DELETE 夹具代替线上存储模式。
     let pool = sqlx::sqlite::SqlitePoolOptions::new()
         .max_connections(1)
-        .connect(&format!("sqlite://{dir_str}?mode=rwc"))
+        .connect_with(crate::db::sqlite_connect_options(&dir))
         .await
         .expect("open file db");
     sqlx::migrate!("./migrations")
@@ -3018,14 +3014,17 @@ async fn drill_backup_and_restore_file_db_preserves_everything() {
     };
     repo.create_log(&log).await.expect("log insert");
 
-    // 3. Backup: copy the DB file (the on-disk file is the snapshot).
-    let bytes = std::fs::read(&dir).expect("read db file");
-    std::fs::write(&backup_path, &bytes).expect("write backup file");
+    // 3. 复用生产备份方式生成一致快照，包括尚未 checkpoint 的已提交 WAL 数据。
+    sqlx::query("VACUUM INTO ?")
+        .bind(backup_path.to_str().unwrap())
+        .execute(&pool)
+        .await
+        .expect("vacuum backup");
 
     // 4. "Restore": open the backup file as a fresh pool and read it back.
     let restored_pool = sqlx::sqlite::SqlitePoolOptions::new()
         .max_connections(1)
-        .connect(&format!("sqlite://{backup_str}?mode=rwc"))
+        .connect_with(crate::db::sqlite_connect_options(&backup_path))
         .await
         .expect("open restored db");
     let restored_repo = Repository::new(restored_pool.clone());
@@ -3078,8 +3077,8 @@ async fn drill_backup_and_restore_file_db_preserves_everything() {
     );
 
     // Cleanup.
-    drop(pool);
-    drop(restored_pool);
+    pool.close().await;
+    restored_pool.close().await;
     let _ = std::fs::remove_file(&dir);
     let _ = std::fs::remove_file(&backup_path);
 }

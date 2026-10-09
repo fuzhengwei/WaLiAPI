@@ -57,6 +57,25 @@ impl QueryError {
         self
     }
 
+    /// REST 与显式 MCP 诊断共用安全响应，不返回上游正文或凭据。
+    pub fn response_body(&self) -> Value {
+        let mut error = serde_json::json!({"message": self.message});
+        for (name, value) in [
+            ("stage", &self.stage),
+            ("code", &self.code),
+            ("request_id", &self.request_id),
+        ] {
+            if let Some(value) = value {
+                error[name] = Value::String(value.clone());
+            }
+        }
+        let mut body = serde_json::json!({"error": error});
+        if let Some(diagnostics) = &self.diagnostics {
+            body["diagnostics"] = serde_json::to_value(diagnostics).unwrap_or(Value::Null);
+        }
+        body
+    }
+
     pub fn from_budget(elapsed: BudgetElapsed, stage: &str) -> Self {
         let (status, code, message) = match elapsed {
             BudgetElapsed::Deadline => (
@@ -94,20 +113,7 @@ impl From<&str> for QueryError {
 impl IntoResponse for QueryError {
     fn into_response(self) -> Response {
         let request_id = self.request_id.clone();
-        let mut error = serde_json::json!({"message": self.message});
-        for (name, value) in [
-            ("stage", self.stage),
-            ("code", self.code),
-            ("request_id", self.request_id),
-        ] {
-            if let Some(value) = value {
-                error[name] = Value::String(value);
-            }
-        }
-        let mut body = serde_json::json!({"error": error});
-        if let Some(diagnostics) = self.diagnostics {
-            body["diagnostics"] = serde_json::to_value(diagnostics).unwrap_or(Value::Null);
-        }
+        let body = self.response_body();
         let mut response = (self.status, Json(body)).into_response();
         if let Some(value) = request_id.and_then(|id| id.parse().ok()) {
             response.headers_mut().insert("x-request-id", value);
@@ -312,10 +318,34 @@ impl ModelClient<'_> {
         kb_id: &str,
         model: &str,
     ) -> Result<(), QueryError> {
-        self.ensure_knowledge_access(kb_id, false).await?;
-        let Some(key) = self.current_api_key(true).await? else {
+        self.ensure_model_permission_inner(kb_id, model, true).await
+    }
+
+    /// 已成功消耗额度的向量结果仍复核身份、模型与渠道；额度仅限制下一次模型调用。
+    pub async fn ensure_model_permission_after_answer(
+        &self,
+        kb_id: &str,
+        model: &str,
+    ) -> Result<(), QueryError> {
+        self.ensure_model_permission_inner(kb_id, model, false)
+            .await
+    }
+
+    async fn ensure_model_permission_inner(
+        &self,
+        kb_id: &str,
+        model: &str,
+        check_quota: bool,
+    ) -> Result<(), QueryError> {
+        self.ensure_knowledge_access_inner(kb_id, false, check_quota)
+            .await?;
+        let Some(mut key) = self.current_api_key(check_quota).await? else {
             return Ok(());
         };
+        if !check_quota {
+            // 仅此输出复核用的副本跳过额度检查，不改数据库或后续请求的鉴权。
+            key.quota_limit = 0;
+        }
         crate::core::route_plan::authorize_request(&key, model).map_err(|error| {
             let status =
                 StatusCode::from_u16(error.http_status()).unwrap_or(StatusCode::BAD_GATEWAY);

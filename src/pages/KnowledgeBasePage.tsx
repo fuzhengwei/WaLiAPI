@@ -4,6 +4,7 @@ import { Link as RouterLink, useLocation } from "react-router-dom";
 import {
   KnowledgeBase,
   KbDocument,
+  type PdfTextExtraction,
   KbSearchResult,
   KbRagAnswer,
   KbRetrievalDetail,
@@ -1771,6 +1772,7 @@ function DocumentsTab({ kb, onRefresh }: { kb: KnowledgeBase; onRefresh: () => v
           {docs.map((doc) => {
             const prog = progressMap[doc.id];
             const ocrFailedPages = formatOcrFailedPages(doc.ocr_failed_pages);
+            const pdfQuality = doc.file_type === "pdf" ? formatPdfTextExtraction(doc.doc_meta) : null;
             return (
             <div
               key={doc.id}
@@ -1812,6 +1814,7 @@ function DocumentsTab({ kb, onRefresh }: { kb: KnowledgeBase; onRefresh: () => v
                 ) : (
                   <div className="mt-1 flex items-center gap-3 text-xs text-slate-500">
                     <span>{formatSize(doc.file_size)}</span>
+                    {doc.file_type === "pdf" && <span>{doc.page_count > 0 ? `${doc.page_count} 页` : "页数未记录"}</span>}
                     {doc.chunk_count > 0 && <span>{doc.chunk_count} 切片</span>}
                     {doc.token_count > 0 && <span>{doc.token_count} tokens</span>}
                     {doc.error_message && (
@@ -1823,6 +1826,11 @@ function DocumentsTab({ kb, onRefresh }: { kb: KnowledgeBase; onRefresh: () => v
                         {ocrFailedPages && `（${ocrFailedPages}）`}
                       </span>
                     )}
+                  </div>
+                )}
+                {!prog && pdfQuality && (
+                  <div className={`mt-1 text-xs ${pdfQuality.warning ? "text-amber-700" : "text-slate-500"}`} title={pdfQuality.detail}>
+                    {pdfQuality.label}
                   </div>
                 )}
               </div>
@@ -3201,6 +3209,35 @@ function formatOcrFailedPages(raw: string | null | undefined): string | null {
     // 忽略无法解析的历史数据
   }
   return null;
+}
+
+/** 兼容未记录质量的旧文档；只展示结构化页号，不显示解析库的原始错误。 */
+function formatPdfTextExtraction(raw: string): { label: string; detail: string; warning: boolean } | null {
+  try {
+    const metadata = JSON.parse(raw);
+    const info = metadata?.pdf_text_extraction as PdfTextExtraction | undefined;
+    if (info?.version !== 1 || !Array.isArray(info.pages) || !["complete", "partial", "failed"].includes(info.status)) return null;
+    const pages = info.pages.filter((page) => Number.isInteger(page.page_no) && page.page_no > 0);
+    const insufficient = pages.filter((page) => page.status === "insufficient").map((page) => page.page_no);
+    const failed = pages.filter((page) => page.status === "failed").map((page) => page.page_no);
+    const extracted = pages.filter((page) => page.status === "extracted").length;
+    const warning = info.status !== "complete";
+    const details = [
+      `文字层充足 ${extracted} 页；不足 ${insufficient.length} 页；失败 ${failed.length} 页`,
+      insufficient.length ? `第 ${insufficient.join("、")} 页文字层少于 50 个非空白字符（可能为空白页或扫描页）` : "",
+      failed.length ? `第 ${failed.join("、")} 页文字层提取失败` : "",
+      info.page_count === 0 ? "页面树无法读取，真实页数未知" : "",
+      "仅检查文字层，不代表资料内容完整；不会自动启用 OCR",
+    ].filter(Boolean).join("；");
+    const label = info.status === "failed"
+      ? "未提取到可用文字层 · 查看提示"
+      : warning
+        ? `文字层待检查 · ${insufficient.length} 页不足 / ${failed.length} 页失败`
+        : "文字层已提取 · 不代表资料内容完整";
+    return { label, detail: details, warning };
+  } catch {
+    return null;
+  }
 }
 
 function fileToBase64(file: File): Promise<string> {

@@ -76,6 +76,39 @@ pub async fn get_api_key_full_impl(
         .map(|k| k.key)
 }
 
+/// 管理面按 Key ID 查询回答模型，避免为下拉列表把完整密钥发送到前端。
+#[tauri::command]
+pub async fn get_api_key_answer_models(
+    state: tauri::State<'_, std::sync::Arc<AppState>>,
+    id: String,
+) -> Result<Vec<String>, String> {
+    let repo = Repository::new(state.db.pool.clone());
+    let key = repo
+        .get_api_key_by_id(&id)
+        .await
+        .map_err(|error| match error {
+            sqlx::Error::RowNotFound => "密钥不存在".to_string(),
+            _ => "无法读取 API Key".to_string(),
+        })?;
+    let channels = repo
+        .get_enabled_channels_for_mode(
+            crate::core::route_plan::EndpointKind::ChatCompletions.as_str(),
+            false,
+            &crate::utils::time::now_iso(),
+        )
+        .await
+        .map_err(|_| "无法读取回答模型渠道")?;
+    // 目录查询保持只读；规划器同样校验账号额度，无需写回额度恢复状态。
+    let accounts = repo
+        .list_active_auth_accounts()
+        .await
+        .map_err(|_| "无法读取回答模型账号")?;
+    let flags = crate::core::feature_flags::read_feature_flags(&state.settings);
+    Ok(crate::server::handlers::collect_api_key_answer_models(
+        &key, &channels, &accounts, &flags,
+    ))
+}
+
 #[tauri::command]
 pub async fn create_api_key(
     input: CreateApiKeyInput,

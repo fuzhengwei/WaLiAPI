@@ -424,12 +424,26 @@ pub async fn search_all(
     top_k: usize,
     mcp_only: bool,
 ) -> Result<Vec<SearchResult>, String> {
+    search_all_with_details(pool, query_embedding, top_k, mcp_only, false)
+        .await
+        .map(|(results, _)| results)
+}
+
+/// 跨库仍按向量检索；默认保留正常库的结果，布尔值表示存在局部失败。
+/// 显式严格模式不接受部分成功。摘要只含安全计数，不包含知识库名单或原始错误。
+pub(crate) async fn search_all_with_details(
+    pool: &SqlitePool,
+    query_embedding: &[f32],
+    top_k: usize,
+    mcp_only: bool,
+    strict_retrieval: bool,
+) -> Result<(Vec<SearchResult>, bool), String> {
+    check_cross_kb_budget()?;
     let repo = KbRepository::new(pool.clone());
 
-    let kbs = repo
-        .get_all_kbs()
-        .await
-        .map_err(|e| format!("Failed to get KBs: {}", e))?;
+    let kbs = repo.get_all_kbs().await;
+    check_cross_kb_budget()?;
+    let kbs = kbs.map_err(|_| "cross_kb_list_failed".to_string())?;
 
     let active_kbs: Vec<_> = kbs
         .iter()
@@ -437,14 +451,44 @@ pub async fn search_all(
         .collect();
 
     if active_kbs.is_empty() {
-        return Ok(vec![]);
+        return Ok((vec![], false));
     }
 
     let mut all_results = Vec::new();
+    let mut failed_kbs = 0;
     for kb in &active_kbs {
-        if let Ok(results) = search(pool, &kb.id, query_embedding, top_k).await {
-            all_results.extend(results);
+        check_cross_kb_budget()?;
+        let result = search(pool, &kb.id, query_embedding, top_k).await;
+        // 取消和阶段/总体截止优先于部分成功，不能作为坏库被忽略。
+        check_cross_kb_budget()?;
+        match result {
+            Ok(results) => all_results.extend(results),
+            Err(error) => {
+                // 同一个共享池无法取得读连接，不属于可跳过的单库内容故障。
+                if error.starts_with("Failed to acquire search connection:")
+                    || error.starts_with("Failed to begin search snapshot:")
+                {
+                    return Err("cross_kb_pool_failed".into());
+                }
+                if error == "retrieval cancelled" {
+                    return Err("client_cancelled".into());
+                }
+                if strict_retrieval {
+                    return Err("cross_kb_search_failed".into());
+                }
+                failed_kbs += 1;
+            }
         }
+    }
+
+    if failed_kbs > 0 {
+        tracing::warn!(
+            code = "knowledge_base_search_partial",
+            actual_mode = "vector",
+            searched_kbs = active_kbs.len(),
+            failed_kbs,
+            "Cross-KB vector search returned partial results"
+        );
     }
 
     all_results.sort_by(|a, b| {
@@ -453,8 +497,23 @@ pub async fn search_all(
             .unwrap_or(std::cmp::Ordering::Equal)
     });
     all_results.truncate(top_k);
+    check_cross_kb_budget()?;
 
-    Ok(all_results)
+    Ok((all_results, failed_kbs > 0))
+}
+
+fn check_cross_kb_budget() -> Result<(), String> {
+    if let Some(budget) = super::budget::current() {
+        budget.check_request().map_err(|elapsed| match elapsed {
+            super::budget::BudgetElapsed::Cancelled => "client_cancelled".to_string(),
+            _ => "rag_deadline_exceeded".to_string(),
+        })?;
+        budget.check().map_err(|elapsed| match elapsed {
+            super::budget::BudgetElapsed::Cancelled => "client_cancelled".to_string(),
+            _ => "stage_timeout".to_string(),
+        })?;
+    }
+    Ok(())
 }
 
 /// Get the embedding dimension for a KB by checking the first valid chunk.
@@ -1203,6 +1262,174 @@ pub fn get_model_context_limit(model: &str) -> usize {
         32_000
     } else {
         8_192
+    }
+}
+
+#[cfg(test)]
+mod cross_kb_search_tests {
+    use super::*;
+    use crate::services::knowledge::budget::Budget;
+    use std::time::Duration;
+
+    async fn fixture_pool() -> SqlitePool {
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        sqlx::migrate!("./migrations").run(&pool).await.unwrap();
+        pool
+    }
+
+    // 随机 ID 不会读取已有知识库的 HNSW；畸形 JSON 触发真实的单库 SQL 故障。
+    async fn seed_kb(pool: &SqlitePool, metadata: Option<&str>) -> String {
+        let kb_id = format!("cross-kb-fixture-{}", uuid::Uuid::new_v4());
+        let doc_id = format!("{kb_id}-doc");
+        let chunk_id = format!("{kb_id}-chunk");
+        let now = "2026-10-08T00:00:00Z";
+        sqlx::query(
+            "INSERT INTO kb_knowledge_bases (id, name, created_at, updated_at) VALUES (?, 'cross-kb-fixture', ?, ?)",
+        )
+        .bind(&kb_id)
+        .bind(now)
+        .bind(now)
+        .execute(pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO kb_documents (id, kb_id, filename, file_type, content_hash, status, created_at, updated_at) \
+             VALUES (?, ?, 'fixture.txt', 'text', ?, 'ready', ?, ?)",
+        )
+        .bind(&doc_id)
+        .bind(&kb_id)
+        .bind(&doc_id)
+        .bind(now)
+        .bind(now)
+        .execute(pool)
+        .await
+        .unwrap();
+        if let Some(metadata) = metadata {
+            sqlx::query(
+                "INSERT INTO kb_chunks (id, doc_id, kb_id, chunk_index, content, token_count, embedding, embedding_dim, metadata, created_at) \
+                 VALUES (?, ?, ?, 0, 'public fixture content', 4, ?, 2, ?, ?)",
+            )
+            .bind(&chunk_id)
+            .bind(&doc_id)
+            .bind(&kb_id)
+            .bind(encode_embedding(&[1.0, 0.0]))
+            .bind(metadata)
+            .bind(now)
+            .execute(pool)
+            .await
+            .unwrap();
+        }
+        chunk_id
+    }
+
+    #[tokio::test]
+    async fn legacy_keeps_healthy_results_when_one_kb_fails() {
+        let pool = fixture_pool().await;
+        seed_kb(&pool, Some("private-marker malformed JSON")).await;
+        let healthy_id = seed_kb(&pool, Some("{}")).await;
+
+        let legacy = search_all(&pool, &[1.0, 0.0], 5, false).await.unwrap();
+        assert_eq!(legacy.len(), 1);
+        assert_eq!(legacy[0].chunk_id, healthy_id);
+        let (results, any_failed) = search_all_with_details(&pool, &[1.0, 0.0], 5, false, false)
+            .await
+            .unwrap();
+        assert!(any_failed);
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].chunk_id, healthy_id);
+    }
+
+    #[tokio::test]
+    async fn strict_rejects_partial_results_with_a_safe_error() {
+        let pool = fixture_pool().await;
+        seed_kb(&pool, Some("private-marker malformed JSON")).await;
+        seed_kb(&pool, Some("{}")).await;
+        let error = search_all_with_details(&pool, &[1.0, 0.0], 5, false, true)
+            .await
+            .unwrap_err();
+        assert_eq!(error, "cross_kb_search_failed");
+        assert!(!error.contains("private-marker"));
+    }
+
+    #[tokio::test]
+    async fn all_local_failures_preserve_legacy_empty_but_report_partial() {
+        let pool = fixture_pool().await;
+        seed_kb(&pool, Some("malformed JSON one")).await;
+        seed_kb(&pool, Some("malformed JSON two")).await;
+        let (results, any_failed) = search_all_with_details(&pool, &[1.0, 0.0], 5, false, false)
+            .await
+            .unwrap();
+        assert!(results.is_empty());
+        assert!(any_failed);
+        assert!(search_all(&pool, &[1.0, 0.0], 5, false)
+            .await
+            .unwrap()
+            .is_empty());
+    }
+
+    #[tokio::test]
+    async fn healthy_empty_kb_is_complete_and_mixed_failure_is_partial() {
+        let pool = fixture_pool().await;
+        seed_kb(&pool, None).await;
+        let (results, any_failed) = search_all_with_details(&pool, &[1.0, 0.0], 5, false, false)
+            .await
+            .unwrap();
+        assert!(results.is_empty());
+        assert!(!any_failed);
+        seed_kb(&pool, Some("malformed JSON")).await;
+        let (results, any_failed) = search_all_with_details(&pool, &[1.0, 0.0], 5, false, false)
+            .await
+            .unwrap();
+        assert!(results.is_empty());
+        assert!(any_failed);
+    }
+
+    #[tokio::test]
+    async fn list_failure_and_request_cancellation_are_terminal() {
+        let pool = fixture_pool().await;
+        pool.close().await;
+        assert_eq!(
+            search_all_with_details(&pool, &[1.0, 0.0], 5, false, false)
+                .await
+                .unwrap_err(),
+            "cross_kb_list_failed"
+        );
+        let budget = Budget::new(1_000, "cross-kb-cancelled");
+        budget.cancel();
+        assert_eq!(
+            budget
+                .scope(search_all_with_details(&pool, &[1.0, 0.0], 5, false, false))
+                .await
+                .unwrap_err(),
+            "client_cancelled"
+        );
+    }
+
+    #[tokio::test]
+    async fn stage_and_overall_deadlines_do_not_return_partial_success() {
+        let pool = fixture_pool().await;
+        let parent = Budget::new(1_000, "cross-kb-stage");
+        let stage = parent.stage("retrieval", Duration::ZERO, Duration::ZERO);
+        assert_eq!(
+            stage
+                .scope(search_all_with_details(&pool, &[1.0, 0.0], 5, false, false))
+                .await
+                .unwrap_err(),
+            "stage_timeout"
+        );
+        let expired = Budget::new(100, "cross-kb-total");
+        tokio::time::sleep(Duration::from_millis(110)).await;
+        assert_eq!(
+            expired
+                .scope(search_all_with_details(&pool, &[1.0, 0.0], 5, false, false))
+                .await
+                .unwrap_err(),
+            "rag_deadline_exceeded"
+        );
     }
 }
 

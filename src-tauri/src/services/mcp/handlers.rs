@@ -1,7 +1,7 @@
 use crate::db::repository::Repository;
 use crate::server::knowledge_access::{self, KnowledgeAccess};
 use crate::server::router::SharedState;
-use crate::services::knowledge::{embedder, rag, repository::KbRepository, retriever};
+use crate::services::knowledge::{rag, repository::KbRepository};
 use crate::services::wiki::{
     handlers as wiki_handlers, ingest as wiki_ingest, project as wiki_project,
     repository::WikiRepository,
@@ -22,7 +22,7 @@ use tokio::sync::{mpsc, RwLock};
 const MCP_INSTRUCTIONS: &str = r#"# WaLiAPI RAG — 本地向量检索
 
 RAG 已预建索引：文档已解析、分块、向量化并存入本地 SQLite + HNSW 索引。
-所有检索都是本地操作，亚秒级响应。
+资料检索在本地执行，查询向量可能调用已配置的模型；实际耗时取决于渠道与索引状态。
 
 ## 工具使用优先级
 
@@ -540,6 +540,18 @@ pub(crate) fn get_tools() -> Vec<serde_json::Value> {
             }
         }),
     ]
+    .into_iter().map(|mut tool| {
+        if matches!(tool["name"].as_str(), Some("search_knowledge_base" | "ask_knowledge_base")) {
+            let props = tool["inputSchema"]["properties"].as_object_mut().expect("tool properties");
+            props.insert("timeout_ms".into(), serde_json::json!({"type":"integer", "description":"整次请求共用可选预算，100 至 120000 毫秒；省略保持历史超时。"}));
+            props.insert("allow_keyword_fallback".into(), serde_json::json!({"type":"boolean","default":false,"description":"hybrid 可恢复向量分支失败时允许关键词降级，不绕过权限或整体截止。"}));
+            props.insert("allow_vector_fallback".into(), serde_json::json!({"type":"boolean","default":false,"description":"hybrid 可恢复关键词分支失败时允许向量降级，不绕过权限或整体截止。"}));
+            props.insert("strict_retrieval".into(), serde_json::json!({"type":"boolean","default":false,"description":"禁用历史本地检索部分成功；失败时仅允许显式授权的降级方向。"}));
+            props.insert("candidate_k".into(), serde_json::json!({"type":"integer","description":"候选数，top_k 至 100；省略保持默认。"}));
+            props.insert("diagnostics".into(), serde_json::json!({"type":"boolean","default":false,"description":"仅普通 API Key 可启用真实权限及阶段诊断。"}));
+        }
+        tool
+    }).collect()
 }
 
 // ── Core JSON-RPC dispatch ────────────────────────────────────────
@@ -599,7 +611,7 @@ async fn dispatch_scoped(
                                 "type": "integer", "description": "可选整次 RAG 时间预算，服务端限幅为 100 至 120000 毫秒。"
                             });
                             tool["inputSchema"]["properties"]["allow_keyword_fallback"] = serde_json::json!({
-                                "type": "boolean", "default": false, "description": "hybrid 模式下允许已授权的可恢复 Embedding 失败降级到关键词检索。"
+                                "type": "boolean", "default": false, "description": "hybrid 模式下允许已授权的可恢复向量分支失败降级到关键词检索。"
                             });
                         }
                     }
@@ -618,18 +630,51 @@ async fn dispatch_scoped(
                 );
             }
             match scoped_tool_call(shared, access, name, &req.params["arguments"]).await {
-                Ok(value) => McpResponse::success(
-                    req.id.clone(),
-                    serde_json::json!({
-                        "content": [{"type": "text", "text": value.to_string()}], "isError": false
-                    }),
-                ),
-                Err(error) => McpResponse::success(
-                    req.id.clone(),
-                    serde_json::json!({
-                        "content": [{"type": "text", "text": format!("HTTP {}: {}", error.status.as_u16(), error.message)}], "isError": true
-                    }),
-                ),
+                Ok(value) => {
+                    let args = &req.params["arguments"];
+                    // 旧搜索首文本仍是数组；局部成功的元数据单独追加，保留既有解析入口。
+                    let legacy_partial = name == "search_knowledge_base"
+                        && value.get("degradation_reason").is_some()
+                        && args["timeout_ms"].is_null()
+                        && args["candidate_k"].is_null()
+                        && ![
+                            "allow_keyword_fallback",
+                            "allow_vector_fallback",
+                            "strict_retrieval",
+                            "diagnostics",
+                        ]
+                        .iter()
+                        .any(|field| args[*field].as_bool() == Some(true));
+                    let content = if legacy_partial {
+                        let metadata = serde_json::json!({
+                            "request_id": value["request_id"],
+                            "retrieval_mode": value["retrieval_mode"],
+                            "degradation_reason": value["degradation_reason"]
+                        });
+                        vec![
+                            serde_json::json!({"type":"text", "text":value["data"].to_string()}),
+                            serde_json::json!({"type":"text", "text":metadata.to_string()}),
+                        ]
+                    } else {
+                        vec![serde_json::json!({"type":"text", "text":value.to_string()})]
+                    };
+                    McpResponse::success(
+                        req.id.clone(),
+                        serde_json::json!({"content":content, "isError":false}),
+                    )
+                }
+                Err(error) => {
+                    let mut content = vec![
+                        serde_json::json!({"type": "text", "text": format!("HTTP {}: {}", error.status.as_u16(), error.message)}),
+                    ];
+                    if req.params["arguments"]["diagnostics"].as_bool() == Some(true) {
+                        content.push(serde_json::json!({"type":"text", "text":error.response_body().to_string()}));
+                    }
+                    McpResponse::success(
+                        req.id.clone(),
+                        serde_json::json!({"content":content, "isError":true}),
+                    )
+                }
             }
         }
         "ping" | "notifications/initialized" => {
@@ -674,9 +719,19 @@ async fn scoped_tool_call(
                     knowledge_access::ask(shared, access, input, true).await?
                 ))
             } else {
-                Ok(serde_json::json!(
-                    knowledge_access::search(shared, access, input, true).await?
-                ))
+                let extended = input.timeout_ms.is_some()
+                    || input.allow_keyword_fallback
+                    || input.allow_vector_fallback
+                    || input.strict_retrieval
+                    || input.diagnostics
+                    || input.candidate_k.is_some();
+                let response =
+                    knowledge_access::search_with_details(shared, access, input, true).await?;
+                if extended || response.degradation_reason.is_some() {
+                    Ok(serde_json::json!(response))
+                } else {
+                    Ok(serde_json::json!(response.data))
+                }
             }
         }
         "read_document" => {
@@ -922,100 +977,121 @@ async fn handle_tool_call(
 
     match tool_name {
         "search_knowledge_base" => {
-            let query = args
-                .get("query")
-                .and_then(|q| q.as_str())
-                .ok_or("Missing query")?;
-            let kb_id = args.get("kb_id").and_then(|k| k.as_str()).unwrap_or("");
-            let top_k = args.get("top_k").and_then(|t| t.as_u64()).unwrap_or(5) as usize;
-            let search_mode = args
-                .get("search_mode")
-                .and_then(|s| s.as_str())
-                .unwrap_or("hybrid");
-            let vector_weight = args
-                .get("vector_weight")
-                .and_then(|w| w.as_f64())
-                .unwrap_or(0.7) as f32;
-            let keyword_weight = args
-                .get("keyword_weight")
-                .and_then(|w| w.as_f64())
-                .unwrap_or(0.3) as f32;
-
-            let emb_model = if !kb_id.is_empty() {
-                let kb_repo = KbRepository::new(pool.clone());
-                kb_repo
-                    .get_kb(kb_id)
-                    .await
-                    .ok()
-                    .and_then(|kb| kb.embedding_model)
-                    .unwrap_or_else(|| "text-embedding-3-small".to_string())
-            } else {
-                "text-embedding-3-small".to_string()
+            use crate::services::knowledge::{
+                handlers::SearchQuery, model_client::ModelClient, models::SearchResponse,
             };
-
-            let repo = Repository::new(pool.clone());
-
-            // Keyword-only mode: no embedding needed
-            if search_mode == "keyword" && !kb_id.is_empty() {
-                let results = retriever::keyword_only_search(pool, kb_id, query, top_k).await?;
-                let content: Vec<serde_json::Value> = results.iter().map(|r| {
-                    serde_json::json!({
-                        "type": "text",
-                        "text": format!("[{}] (score: {:.2}) [keyword]\n{}", r.filename, r.score, r.content)
-                    })
-                }).collect();
-                return Ok(serde_json::json!({ "content": content, "isError": false }));
+            let mut value = args.clone();
+            value["q"] = args.get("query").cloned().ok_or("Missing query")?;
+            let query: SearchQuery = serde_json::from_value(value).map_err(|e| e.to_string())?;
+            if query.diagnostics {
+                return Err("知识库健康检测需要使用普通 API Key".into());
             }
-
-            let embeddings = embedder::embed(&[query.to_string()], &emb_model, &repo).await?;
-            if embeddings.is_empty() {
-                return Err("Failed to embed query".to_string());
-            }
-
-            if kb_id.is_empty() {
-                // Cross-KB search: always hybrid (search_all doesn't support mode selection)
-                let results = retriever::search_all(pool, &embeddings[0], top_k, true).await?;
-                let content: Vec<serde_json::Value> = results.iter().map(|r| {
-                    serde_json::json!({
-                        "type": "text",
-                        "text": format!("[{}] (score: {:.2})\n{}", r.filename, r.score, r.content)
-                    })
-                }).collect();
-                Ok(serde_json::json!({ "content": content, "isError": false }))
+            let kb_id = query.kb_id.as_deref().unwrap_or("");
+            let mode = query.search_mode.as_deref().unwrap_or("hybrid");
+            knowledge_access::validate_query(
+                &query.q,
+                query.top_k,
+                mode,
+                query.vector_weight.unwrap_or(0.7),
+                query.keyword_weight.unwrap_or(0.3),
+            )
+            .map_err(|e| e.to_string())?;
+            rag::validate_candidate_k(query.top_k, query.candidate_k).map_err(|e| e.to_string())?;
+            let repo = KbRepository::new(pool.clone());
+            let embedding_model = if kb_id.is_empty() {
+                "text-embedding-3-small".to_string()
             } else {
-                // Single-KB search with details
-                let scored = retriever::hybrid_search_with_details(
+                let kb = repo.get_kb(kb_id).await.map_err(|e| e.to_string())?;
+                if kb.status != 1 || kb.mcp_enabled != 1 {
+                    return Err("知识库未开启 MCP 查询".into());
+                }
+                kb.embedding_model
+                    .unwrap_or_else(|| "text-embedding-3-small".into())
+            };
+            let client = ModelClient::Internal {
+                pool,
+                settings: &shared.state.settings,
+                kb_id,
+            };
+            let request_id = uuid::Uuid::new_v4().to_string();
+            let retrieved = knowledge_access::run_request(
+                &request_id,
+                query.timeout_ms,
+                false,
+                Box::pin(rag::retrieve_with_client(
+                    &client,
                     pool,
                     kb_id,
-                    query,
-                    &embeddings[0],
-                    top_k,
-                    vector_weight,
-                    keyword_weight,
-                    // MCP 工具路径用默认融合模式（RRF）；面板路径按 kb.fusion_mode 设置
-                    retriever::FusionMode::Rrf,
-                )
-                .await?;
-
-                let content: Vec<serde_json::Value> = scored
-                    .iter()
-                    .map(|s| {
-                        let r = &s.result;
-                        let mut line = format!("[{}] (score: {:.2}", r.filename, r.score);
-                        if let Some(vs) = s.vector_score {
-                            line.push_str(&format!(", vec: {:.2}", vs));
-                        }
-                        if let Some(ks) = s.keyword_score {
-                            line.push_str(&format!(", kw: {:.2}", ks));
-                        }
-                        line.push_str(")\n");
-                        line.push_str(&r.content);
-                        serde_json::json!({ "type": "text", "text": line })
-                    })
+                    &query.q,
+                    &embedding_model,
+                    query.candidate_k.unwrap_or(query.top_k),
+                    true,
+                    crate::services::knowledge::retriever::FusionMode::Rrf,
+                    query.vector_weight.unwrap_or(0.7),
+                    query.keyword_weight.unwrap_or(0.3),
+                    mode,
+                    false,
+                    query.allow_keyword_fallback,
+                    query.allow_vector_fallback,
+                    query.strict_retrieval,
+                    false,
+                )),
+            )
+            .await
+            .map_err(|e| e.to_string())?;
+            let extended = query.timeout_ms.is_some()
+                || query.allow_keyword_fallback
+                || query.allow_vector_fallback
+                || query.strict_retrieval
+                || query.candidate_k.is_some();
+            if extended {
+                let mut data: Vec<_> = retrieved
+                    .scored_results
+                    .into_iter()
+                    .map(|s| s.result)
                     .collect();
-
-                Ok(serde_json::json!({ "content": content, "isError": false }))
+                data.truncate(query.top_k);
+                let response = SearchResponse {
+                    data,
+                    request_id: Some(request_id),
+                    retrieval_mode: Some(retrieved.actual_mode),
+                    degradation_reason: retrieved.degradation_reason,
+                    diagnostics: None,
+                };
+                return Ok(
+                    serde_json::json!({"content":[{"type":"text","text":serde_json::to_string(&response).map_err(|e| e.to_string())?}],"isError":false}),
+                );
             }
+            let mut content: Vec<_> = retrieved
+                .scored_results
+                .iter()
+                .take(query.top_k)
+                .map(|scored| {
+                    let result = &scored.result;
+                    let mut line = format!("[{}] (score: {:.2}", result.filename, result.score);
+                    if !kb_id.is_empty() && mode != "keyword" {
+                        if let Some(score) = scored.vector_score {
+                            line.push_str(&format!(", vec: {:.2}", score));
+                        }
+                        if let Some(score) = scored.keyword_score {
+                            line.push_str(&format!(", kw: {:.2}", score));
+                        }
+                    }
+                    if !kb_id.is_empty() && mode == "keyword" {
+                        line.push_str(") [keyword]\n");
+                    } else {
+                        line.push_str(")\n");
+                    }
+                    line.push_str(&result.content);
+                    serde_json::json!({"type":"text","text":line})
+                })
+                .collect();
+            if let Some(reason) = retrieved.degradation_reason {
+                let metadata = serde_json::json!({"request_id":request_id,
+                    "retrieval_mode":retrieved.actual_mode, "degradation_reason":reason});
+                content.push(serde_json::json!({"type":"text", "text":metadata.to_string()}));
+            }
+            Ok(serde_json::json!({"content":content,"isError":false}))
         }
 
         "list_knowledge_bases" => {
@@ -1091,13 +1167,24 @@ async fn handle_tool_call(
                 .and_then(|w| w.as_f64())
                 .unwrap_or(0.3) as f32;
 
+            knowledge_access::validate_query(
+                question,
+                top_k,
+                search_mode,
+                vector_weight,
+                keyword_weight,
+            )
+            .map_err(|error| error.to_string())?;
+
             let emb_model = if !kb_id.is_empty() {
-                let kb_repo = KbRepository::new(pool.clone());
-                kb_repo
+                let kb = KbRepository::new(pool.clone())
                     .get_kb(kb_id)
                     .await
-                    .ok()
-                    .and_then(|kb| kb.embedding_model)
+                    .map_err(|e| e.to_string())?;
+                if kb.status != 1 || kb.mcp_enabled != 1 {
+                    return Err("知识库未开启 MCP 查询".into());
+                }
+                kb.embedding_model
                     .unwrap_or_else(|| "text-embedding-3-small".to_string())
             } else {
                 "text-embedding-3-small".to_string()
@@ -1130,21 +1217,56 @@ async fn handle_tool_call(
                 picked.unwrap_or_else(|| "gpt-4o".to_string())
             };
 
-            let answer = rag::ask_with_config(
+            use crate::services::knowledge::{model_client::ModelClient, models::AskInput};
+            let input: AskInput =
+                serde_json::from_value(args.clone()).map_err(|e| e.to_string())?;
+            if input.diagnostics {
+                return Err("知识库健康检测需要使用普通 API Key".into());
+            }
+            let client = ModelClient::Internal {
                 pool,
+                settings: &shared.state.settings,
                 kb_id,
-                question,
-                &emb_model,
-                &chat_model,
-                top_k,
-                true,
-                &[],
-                &shared.state.settings,
-                vector_weight,
-                keyword_weight,
-                search_mode,
+            };
+            let request_id = uuid::Uuid::new_v4().to_string();
+            let answer = knowledge_access::run_request(
+                &request_id,
+                input.timeout_ms,
+                false,
+                Box::pin(rag::ask_with_client(
+                    &client,
+                    pool,
+                    kb_id,
+                    question,
+                    &emb_model,
+                    &chat_model,
+                    top_k,
+                    true,
+                    input.history.as_deref().unwrap_or(&[]),
+                    &shared.state.settings,
+                    vector_weight,
+                    keyword_weight,
+                    search_mode,
+                    false,
+                    input.allow_keyword_fallback,
+                    input.allow_vector_fallback,
+                    input.strict_retrieval,
+                    input.candidate_k,
+                    input.reasoning_effort.as_deref(),
+                )),
             )
-            .await?;
+            .await
+            .map_err(|e| e.to_string())?;
+            if input.timeout_ms.is_some()
+                || input.allow_keyword_fallback
+                || input.allow_vector_fallback
+                || input.strict_retrieval
+                || input.candidate_k.is_some()
+            {
+                return Ok(
+                    serde_json::json!({"content":[{"type":"text","text":serde_json::to_string(&answer).map_err(|e| e.to_string())?}],"isError":false}),
+                );
+            }
 
             let mut content = vec![serde_json::json!({
                 "type": "text",
@@ -1186,6 +1308,11 @@ async fn handle_tool_call(
                 }));
             }
 
+            if let Some(reason) = answer.degradation_reason {
+                let metadata = serde_json::json!({"request_id":request_id,
+                    "retrieval_mode":answer.retrieval_mode, "degradation_reason":reason});
+                content.push(serde_json::json!({"type":"text", "text":metadata.to_string()}));
+            }
             Ok(serde_json::json!({
                 "content": content,
                 "isError": false

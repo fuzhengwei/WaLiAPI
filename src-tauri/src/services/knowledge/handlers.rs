@@ -336,6 +336,10 @@ pub struct SearchQuery {
     pub timeout_ms: Option<u64>,
     #[serde(default)]
     pub allow_keyword_fallback: bool,
+    #[serde(default)]
+    pub allow_vector_fallback: bool,
+    #[serde(default)]
+    pub strict_retrieval: bool,
     pub candidate_k: Option<usize>,
 }
 
@@ -354,8 +358,11 @@ pub async fn search(
             "question": query.q, "kb_id": query.kb_id, "top_k": query.top_k,
             "search_mode": query.search_mode.unwrap_or_else(|| "vector".into()),
             "diagnostics": query.diagnostics, "timeout_ms": query.timeout_ms,
-            "allow_keyword_fallback": query.allow_keyword_fallback, "candidate_k": query.candidate_k,
-        })).expect("valid search input");
+            "allow_keyword_fallback": query.allow_keyword_fallback,
+            "allow_vector_fallback": query.allow_vector_fallback,
+            "strict_retrieval": query.strict_retrieval, "candidate_k": query.candidate_k,
+        }))
+        .expect("valid search input");
         // 非有限权重必须保留到校验，不能被 JSON null 静默套用默认值。
         input.vector_weight = query.vector_weight;
         input.keyword_weight = query.keyword_weight;
@@ -369,55 +376,37 @@ pub async fn search(
         }
         return response;
     }
-    // 管理端的无预算旧检索保持原入口；新参数复用同一通用检索与取消流程。
-    if query.timeout_ms.is_some()
-        || query.allow_keyword_fallback
-        || query.diagnostics
-        || query.candidate_k.is_some()
-    {
-        let request_id = uuid::Uuid::new_v4().to_string();
-        let mut response = match knowledge_access::run_request(
+    // 管理端也复用共享检索；省略新参数保留旧 data 返回结构与默认模式。
+    let request_id = uuid::Uuid::new_v4().to_string();
+    let mut response = match knowledge_access::run_request(
+        &request_id,
+        query.timeout_ms,
+        query.diagnostics,
+        Box::pin(search_internal(
+            &shared.state.db.pool,
+            &shared.state.settings,
+            &query,
             &request_id,
-            query.timeout_ms,
-            query.diagnostics,
-            Box::pin(search_internal(&shared, &query, &request_id)),
-        )
-        .await
-        {
-            Ok(results) => Json(results).into_response(),
-            Err(error) => error.into_response(),
-        };
-        response
-            .headers_mut()
-            .insert("x-request-id", request_id.parse().expect("UUID header"));
-        return response;
-    }
-    let results = retriever::search_query(
-        &shared.state.db.pool,
-        query.kb_id.as_deref(),
-        &query.q,
-        query.top_k,
-        query.search_mode.as_deref().unwrap_or("vector"),
-        query.vector_weight.unwrap_or(0.7),
-        query.keyword_weight.unwrap_or(0.3),
-        retriever::FusionMode::parse(&shared.state.settings.get_str("kb.fusion_mode", "rrf")),
+            false,
+        )),
     )
-    .await;
-
-    match results {
-        Ok(results) => Json(serde_json::json!({ "data": results })).into_response(),
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("Search failed: {}", e),
-        )
-            .into_response(),
-    }
+    .await
+    {
+        Ok(results) => Json(results).into_response(),
+        Err(error) => error.into_response(),
+    };
+    response
+        .headers_mut()
+        .insert("x-request-id", request_id.parse().expect("UUID header"));
+    response
 }
 
-async fn search_internal(
-    shared: &SharedState,
+pub(crate) async fn search_internal(
+    pool: &sqlx::SqlitePool,
+    settings: &crate::settings_store::SettingsStore,
     query: &SearchQuery,
     request_id: &str,
+    mcp_only: bool,
 ) -> Result<SearchResponse, super::model_client::QueryError> {
     use super::model_client::{ModelClient, QueryError};
     if query.diagnostics {
@@ -436,7 +425,7 @@ async fn search_internal(
     // 跨库管理员检索沿用旧 search_query：任何请求模式都回退到跨库向量检索。
     let effective_mode = if kb_id.is_empty() { "vector" } else { mode };
     let embedding_model = if !kb_id.is_empty() {
-        KbRepository::new(shared.state.db.pool.clone())
+        KbRepository::new(pool.clone())
             .get_kb(kb_id)
             .await
             .map_err(|_| QueryError::new(StatusCode::NOT_FOUND, "Knowledge base not found"))?
@@ -446,24 +435,26 @@ async fn search_internal(
         "text-embedding-3-small".into()
     };
     let client = ModelClient::Internal {
-        pool: &shared.state.db.pool,
-        settings: &shared.state.settings,
+        pool,
+        settings,
         kb_id,
     };
     let retrieved = Box::pin(rag::retrieve_with_client(
         &client,
-        &shared.state.db.pool,
+        pool,
         kb_id,
         &query.q,
         &embedding_model,
         query.candidate_k.unwrap_or(query.top_k),
-        false,
-        &shared.state.settings,
+        mcp_only,
+        retriever::FusionMode::parse(&settings.get_str("kb.fusion_mode", "rrf")),
         vw,
         kw,
         effective_mode,
         false,
         query.allow_keyword_fallback,
+        query.allow_vector_fallback,
+        query.strict_retrieval,
         false,
     ))
     .await?;
@@ -475,8 +466,22 @@ async fn search_internal(
     data.truncate(query.top_k);
     Ok(SearchResponse {
         data,
-        request_id: Some(request_id.to_string()),
-        retrieval_mode: Some(retrieved.actual_mode),
+        request_id: (query.timeout_ms.is_some()
+            || query.allow_keyword_fallback
+            || query.allow_vector_fallback
+            || query.strict_retrieval
+            || retrieved.degradation_reason.is_some()
+            || query.diagnostics
+            || query.candidate_k.is_some())
+        .then(|| request_id.to_string()),
+        retrieval_mode: (query.timeout_ms.is_some()
+            || query.allow_keyword_fallback
+            || query.allow_vector_fallback
+            || query.strict_retrieval
+            || retrieved.degradation_reason.is_some()
+            || query.diagnostics
+            || query.candidate_k.is_some())
+        .then_some(retrieved.actual_mode),
         degradation_reason: retrieved.degradation_reason,
         diagnostics: None,
     })
@@ -565,6 +570,14 @@ async fn ask_internal(shared: &SharedState, input: AskInput) -> Response {
 
     // Deep Research mode
     if input.deep_research && !kb_id.is_empty() {
+        if input.strict_retrieval || input.allow_keyword_fallback || input.allow_vector_fallback {
+            return super::model_client::QueryError::new(
+                StatusCode::BAD_REQUEST,
+                "deep_research 暂不支持显式检索策略，请使用普通 RAG 问答",
+            )
+            .at_stage("permission", "unsupported_retrieval_policy")
+            .into_response();
+        }
         match rag::deep_research(
             &shared.state.db.pool,
             &kb_id,
@@ -612,13 +625,20 @@ async fn ask_internal(shared: &SharedState, input: AskInput) -> Response {
             search_mode,
             false,
             input.allow_keyword_fallback,
+            input.allow_vector_fallback,
+            input.strict_retrieval,
             input.candidate_k,
             input.reasoning_effort.as_deref(),
         )
         .await
         {
             Ok(answer) => Json(answer).into_response(),
-            Err(error) if input.timeout_ms.is_some() || input.allow_keyword_fallback => {
+            Err(error)
+                if input.timeout_ms.is_some()
+                    || input.allow_keyword_fallback
+                    || input.allow_vector_fallback
+                    || input.strict_retrieval =>
+            {
                 error.into_response()
             }
             Err(e) => (

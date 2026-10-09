@@ -4352,6 +4352,50 @@ fn collect_auth_account_models(
     out
 }
 
+/// 共用 `/v1/models` 的可见模型目录，保留映射源名称及渠道、模型权限语义。
+fn collect_visible_models(
+    key: &crate::db::models::ApiKey,
+    channels: &[crate::db::models::Channel],
+    accounts: &[crate::db::models::AuthAccount],
+) -> Vec<ConfigModel> {
+    let visibility = ApiKeyVisibility::from(key);
+    let mut models = collect_config_models(channels, Some(&visibility));
+    let mut seen = models.iter().map(|model| model.id.clone()).collect();
+    models.extend(collect_auth_account_models(
+        accounts,
+        &mut seen,
+        Some(&visibility),
+    ));
+    models
+}
+
+/// RAG 使用非流式 Chat 问答；仅检查配置与路由能力，不探测上游或消费额度。
+pub(crate) fn collect_api_key_answer_models(
+    key: &crate::db::models::ApiKey,
+    channels: &[crate::db::models::Channel],
+    accounts: &[crate::db::models::AuthAccount],
+    flags: &feature_flags::FeatureFlags,
+) -> Vec<String> {
+    let mut rng = rand::rng();
+    collect_visible_models(key, channels, accounts)
+        .into_iter()
+        .filter(|model| {
+            route_plan::authorize_and_plan_with_accounts(
+                key,
+                &model.id,
+                EndpointKind::ChatCompletions,
+                channels,
+                accounts,
+                flags,
+                &serde_json::json!({"model": model.id}),
+                &mut rng,
+            )
+            .is_ok()
+        })
+        .map(|model| model.id)
+        .collect()
+}
+
 /// OpenAI `/v1/models` response body: `{"object":"list","data":[...]}`.
 fn openai_models_response(models: &[ConfigModel]) -> serde_json::Value {
     let data: Vec<serde_json::Value> = models
@@ -4477,18 +4521,7 @@ async fn list_models_impl(pool: SqlitePool, headers: &HeaderMap) -> Response {
             )
         }
     };
-    let visibility = ApiKeyVisibility::from(&key);
-    let mut seen = std::collections::HashSet::new();
-    let mut models = collect_config_models(&channels, Some(&visibility));
-    // Track channel-advertised IDs so auth-account duplicates are skipped.
-    for m in &models {
-        seen.insert(m.id.clone());
-    }
-    models.extend(collect_auth_account_models(
-        &accounts,
-        &mut seen,
-        Some(&visibility),
-    ));
+    let models = collect_visible_models(&key, &channels, &accounts);
     let body = if anthropic {
         anthropic_models_response(&models)
     } else {
@@ -5028,6 +5061,153 @@ mod list_models_tests {
         let models = collect_auth_account_models(&accounts, &mut seen, Some(&visibility));
         let ids: Vec<&str> = models.iter().map(|m| m.id.as_str()).collect();
         assert_eq!(ids, vec!["gpt-5", "alias-auth"]);
+    }
+
+    #[test]
+    fn answer_models_share_catalog_permissions_aliases_and_dedup() {
+        let channels = vec![
+            channel(
+                "allowed",
+                "openai",
+                &["denied-model", "shared"],
+                serde_json::json!({"alias": "upstream-private"}),
+            ),
+            channel(
+                "denied",
+                "openai",
+                &["denied-channel-model"],
+                serde_json::json!({}),
+            ),
+            channel(
+                "unlisted",
+                "openai",
+                &["unlisted-model"],
+                serde_json::json!({}),
+            ),
+        ];
+        let accounts = vec![account(
+            "auth",
+            "codex",
+            &["shared", "gpt-5", "unlisted-auth-model"],
+            serde_json::json!({"auth-alias": "gpt-5"}),
+        )];
+        let key = key(
+            &["allowed", "denied"],
+            &["denied", "auth"],
+            &[
+                "denied-model",
+                "shared",
+                "alias",
+                "gpt-5",
+                "auth-alias",
+                "denied-channel-model",
+            ],
+            &["denied-model"],
+        );
+        assert_eq!(
+            collect_api_key_answer_models(
+                &key,
+                &channels,
+                &accounts,
+                &feature_flags::FeatureFlags::all_on()
+            ),
+            vec!["shared", "alias", "gpt-5", "auth-alias"]
+        );
+    }
+
+    #[test]
+    fn answer_models_exclude_embeddings_only_without_changing_public_catalog() {
+        let mut embeddings = channel(
+            "embedding",
+            "openai",
+            &["embedding-model"],
+            serde_json::json!({"vector-alias": "embedding-model"}),
+        );
+        embeddings.protocol = Some("openai".into());
+        embeddings.provider = Some("custom".into());
+        embeddings.native_base_url = Some("https://example.com/v1".into());
+        embeddings.native_endpoints = Some(serde_json::json!(["embeddings"]).to_string());
+        embeddings.identity_revision = 1;
+        let channels = vec![
+            embeddings,
+            channel("chat", "openai", &["answer-model"], serde_json::json!({})),
+            channel("claude", "claude", &["claude-model"], serde_json::json!({})),
+        ];
+        let key = key(&[], &[], &[], &[]);
+        assert_eq!(collect_visible_models(&key, &channels, &[]).len(), 4);
+        assert_eq!(
+            collect_api_key_answer_models(
+                &key,
+                &channels,
+                &[],
+                &feature_flags::FeatureFlags::all_on()
+            ),
+            vec!["answer-model", "claude-model"]
+        );
+    }
+
+    #[test]
+    fn answer_models_reject_disabled_expired_and_exhausted_keys() {
+        let channels = vec![channel("chat", "openai", &["model"], serde_json::json!({}))];
+        let flags = feature_flags::FeatureFlags::all_on();
+        let mut key = key(&[], &[], &[], &[]);
+        key.status = 0;
+        assert!(collect_api_key_answer_models(&key, &channels, &[], &flags).is_empty());
+        key.status = 1;
+        key.expires_at = Some("2020-01-01T00:00:00Z".into());
+        assert!(collect_api_key_answer_models(&key, &channels, &[], &flags).is_empty());
+        key.expires_at = None;
+        key.quota_limit = 100;
+        key.quota_used = 100;
+        assert!(collect_api_key_answer_models(&key, &channels, &[], &flags).is_empty());
+    }
+
+    #[test]
+    fn answer_models_exclude_unroutable_accounts_and_disabled_aliases() {
+        let mut channel = channel(
+            "chat",
+            "openai",
+            &["chat-model"],
+            serde_json::json!({"disabled-alias": "chat-model"}),
+        );
+        channel.model_mapping_disabled =
+            serde_json::json!([["disabled-alias", "chat-model"]]).to_string();
+        let mut limited = account(
+            "limited",
+            "codex",
+            &["limited-model"],
+            serde_json::json!({}),
+        );
+        limited.quota_json = Some(
+            serde_json::json!({
+                "version": 1, "exceeded": true, "reason": "quota", "next_recover_at": null
+            })
+            .to_string(),
+        );
+        let accounts = vec![
+            limited,
+            account(
+                "unknown",
+                "unknown",
+                &["unknown-model"],
+                serde_json::json!({}),
+            ),
+            account(
+                "codex",
+                "codex",
+                &["gpt-5"],
+                serde_json::json!({"broken-alias": "missing-model"}),
+            ),
+        ];
+        assert_eq!(
+            collect_api_key_answer_models(
+                &key(&[], &[], &[], &[]),
+                &[channel],
+                &accounts,
+                &feature_flags::FeatureFlags::all_on(),
+            ),
+            vec!["chat-model", "gpt-5"]
+        );
     }
 
     #[test]

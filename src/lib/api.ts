@@ -88,6 +88,7 @@ export interface KnowledgeHealthTest {
 }
 
 export const apiKeyApi = {
+  getAnswerModels: (id: string) => invoke<string[]>("get_api_key_answer_models", { id }),
   getKnowledgeAccess: (id: string) => invoke<string[]>("get_api_key_knowledge_access", { id }),
   setKnowledgeAccess: (id: string, kbIds: string[]) => invoke<void>("set_api_key_knowledge_access", { id, kbIds }),
   testKnowledgeAccess: (id: string, kbId: string) => invoke<{ rest_status: number; rest_ok: boolean; mcp_status: number; mcp_ok: boolean }>("test_api_key_knowledge_access", { id, kbId }),
@@ -129,7 +130,51 @@ export const logApi = {
   delete: (id: string) => invoke<void>("delete_log", { id }),
   deleteBefore: (beforeDate: string) => invoke<number>("delete_logs_before", { beforeDate }),
   deleteAll: () => invoke<number>("delete_all_logs"),
+  /** 多条件组合清理日志(Task 4):时间 + 状态/成功与否 + 渠道/Key/模型,AND 组合。
+   *  clear_stats=true 同步清除对应 usage_stats;dry_run=true 只返回匹配行数不删除。 */
+  deleteMany: (input: DeleteLogsInput) => invoke<DeleteLogsReport>("delete_logs", { input }),
+  /** 独立清除历史统计数据(不删日志)。 */
+  clearStats: (input: DeleteLogsInput) => invoke<number>("clear_usage_stats", { input }),
+  /** 按渠道维度组合清理(渠道清理 tab):清日志/清统计/重置失败计数,dry_run 预览。 */
+  cleanupChannel: (input: CleanupChannelInput) => invoke<CleanupChannelReport>("cleanup_channel", { input }),
 };
+
+export interface CleanupChannelInput {
+  channel_id: string;
+  before_date?: string;
+  after_date?: string;
+  keep_recent_days?: number;
+  clear_logs?: boolean;
+  clear_stats?: boolean;
+  reset_fail?: boolean;
+  dry_run?: boolean;
+}
+
+export interface CleanupChannelReport {
+  dry_run: boolean;
+  matched_logs: number;
+  matched_stats: number;
+  reset_fail_rows: number;
+}
+
+export interface DeleteLogsInput {
+  before_date?: string;
+  after_date?: string;
+  keep_recent_days?: number;
+  status_code?: number;
+  is_success?: boolean;
+  channel_id?: string;
+  api_key_id?: string;
+  model?: string;
+  clear_stats?: boolean;
+  dry_run?: boolean;
+}
+
+export interface DeleteLogsReport {
+  dry_run: boolean;
+  matched_logs: number;
+  matched_stats: number;
+}
 
 // Auth account commands. All result contracts are safe summaries; credential
 // payloads remain inside the native command layer.
@@ -306,6 +351,20 @@ export interface KnowledgeBase {
     updated_at: string;
 }
 
+/** doc_meta.pdf_text_extraction：只记录文字层质量，不含原文，不代表内容完整性。 */
+export interface PdfTextExtraction {
+  version: 1;
+  page_count: number;
+  status: "complete" | "partial" | "failed";
+  pages: {
+    page_no: number;
+    char_count: number;
+    status: "extracted" | "insufficient" | "failed";
+    error_code?: string;
+  }[];
+  error_code?: string;
+}
+
 export interface KbDocument {
   id: string;
   kb_id: string;
@@ -323,6 +382,7 @@ export interface KbDocument {
   source_path: string | null;
   doc_meta: string;
   ocr_engine: string | null;
+  /** PDF 页面树中的页数；未记录或无法读取页面树时为 0。 */
   page_count: number;
   /** JSON 数组字符串，如 "[3,7]"，前端自行 JSON.parse */
   ocr_failed_pages: string;

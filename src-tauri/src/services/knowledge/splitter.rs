@@ -35,7 +35,7 @@ pub struct ChunkMetadata {
     pub symbol_name: Option<String>,
     pub symbol_kind: Option<String>,
     pub signature: Option<String>,
-    /// 页码，仅 OCR 文档（按页分块）填充；旧数据反序列化时默认为 None
+    /// PDF 来源页码（普通文字层与 OCR 均按页分块）；旧数据默认为 None
     #[serde(default)]
     pub page_no: Option<u32>,
 }

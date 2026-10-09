@@ -24,6 +24,8 @@ import {
   Network,
   Puzzle,
   DatabaseZap,
+  ChevronDown,
+  ChevronUp,
 } from "lucide-react";
 
 export function DashboardPage() {
@@ -444,6 +446,11 @@ const MODEL_COLORS = [
 
 function ModelDistributionTable({ data }: { data: ModelStats[] }) {
   const maxTokens = Math.max(...data.map(d => d.total_tokens), 1);
+  // 默认展示 8 个模型,更多折叠;模型少时无需展开。
+  const COLLAPSED_ROWS = 8;
+  const [expanded, setExpanded] = useState(false);
+  const visible = expanded ? data : data.slice(0, COLLAPSED_ROWS);
+  const canExpand = data.length > COLLAPSED_ROWS;
 
   return (
     <section className="surface rounded-[20px] p-6">
@@ -476,7 +483,7 @@ function ModelDistributionTable({ data }: { data: ModelStats[] }) {
               </tr>
             </thead>
             <tbody>
-              {data.map((row, i) => (
+              {visible.map((row, i) => (
                 <tr key={row.model} className="border-b border-slate-100 last:border-0">
                   <td className="py-2.5 pr-4">
                     <div className="flex items-center gap-2">
@@ -518,6 +525,28 @@ function ModelDistributionTable({ data }: { data: ModelStats[] }) {
               ))}
             </tbody>
           </table>
+
+          {/* 展开/收起按钮:模块底部居中,淡色边框 hover 强调色(主题审美) */}
+          {canExpand && (
+            <div className="mt-4 flex justify-center">
+              <button
+                onClick={() => setExpanded(e => !e)}
+                className="flex items-center gap-1.5 rounded-lg border border-slate-200 px-4 py-1.5 text-xs font-medium text-slate-500 transition-all hover:border-blue-400 hover:text-blue-600"
+              >
+                {expanded ? (
+                  <>
+                    <ChevronUp size={13} />
+                    收起
+                  </>
+                ) : (
+                  <>
+                    <ChevronDown size={13} />
+                    展开更多（{data.length - COLLAPSED_ROWS}）
+                  </>
+                )}
+              </button>
+            </div>
+          )}
         </div>
       )}
     </section>
@@ -525,10 +554,8 @@ function ModelDistributionTable({ data }: { data: ModelStats[] }) {
 }
 
 // ════════════════════════════════════════════════════════════
-// Token 使用趋势图 (纯 SVG 折线图 + 渐变填充)
+// Token 使用趋势图 (纯 SVG 堆叠柱状图)
 // ════════════════════════════════════════════════════════════
-
-const CACHED_LINE_COLOR = "#10b981"; // emerald-500，缓存曲线统一色，与模型配色区分
 
 const TREND_LINE_COLORS = [
   { stroke: "#3b82f6", fill: "#3b82f6", light: "#93c5fd" }, // blue
@@ -548,27 +575,6 @@ interface TrendHover {
   y: number;
   hour: string;
   data: { model: string; input: number; output: number; cached: number }[];
-}
-
-/** Catmull-Rom → cubic Bézier 转换，生成平滑曲线路径 */
-function smoothPath(points: { x: number; y: number }[]): string {
-  if (points.length === 0) return "";
-  if (points.length === 1) return `M ${points[0].x} ${points[0].y}`;
-  if (points.length === 2) return `M ${points[0].x} ${points[0].y} L ${points[1].x} ${points[1].y}`;
-
-  let d = `M ${points[0].x} ${points[0].y}`;
-  for (let i = 0; i < points.length - 1; i++) {
-    const p0 = points[i - 1] || points[i];
-    const p1 = points[i];
-    const p2 = points[i + 1];
-    const p3 = points[i + 2] || p2;
-    const cp1x = p1.x + (p2.x - p0.x) / 6;
-    const cp1y = p1.y + (p2.y - p0.y) / 6;
-    const cp2x = p2.x - (p3.x - p1.x) / 6;
-    const cp2y = p2.y - (p3.y - p1.y) / 6;
-    d += ` C ${cp1x} ${cp1y}, ${cp2x} ${cp2y}, ${p2.x} ${p2.y}`;
-  }
-  return d;
 }
 
 function TokenTrendChart({
@@ -691,18 +697,35 @@ function TokenTrendChart({
   const chartW = Math.max(containerW - padding.left - padding.right, 100);
   const stepX = hoursList.length > 1 ? chartW / (hoursList.length - 1) : chartW;
 
-  // Y 轴最大值（选中的所有 mode 中的最大单点值，留 15% headroom）
+  // 每桶的堆叠柱数据:柱高 = 该桶内各可见模型「选中类型求和」的累计;
+  // 隐藏的模型不参与堆叠,柱高随之下降。hover 浮层读取的是同一份 visibleSeries。
+  const stackedBars = useMemo(() => {
+    return hoursList.map((h, i) => {
+      const segments: { model: string; value: number; colorIdx: number }[] = [];
+      visibleSeries.forEach(s => {
+        const p = s.points[i];
+        if (!p) return;
+        let value = 0;
+        if (showInput) value += p.input;
+        if (showOutput) value += p.output;
+        if (showCached) value += p.cached;
+        if (value > 0) {
+          segments.push({ model: s.model, value, colorIdx: Math.max(0, modelList.indexOf(s.model)) });
+        }
+      });
+      const total = segments.reduce((a, s) => a + s.value, 0);
+      return { hour: h, total, segments };
+    });
+  }, [visibleSeries, hoursList, modelList, showInput, showOutput, showCached]);
+
+  // Y 轴最大值:各桶堆叠总和的峰值,留 15% headroom。
   const maxValue = useMemo(() => {
     let max = 0;
-    visibleSeries.forEach(s => {
-      s.points.forEach(p => {
-        if (showInput && p.input > max) max = p.input;
-        if (showOutput && p.output > max) max = p.output;
-        if (showCached && p.cached > max) max = p.cached;
-      });
+    stackedBars.forEach(b => {
+      if (b.total > max) max = b.total;
     });
     return max > 0 ? max * 1.15 : 1;
-  }, [visibleSeries, showInput, showOutput, showCached]);
+  }, [stackedBars]);
 
   const yTicks = 5;
   const yTickValues = Array.from({ length: yTicks + 1 }, (_, i) => (maxValue / yTicks) * i);
@@ -729,42 +752,6 @@ function TokenTrendChart({
 
   const labelInterval = Math.max(1, Math.floor(hoursList.length / 10));
 
-  // 为每个模型生成 SVG 坐标点（输入和输出各一条线）
-  const lineData = useMemo(() => {
-    const lines: { model: string; type: "input" | "output" | "cached"; pts: { x: number; y: number; val: number; hour: string }[]; path: string; areaPath: string; colorIdx: number }[] = [];
-    visibleSeries.forEach((s) => {
-      const idx = Math.max(0, modelList.indexOf(s.model));
-      if (showInput) {
-        const pts = s.points.map((p, i) => ({
-          x: padding.left + i * stepX,
-          y: padding.top + chartH - p.input / maxValue * chartH,
-          val: p.input,
-          hour: p.hour,
-        }));
-        lines.push({ model: s.model, type: "input", pts, path: smoothPath(pts), areaPath: pts.length > 0 ? `${smoothPath(pts)} L ${pts[pts.length - 1].x} ${padding.top + chartH} L ${pts[0].x} ${padding.top + chartH} Z` : "", colorIdx: idx });
-      }
-      if (showOutput) {
-        const pts = s.points.map((p, i) => ({
-          x: padding.left + i * stepX,
-          y: padding.top + chartH - p.output / maxValue * chartH,
-          val: p.output,
-          hour: p.hour,
-        }));
-        lines.push({ model: s.model, type: "output", pts, path: smoothPath(pts), areaPath: pts.length > 0 ? `${smoothPath(pts)} L ${pts[pts.length - 1].x} ${padding.top + chartH} L ${pts[0].x} ${padding.top + chartH} Z` : "", colorIdx: idx });
-      }
-      if (showCached) {
-        const pts = s.points.map((p, i) => ({
-          x: padding.left + i * stepX,
-          y: padding.top + chartH - p.cached / maxValue * chartH,
-          val: p.cached,
-          hour: p.hour,
-        }));
-        lines.push({ model: s.model, type: "cached", pts, path: smoothPath(pts), areaPath: "", colorIdx: idx });
-      }
-    });
-    return lines;
-  }, [visibleSeries, modelList, stepX, showInput, showOutput, showCached, maxValue, chartH, padding]);
-
   // hover 十字线 x 坐标 → 最近的数据点索引
   const hoverIndex = hoverBar
     ? Math.round((hoverBar.x - padding.left) / stepX)
@@ -777,7 +764,7 @@ function TokenTrendChart({
         <div>
           <h2 className="text-lg font-semibold text-slate-900">Token 使用趋势</h2>
           <p className="mt-1 text-sm text-slate-500">
-            {hours === 24 ? "最近 24 小时" : hours === 168 ? "最近 7 天" : "最近 30 天"} · {hours === 24 ? "按小时" : hours === 168 ? "按 3 小时" : "按天"}粒度 · 按模型分线
+            {hours === 24 ? "最近 24 小时" : hours === 168 ? "最近 7 天" : "最近 30 天"} · {hours === 24 ? "按小时" : hours === 168 ? "按 3 小时" : "按天"}粒度 · 按模型颜色堆叠
           </p>
         </div>
         <div className="flex items-center gap-3">
@@ -852,9 +839,9 @@ function TokenTrendChart({
             );
           })}
           <div className="ml-2 flex items-center gap-3 text-[10px] text-slate-400">
-            {showInput && <span className="flex items-center gap-1"><span className="h-0.5 w-4 rounded-full bg-slate-400" />实线=输入</span>}
-            {showOutput && <span className="flex items-center gap-1"><span className="h-0.5 w-4 rounded-full bg-slate-400" style={{ borderTop: "2px dashed" }} />虚线=输出</span>}
-            {showCached && <span className="flex items-center gap-1"><span className="h-0.5 w-4 rounded-full" style={{ backgroundColor: CACHED_LINE_COLOR }} />点线=缓存</span>}
+            {showInput && <span className="flex items-center gap-1"><span className="h-0.5 w-4 rounded-full bg-slate-400" />含输入</span>}
+            {showOutput && <span className="flex items-center gap-1"><span className="h-0.5 w-4 rounded-full bg-slate-400" style={{ borderTop: "2px dashed" }} />含输出</span>}
+            {showCached && <span className="flex items-center gap-1"><span className="h-0.5 w-4 rounded-full" style={{ backgroundColor: "#10b981" }} />含缓存</span>}
           </div>
         </div>
       )}
@@ -896,20 +883,6 @@ function TokenTrendChart({
             height={chartH + padding.top + padding.bottom}
             className="overflow-visible"
           >
-            <defs>
-              {/* 每个模型的渐变定义 */}
-              {lineData.map((ld, i) => (
-                <linearGradient
-                  key={i}
-                  id={`trend-grad-${i}`}
-                  x1="0" y1="0" x2="0" y2="1"
-                >
-                  <stop offset="0%" stopColor={TREND_LINE_COLORS[ld.colorIdx % TREND_LINE_COLORS.length].stroke} stopOpacity={0.18} />
-                  <stop offset="100%" stopColor={TREND_LINE_COLORS[ld.colorIdx % TREND_LINE_COLORS.length].stroke} stopOpacity={0} />
-                </linearGradient>
-              ))}
-            </defs>
-
             {/* Y 轴网格线 + 标签 */}
             {yTickValues.map((v, i) => {
               const y = padding.top + chartH - (v / maxValue) * chartH;
@@ -935,70 +908,51 @@ function TokenTrendChart({
               );
             })}
 
-            {/* 渐变填充区域 */}
-            {lineData.map((ld, i) => (
-              <path
-                key={`area-${i}`}
-                d={ld.areaPath}
-                fill={`url(#trend-grad-${i})`}
-              />
-            ))}
-
-            {/* 折线 */}
-            {lineData.map((ld, i) => {
-              const color = TREND_LINE_COLORS[ld.colorIdx % TREND_LINE_COLORS.length];
-              return (
-                <path
-                  key={`line-${i}`}
-                  d={ld.path}
-                  fill="none"
-                  stroke={ld.type === "cached" ? CACHED_LINE_COLOR : color.stroke}
-                  strokeWidth={2}
-                  strokeLinecap="round"
-                  strokeLinejoin="round"
-                  strokeDasharray={ld.type === "output" ? "6 3" : ld.type === "cached" ? "2 3" : undefined}
-                  strokeOpacity={ld.type === "cached" ? 0.85 : undefined}
-                />
-              );
+            {/* 堆叠柱(按模型颜色分段叠加) */}
+            {stackedBars.map((bar, bi) => {
+              const barW = Math.max(Math.min(stepX * 0.7, 42), 3);
+              const x = padding.left + bi * stepX - barW / 2;
+              let acc = 0;
+              return bar.segments.map((seg, si) => {
+                const segH = (seg.value / maxValue) * chartH;
+                const y = padding.top + chartH - ((acc + seg.value) / maxValue) * chartH;
+                acc += seg.value;
+                const color = TREND_LINE_COLORS[seg.colorIdx % TREND_LINE_COLORS.length];
+                return (
+                  <rect
+                    key={`bar-${bi}-${si}`}
+                    x={x}
+                    y={y}
+                    width={barW}
+                    height={Math.max(segH, 0)}
+                    fill={color.fill}
+                  />
+                );
+              });
             })}
 
-            {/* Hover 十字线 + 数据点高亮 */}
+            {/* Hover:整根柱高亮 */}
             {hoverBar && clampedHoverIndex >= 0 && clampedHoverIndex < hoursList.length && (
               <g>
-                {/* 垂直虚线 */}
-                <line
-                  x1={padding.left + clampedHoverIndex * stepX}
-                  y1={padding.top}
-                  x2={padding.left + clampedHoverIndex * stepX}
-                  y2={padding.top + chartH}
-                  stroke="#cbd5e1"
-                  strokeWidth={1}
-                  strokeDasharray="4 4"
+                <rect
+                  x={Math.max(padding.left + clampedHoverIndex * stepX - stepX / 2, padding.left)}
+                  y={padding.top}
+                  width={stepX}
+                  height={chartH}
+                  fill="#3b82f6"
+                  opacity={0.08}
+                  pointerEvents="none"
                 />
-                {/* 每条线上的圆点高亮 */}
-                {lineData.map((ld, i) => {
-                  const pt = ld.pts[clampedHoverIndex];
-                  if (!pt || pt.val === 0) return null;
-                  const color = TREND_LINE_COLORS[ld.colorIdx % TREND_LINE_COLORS.length];
-                  return (
-                    <g key={`hover-dot-${i}`}>
-                      <circle
-                        cx={pt.x}
-                        cy={pt.y}
-                        r={5}
-                        fill="white"
-                        stroke={color.stroke}
-                        strokeWidth={2.5}
-                      />
-                      <circle
-                        cx={pt.x}
-                        cy={pt.y}
-                        r={2}
-                        fill={color.stroke}
-                      />
-                    </g>
-                  );
-                })}
+                {/* 柱顶基准线:指示该桶堆叠总高 */}
+                <line
+                  x1={Math.max(padding.left + clampedHoverIndex * stepX - stepX / 2, padding.left)}
+                  y1={padding.top + chartH - (stackedBars[clampedHoverIndex]?.total ?? 0) / maxValue * chartH}
+                  x2={Math.min(padding.left + clampedHoverIndex * stepX + stepX / 2, containerW - padding.right)}
+                  y2={padding.top + chartH - (stackedBars[clampedHoverIndex]?.total ?? 0) / maxValue * chartH}
+                  stroke="#64748b"
+                  strokeWidth={1}
+                  strokeDasharray="3 3"
+                />
               </g>
             )}
 
@@ -1034,10 +988,15 @@ function TokenTrendChart({
           <div
             className="pointer-events-none absolute z-10 min-w-[180px] max-w-xs rounded-xl border border-slate-200 bg-white/95 p-3 shadow-xl backdrop-blur-sm"
             style={{
-              left: Math.min(
-                hoverBar.x + 16,
-                containerW - 220,
-              ),
+              // 浮窗边缘翻转逻辑:默认显示在柱子右侧;若右侧空间不足
+              // (鼠标位置 + 浮窗预估宽度超出容器),翻转到柱子左侧;
+              // 两侧均不足时钳制在容器内,保证完整显示不溢出视域。
+              left: (() => {
+                const w = 220; // 浮窗预估宽度(min-w 180 + 内边距余量)
+                const preferRight = hoverBar.x + 16 + w <= containerW;
+                const left = preferRight ? hoverBar.x + 16 : hoverBar.x - 16 - w;
+                return Math.max(8, Math.min(left, containerW - w - 8));
+              })(),
               top: Math.max(hoverBar.y - 90, 8),
             }}
           >

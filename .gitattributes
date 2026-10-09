@@ -1,0 +1,5 @@
+# 数据库迁移文件的字节内容参与 sqlx migrate! 的 SHA-256 校验：
+# 任何行尾转换（autoclf=true 的 Windows 检出默认会转 CRLF）都会改变
+# 编译期内嵌的 checksum，导致已安装数据库启动时 VersionMismatch panic。
+# 因此迁移文件必须锁定 LF，禁止 EOL 转换。
+*.sql text eol=lf

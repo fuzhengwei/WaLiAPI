@@ -7,6 +7,7 @@ use std::{
     },
     time::Duration,
 };
+use tokio::sync::Notify;
 use tokio::time::Instant;
 
 tokio::task_local! {
@@ -16,10 +17,12 @@ tokio::task_local! {
 #[derive(Clone, Debug)]
 pub struct Budget {
     deadline: Instant,
+    request_deadline: Instant,
     total_duration: Duration,
     request_id: String,
     stage: &'static str,
     cancelled: Arc<AtomicBool>,
+    cancel_signal: Arc<Notify>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -33,12 +36,15 @@ impl Budget {
     /// 客户端预算只能收紧请求，服务端始终将其限制在 100ms 到 120s。
     pub fn new(timeout_ms: u64, request_id: impl Into<String>) -> Self {
         let total_duration = Duration::from_millis(timeout_ms.clamp(100, 120_000));
+        let deadline = Instant::now() + total_duration;
         Self {
-            deadline: Instant::now() + total_duration,
+            deadline,
+            request_deadline: deadline,
             total_duration,
             request_id: request_id.into(),
             stage: "request",
             cancelled: Arc::new(AtomicBool::new(false)),
+            cancel_signal: Arc::new(Notify::new()),
         }
     }
 
@@ -48,6 +54,10 @@ impl Budget {
 
     pub fn total_duration(&self) -> Duration {
         self.total_duration
+    }
+
+    pub fn request_deadline(&self) -> Instant {
+        self.request_deadline
     }
 
     pub fn remaining(&self) -> Duration {
@@ -68,6 +78,26 @@ impl Budget {
 
     pub fn cancel(&self) {
         self.cancelled.store(true, Ordering::Release);
+        self.cancel_signal.notify_waiters();
+    }
+
+    pub fn check_request(&self) -> Result<(), BudgetElapsed> {
+        if self.cancelled.load(Ordering::Acquire) {
+            Err(BudgetElapsed::Cancelled)
+        } else if Instant::now() >= self.request_deadline {
+            Err(BudgetElapsed::Deadline)
+        } else {
+            Ok(())
+        }
+    }
+
+    async fn cancelled(&self) {
+        let notified = self.cancel_signal.notified();
+        tokio::pin!(notified);
+        notified.as_mut().enable();
+        if !self.cancelled.load(Ordering::Acquire) {
+            notified.await;
+        }
     }
 
     pub fn check(&self) -> Result<(), BudgetElapsed> {
@@ -119,9 +149,11 @@ pub fn run<F: Future>(
         } else {
             BudgetElapsed::ChannelTimeout
         };
-        tokio::time::timeout_at(deadline, future)
-            .await
-            .map_err(|_| elapsed)
+        tokio::select! {
+            biased;
+            _ = budget.cancelled() => Err(BudgetElapsed::Cancelled),
+            result = tokio::time::timeout_at(deadline, future) => result.map_err(|_| elapsed),
+        }
     }
 }
 
@@ -139,6 +171,7 @@ mod tests {
         );
         assert!(child.deadline() <= budget.deadline() - Duration::from_millis(399));
         assert_eq!(child.total_duration(), Duration::from_secs(1));
+        assert_eq!(child.request_deadline(), budget.request_deadline());
         let nested = child.stage("nested", Duration::from_secs(5), Duration::ZERO);
         assert!(nested.deadline() <= child.deadline());
         budget.cancel();

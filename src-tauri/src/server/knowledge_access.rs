@@ -449,6 +449,8 @@ async fn ask_inner(
         mode,
         input.diagnostics,
         input.allow_keyword_fallback,
+        input.allow_vector_fallback,
+        input.strict_retrieval,
         input.candidate_k,
         input.reasoning_effort.as_deref(),
     ))
@@ -564,12 +566,16 @@ async fn search_inner(
             .unwrap_or("text-embedding-3-small"),
         input.candidate_k.unwrap_or(input.top_k),
         mcp,
-        &shared.state.settings,
+        crate::services::knowledge::retriever::FusionMode::parse(
+            &shared.state.settings.get_str("kb.fusion_mode", "rrf"),
+        ),
         vw,
         kw,
         mode,
         input.diagnostics,
         input.allow_keyword_fallback,
+        input.allow_vector_fallback,
+        input.strict_retrieval,
         false,
     ))
     .await;
@@ -596,6 +602,9 @@ async fn search_inner(
     }
     let extended = input.timeout_ms.is_some()
         || input.allow_keyword_fallback
+        || input.allow_vector_fallback
+        || input.strict_retrieval
+        || retrieved.degradation_reason.is_some()
         || input.diagnostics
         || input.candidate_k.is_some();
     Ok(SearchResponse {

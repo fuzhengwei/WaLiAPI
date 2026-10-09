@@ -1,6 +1,8 @@
 import { useEffect, useLayoutEffect, useState, useCallback, useMemo, useRef } from "react";
 import { Link } from "react-router-dom";
-import { logApi } from "../lib/api";
+import { logApi, channelApi } from "../lib/api";
+import type { DeleteLogsInput, DeleteLogsReport, CleanupChannelInput, CleanupChannelReport } from "../lib/api";
+import type { Channel } from "../types";
 import type { RequestLog, SecurityFinding } from "../types";
 import { formatTime, formatDuration, formatNumber } from "../lib/constants";
 import { writeClipboard } from "../lib/runtime";
@@ -291,6 +293,8 @@ export function LogsPage() {
   const [totalCount, setTotalCount] = useState(0);
   const [expandedId, setExpandedId] = useState<string | null>(null);
   const [showCleanModal, setShowCleanModal] = useState(false);
+  // 「渠道清理」tab 所需的渠道列表(下拉选择目标渠道)。
+  const [channels, setChannels] = useState<Channel[]>([]);
   const [showTraceColumn, setShowTraceColumn] = useState(false);
 
   // Search filters
@@ -344,6 +348,15 @@ export function LogsPage() {
     const timer = setTimeout(() => load(0), 300);
     return () => clearTimeout(timer);
   }, [load]);
+
+  // 渠道清理 tab 需要渠道清单(仅打开弹窗时点按需拉取,避免常驻请求)。
+  const loadChannels = useCallback(async () => {
+    try {
+      setChannels(await channelApi.getAll());
+    } catch (e) {
+      console.error("Failed to load channels:", e);
+    }
+  }, []);
 
   // ─── Auto-refresh: poll every 5s when page is visible ───────────────────
   // 默认开启保持既有语义，可关闭（偏好持久化，GAP-06，上游 #28 的跟进）。
@@ -432,20 +445,51 @@ export function LogsPage() {
     }
   };
 
-  const handleCleanLogs = async (type: "all" | "7d" | "30d") => {
+  const [cleanConfirm, setCleanConfirm] = useState<{
+    kind: "logs" | "channel";
+    input: DeleteLogsInput | CleanupChannelInput;
+    preview: DeleteLogsReport | CleanupChannelReport;
+    channelName?: string;
+  } | null>(null);
+  const [cleanRunning, setCleanRunning] = useState(false);
+
+  const handleCleanLogs = async (input: DeleteLogsInput) => {
+    // 两步确认:先 dry_run 预览影响行数,展示给用户确认后才真正删除。
     try {
-      if (type === "all") {
-        await logApi.deleteAll();
+      const preview = await logApi.deleteMany({ ...input, dry_run: true });
+      setCleanConfirm({ kind: "logs", input, preview });
+    } catch (e) {
+      console.error("Failed to preview clean:", e);
+    }
+  };
+
+  const handleCleanupChannel = async (input: CleanupChannelInput) => {
+    try {
+      const preview = await logApi.cleanupChannel({ ...input, dry_run: true });
+      const ch = channels.find(c => c.id === input.channel_id);
+      setCleanConfirm({ kind: "channel", input, preview, channelName: ch?.name });
+    } catch (e) {
+      console.error("Failed to preview channel cleanup:", e);
+    }
+  };
+
+  const handleConfirmClean = async () => {
+    if (!cleanConfirm) return;
+    setCleanRunning(true);
+    try {
+      if (cleanConfirm.kind === "logs") {
+        await logApi.deleteMany(cleanConfirm.input as DeleteLogsInput);
       } else {
-        const days = type === "7d" ? 7 : 30;
-        const before = new Date(Date.now() - days * 86400000).toISOString();
-        await logApi.deleteBefore(before);
+        await logApi.cleanupChannel(cleanConfirm.input as CleanupChannelInput);
       }
+      setCleanConfirm(null);
       setShowCleanModal(false);
       setPage(0);
       load(0);
     } catch (e) {
       console.error("Failed to clean logs:", e);
+    } finally {
+      setCleanRunning(false);
     }
   };
 
@@ -738,9 +782,27 @@ export function LogsPage() {
         </div>
       </div>
 
-      {/* Clean modal */}
+      {/* Clean modal(第一步:条件选择,含「清理日志/渠道清理」双 tab) */}
       {showCleanModal && (
-        <CleanLogsModal onConfirm={handleCleanLogs} onCancel={() => setShowCleanModal(false)} />
+        <CleanLogsModal
+          channels={channels}
+          onLoadChannels={loadChannels}
+          onConfirmLogs={handleCleanLogs}
+          onConfirmChannel={handleCleanupChannel}
+          onCancel={() => setShowCleanModal(false)}
+        />
+      )}
+
+      {/* 清理确认(第二步:预览影响 + 备份提醒 + 二次确认) */}
+      {cleanConfirm && (
+        <CleanConfirmModal
+          kind={cleanConfirm.kind}
+          channelName={cleanConfirm.channelName}
+          preview={cleanConfirm.preview}
+          onConfirm={handleConfirmClean}
+          onCancel={() => setCleanConfirm(null)}
+          running={cleanRunning}
+        />
       )}
     </div>
   );
@@ -1777,43 +1839,286 @@ function LogDetail({ log }: { log: RequestLog }) {
   );
 }
 
-// ─── CleanLogsModal ──────────────────────────────────────────────────────────
+// ─── CleanLogsModal(第一步:条件选择,含「清理日志/渠道清理」双 tab)──────────
 
 function CleanLogsModal({
-  onConfirm,
+  channels,
+  onLoadChannels,
+  onConfirmLogs,
+  onConfirmChannel,
   onCancel,
 }: {
-  onConfirm: (type: "all" | "7d" | "30d") => void;
+  channels: Channel[];
+  onLoadChannels: () => void;
+  onConfirmLogs: (input: DeleteLogsInput) => void;
+  onConfirmChannel: (input: CleanupChannelInput) => void;
   onCancel: () => void;
 }) {
+  const [tab, setTab] = useState<"logs" | "channel">("logs");
+
+  // 渠道下拉两个 tab 都用(全局日志的目标渠道 / 渠道日志的渠道选择),
+  // 弹窗一挂载即拉取;channels 非空则跳过,避免重复请求。
+  useEffect(() => {
+    if (channels.length === 0) onLoadChannels();
+  }, [channels.length, onLoadChannels]);
+
+  const inputCls = "w-full px-3 py-2 text-sm rounded-lg border border-slate-200 focus:outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 bg-white";
+  const tabCls = (active: boolean) =>
+    `flex-1 rounded-lg px-4 py-2 text-sm font-medium transition-all ${active ? "bg-white text-slate-900 shadow-sm" : "text-slate-500 hover:text-slate-700"}`;
+
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/30 backdrop-blur-sm" onClick={onCancel}>
-      <div className="surface rounded-2xl p-6 max-w-sm w-full mx-4" onClick={e => e.stopPropagation()}>
-        <h3 className="text-lg font-semibold mb-2">清理日志</h3>
-        <p className="text-sm text-muted-foreground mb-4">选择要清理的日志范围，此操作不可撤销</p>
-        <div className="space-y-2">
-          <button
-            onClick={() => onConfirm("7d")}
-            className="w-full text-left px-4 py-3 rounded-xl border border-border hover:bg-white/60 transition-colors text-sm"
-          >
-            清理 7 天前的日志
-          </button>
-          <button
-            onClick={() => onConfirm("30d")}
-            className="w-full text-left px-4 py-3 rounded-xl border border-border hover:bg-white/60 transition-colors text-sm"
-          >
-            清理 30 天前的日志
-          </button>
-          <button
-            onClick={() => onConfirm("all")}
-            className="w-full text-left px-4 py-3 rounded-xl border border-red-200 text-red-500 hover:bg-red-50 transition-colors text-sm"
-          >
-            清理全部日志
+      <div className="surface rounded-2xl p-6 max-w-lg w-full mx-4" onClick={e => e.stopPropagation()}>
+        <h3 className="text-lg font-semibold mb-1">清理</h3>
+        <p className="text-sm text-muted-foreground mb-4">下一步将显示预计影响并二次确认。</p>
+
+        {/* 双 tab:全局日志(全局维度)/ 渠道日志(按渠道维度) */}
+        <div className="mb-4 flex rounded-lg border border-slate-200 bg-slate-50 p-0.5">
+          <button className={tabCls(tab === "logs")} onClick={() => setTab("logs")}>全局日志</button>
+          <button className={tabCls(tab === "channel")} onClick={() => setTab("channel")}>渠道日志</button>
+        </div>
+
+        {tab === "logs" ? (
+          <CleanLogsForm inputCls={inputCls} channels={channels} onConfirm={onConfirmLogs} />
+        ) : (
+          <CleanChannelForm inputCls={inputCls} channels={channels} onConfirm={onConfirmChannel} />
+        )}
+
+        <div className="mt-5">
+          <button onClick={onCancel} className="w-full action-secondary justify-center">取消</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// 全局日志表单(全局维度:时间 + 请求结果 + 可选目标渠道)。
+function CleanLogsForm({
+  inputCls,
+  channels,
+  onConfirm,
+}: {
+  inputCls: string;
+  channels: Channel[];
+  onConfirm: (input: DeleteLogsInput) => void;
+}) {
+  const [retention, setRetention] = useState("30"); // 保留最近 N 天,空=全部
+  const [isSuccess, setIsSuccess] = useState("");
+  const [channelId, setChannelId] = useState(""); // 空=全部渠道
+  const [clearStats, setClearStats] = useState(false);
+
+  const submit = () => {
+    const input: DeleteLogsInput = {
+      keep_recent_days: retention ? Number(retention) : undefined,
+      is_success: isSuccess ? isSuccess === "success" : undefined,
+      channel_id: channelId || undefined,
+      clear_stats: clearStats || undefined,
+    };
+    onConfirm(input);
+  };
+
+  return (
+    <div className="space-y-3">
+      <div>
+        <label className="mb-1 block text-xs font-medium text-slate-600">时间范围</label>
+        <select value={retention} onChange={e => setRetention(e.target.value)} className={inputCls}>
+          <option value="">清理全部日志</option>
+          <option value={1}>保留最近 1 天（清理更早的）</option>
+          <option value={7}>保留最近 7 天（清理更早的）</option>
+          <option value={30}>保留最近 30 天（清理更早的）</option>
+          <option value={90}>保留最近 90 天（清理更早的）</option>
+        </select>
+      </div>
+      <div>
+        <label className="mb-1 block text-xs font-medium text-slate-600">请求结果（可选）</label>
+        <select value={isSuccess} onChange={e => setIsSuccess(e.target.value)} className={inputCls}>
+          <option value="">全部结果</option>
+          <option value="success">仅成功（2xx）</option>
+          <option value="failed">仅失败（非 2xx）</option>
+        </select>
+      </div>
+      <div>
+        <label className="mb-1 block text-xs font-medium text-slate-600">目标渠道（可选）</label>
+        <select value={channelId} onChange={e => setChannelId(e.target.value)} className={inputCls}>
+          <option value="">全部渠道</option>
+          {channels.map(ch => (
+            <option key={ch.id} value={ch.id}>{ch.name}（{ch.id}）</option>
+          ))}
+        </select>
+      </div>
+      <label className="flex items-start gap-2 rounded-xl border border-slate-200 bg-slate-50 px-3 py-2.5 cursor-pointer">
+        <input type="checkbox" checked={clearStats} onChange={e => setClearStats(e.target.checked)} className="mt-0.5" />
+        <span className="text-sm">
+          <span className="font-medium text-slate-800">同时清除对应的历史统计数据</span>
+          <span className="block text-xs text-red-500">默认不清除；勾选后对应时间段的调用量与 Token 统计将不可恢复。</span>
+        </span>
+      </label>
+
+      <button onClick={submit} className="w-full rounded-lg bg-red-500 px-4 py-2 text-sm font-medium text-white hover:bg-red-600">
+        下一步：预览影响
+      </button>
+    </div>
+  );
+}
+
+// 渠道清理表单(按渠道维度:清日志 / 清统计 / 重置失败计数)。
+function CleanChannelForm({
+  inputCls,
+  channels,
+  onConfirm,
+}: {
+  inputCls: string;
+  channels: Channel[];
+  onConfirm: (input: CleanupChannelInput) => void;
+}) {
+  const [channelId, setChannelId] = useState("");
+  const [retention, setRetention] = useState(""); // 空=全部
+  const [clearLogs, setClearLogs] = useState(true);
+  const [clearStats, setClearStats] = useState(false);
+  const [resetFail, setResetFail] = useState(false);
+
+  const canSubmit = channelId !== "";
+
+  const submit = () => {
+    if (!canSubmit) return;
+    onConfirm({
+      channel_id: channelId,
+      keep_recent_days: retention ? Number(retention) : undefined,
+      clear_logs: clearLogs || undefined,
+      clear_stats: clearStats || undefined,
+      reset_fail: resetFail || undefined,
+    });
+  };
+
+  return (
+    <div className="space-y-3">
+      <div>
+        <label className="mb-1 block text-xs font-medium text-slate-600">目标渠道</label>
+        <select value={channelId} onChange={e => setChannelId(e.target.value)} className={inputCls}>
+          <option value="">请选择渠道…</option>
+          {channels.map(ch => (
+            <option key={ch.id} value={ch.id}>{ch.name}（{ch.id}）</option>
+          ))}
+        </select>
+      </div>
+      <div>
+        <label className="mb-1 block text-xs font-medium text-slate-600">时间范围</label>
+        <select value={retention} onChange={e => setRetention(e.target.value)} className={inputCls}>
+          <option value="">全部时间</option>
+          <option value={1}>保留最近 1 天（清理更早的）</option>
+          <option value={7}>保留最近 7 天（清理更早的）</option>
+          <option value={30}>保留最近 30 天（清理更早的）</option>
+          <option value={90}>保留最近 90 天（清理更早的）</option>
+        </select>
+      </div>
+      <div className="space-y-2">
+        <label className="flex items-start gap-2 rounded-xl border border-slate-200 bg-slate-50 px-3 py-2.5 cursor-pointer">
+          <input type="checkbox" checked={clearLogs} onChange={e => setClearLogs(e.target.checked)} className="mt-0.5" />
+          <span className="text-sm">
+            <span className="font-medium text-slate-800">清理该渠道的日志</span>
+            <span className="block text-xs text-slate-500">删除该渠道的审计日志（含流式内容段），不影响统计。</span>
+          </span>
+        </label>
+        <label className="flex items-start gap-2 rounded-xl border border-slate-200 bg-slate-50 px-3 py-2.5 cursor-pointer">
+          <input type="checkbox" checked={clearStats} onChange={e => setClearStats(e.target.checked)} className="mt-0.5" />
+          <span className="text-sm">
+            <span className="font-medium text-slate-800">清除该渠道的统计数据</span>
+            <span className="block text-xs text-red-500">删除该渠道的调用量、成功/失败、Token 统计，不可恢复。</span>
+          </span>
+        </label>
+        <label className="flex items-start gap-2 rounded-xl border border-slate-200 bg-slate-50 px-3 py-2.5 cursor-pointer">
+          <input type="checkbox" checked={resetFail} onChange={e => setResetFail(e.target.checked)} className="mt-0.5" />
+          <span className="text-sm">
+            <span className="font-medium text-slate-800">重置失败计数（恢复成功率）</span>
+            <span className="block text-xs text-slate-500">仅把该渠道的失败计数清零，请求数/成功数/Token 不动；成功率恢复为 ~100%。</span>
+          </span>
+        </label>
+      </div>
+
+      <button
+        onClick={submit}
+        disabled={!canSubmit}
+        className="w-full rounded-lg bg-red-500 px-4 py-2 text-sm font-medium text-white hover:bg-red-600 disabled:opacity-40"
+      >
+        下一步：预览影响
+      </button>
+    </div>
+  );
+}
+
+// ─── CleanConfirmModal(第二步:确认,含备份提醒;支持日志/渠道两种形态)────────
+
+function CleanConfirmModal({
+  kind,
+  channelName,
+  preview,
+  onConfirm,
+  onCancel,
+  running,
+}: {
+  kind: "logs" | "channel";
+  channelName?: string;
+  preview: DeleteLogsReport | CleanupChannelReport;
+  onConfirm: () => void;
+  onCancel: () => void;
+  running: boolean;
+}) {
+  const p = preview as DeleteLogsReport & CleanupChannelReport;
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/30 backdrop-blur-sm" onClick={running ? undefined : onCancel}>
+      <div className="surface rounded-2xl p-6 max-w-md w-full mx-4" onClick={e => e.stopPropagation()}>
+        <h3 className="text-lg font-semibold mb-1 text-red-600">确认清理？</h3>
+        <p className="text-sm text-muted-foreground mb-4">此操作不可撤销</p>
+
+        <div className="space-y-2 rounded-xl border border-slate-200 bg-slate-50 p-4 text-sm">
+          {kind === "channel" && channelName && (
+            <div className="flex justify-between">
+              <span className="text-slate-500">目标渠道</span>
+              <span className="font-semibold text-slate-900">{channelName}</span>
+            </div>
+          )}
+          {kind === "logs" && (
+            <div className="flex justify-between">
+              <span className="text-slate-500">将清理日志</span>
+              <span className="font-semibold text-slate-900">{formatNumber(p.matched_logs)} 条</span>
+            </div>
+          )}
+          {kind === "logs" && p.matched_stats > 0 && (
+            <div className="flex justify-between">
+              <span className="text-slate-500">将同步清除统计数据</span>
+              <span className="font-semibold text-red-600">{formatNumber(p.matched_stats)} 行</span>
+            </div>
+          )}
+          {kind === "channel" && p.matched_logs > 0 && (
+            <div className="flex justify-between">
+              <span className="text-slate-500">将清理该渠道日志</span>
+              <span className="font-semibold text-slate-900">{formatNumber(p.matched_logs)} 条</span>
+            </div>
+          )}
+          {kind === "channel" && p.matched_stats > 0 && (
+            <div className="flex justify-between">
+              <span className="text-slate-500">将清除该渠道统计数据</span>
+              <span className="font-semibold text-red-600">{formatNumber(p.matched_stats)} 行</span>
+            </div>
+          )}
+          {kind === "channel" && p.reset_fail_rows > 0 && (
+            <div className="flex justify-between">
+              <span className="text-slate-500">将重置失败计数</span>
+              <span className="font-semibold text-amber-600">{formatNumber(p.reset_fail_rows)} 行</span>
+            </div>
+          )}
+        </div>
+
+        <div className="mt-3 rounded-xl border border-amber-200 bg-amber-50 p-3 text-xs leading-5 text-amber-800">
+          清理前建议先备份数据库：应用启动迁移时会自动生成 <code className="font-mono">waliapi.db.pre-upgrade-*</code> 快照，也可手动复制数据库文件备份。清理后日志不可恢复；若勾选了清除统计数据，对应统计同样不可恢复。
+        </div>
+
+        <div className="mt-5 flex gap-2">
+          <button onClick={onCancel} disabled={running} className="flex-1 action-secondary justify-center">取消</button>
+          <button onClick={onConfirm} disabled={running} className="flex-1 rounded-lg bg-red-500 px-4 py-2 text-sm font-medium text-white hover:bg-red-600 disabled:opacity-50">
+            {running ? "清理中…" : "确认清理"}
           </button>
         </div>
-        <button onClick={onCancel} className="mt-4 w-full action-secondary justify-center">
-          取消
-        </button>
       </div>
     </div>
   );

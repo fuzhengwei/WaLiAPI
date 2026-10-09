@@ -5,8 +5,8 @@
 //! （渠道 failover）→ 拼接为带页码锚点的 Markdown。OCR 只产出"文本"，
 //! split 之后的流水线无感知。
 //!
-//! 全局总开关 `ocr.enabled`（默认关）在 processor 中判定：关闭时完全不进入本模块，
-//! 不做扫描判定、不调 LLM，行为与历史版本一致。
+//! 全局总开关 `ocr.enabled`（默认关）在 processor 中判定：关闭时不进入 OCR 流水线、
+//! 不调 LLM；普通 PDF 仍可复用字符阈值记录文字层质量。
 
 pub mod cache;
 pub mod prompt;

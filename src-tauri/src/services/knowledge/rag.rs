@@ -79,6 +79,8 @@ pub async fn ask_with_config(
         search_mode,
         false,
         false,
+        false,
+        false,
         None,
         None,
     )
@@ -104,13 +106,22 @@ pub(crate) async fn ask_with_client(
     search_mode: &str,
     diagnostics_enabled: bool,
     allow_keyword_fallback: bool,
+    allow_vector_fallback: bool,
+    strict_retrieval: bool,
     candidate_k: Option<usize>,
     reasoning_effort: Option<&str>,
 ) -> Result<RagAnswer, QueryError> {
     let reasoning_effort = validate_reasoning_request(reasoning_effort, false)?;
     let mut stages = Vec::new();
-    let strict = diagnostics_enabled || allow_keyword_fallback || budget::current().is_some();
-    let request_id = client.request_id().unwrap_or_default();
+    let strict = diagnostics_enabled
+        || allow_keyword_fallback
+        || allow_vector_fallback
+        || strict_retrieval
+        || budget::current().is_some();
+    let request_id = client
+        .request_id()
+        .or_else(|| budget::current().map(|budget| budget.request_id().to_string()))
+        .unwrap_or_default();
 
     let kb_repo = KbRepository::new(pool.clone());
     validate_candidate_k(top_k, candidate_k)?;
@@ -140,12 +151,14 @@ pub(crate) async fn ask_with_client(
         embedding_model,
         retrieval_k,
         mcp_only,
-        settings,
+        retriever::FusionMode::parse(&settings.get_str("kb.fusion_mode", "rrf")),
         vector_weight,
         keyword_weight,
         search_mode,
         diagnostics_enabled,
         allow_keyword_fallback,
+        allow_vector_fallback,
+        strict_retrieval,
         true,
     ))
     .await?;
@@ -153,7 +166,10 @@ pub(crate) async fn ask_with_client(
     let retrieval_started = retrieved.retrieval_started;
     let actual_mode = retrieved.actual_mode;
     let degradation_reason = retrieved.degradation_reason;
-    let fallback_enabled = allow_keyword_fallback && search_mode == "hybrid" && !kb_id.is_empty();
+    let fallback_enabled = allow_keyword_fallback
+        || allow_vector_fallback
+        || strict_retrieval
+        || degradation_reason.is_some();
     let scored_results = retrieved.scored_results;
     // C-06/R3 第二步：可选 LLM listwise 重排（`kb.rerank_enabled`，默认关）。
     // 走网关自身的渠道跑渠道（proxy::handle_request，kb-internal 路由组），
@@ -451,7 +467,7 @@ pub(crate) struct RetrievedChunks {
     pub retrieval_started: Instant,
 }
 
-/// Ask 和 Search 共用通用检索；不包含生成、业务题型或客户端答案判断。
+/// Ask 和 Search 共用检索预算和两路错误策略，不包含客户端业务判断。
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn retrieve_with_client(
     client: &ModelClient<'_>,
@@ -461,281 +477,259 @@ pub(crate) async fn retrieve_with_client(
     embedding_model: &str,
     retrieval_k: usize,
     mcp_only: bool,
-    settings: &SettingsStore,
+    fusion_mode: retriever::FusionMode,
     vector_weight: f32,
     keyword_weight: f32,
     search_mode: &str,
     diagnostics_enabled: bool,
     allow_keyword_fallback: bool,
+    allow_vector_fallback: bool,
+    strict_retrieval: bool,
     reserve_answer: bool,
 ) -> Result<RetrievedChunks, QueryError> {
-    let mut stages = Vec::new();
-    let request_id = client.request_id().unwrap_or_default();
-    let fusion_mode = retriever::FusionMode::parse(&settings.get_str("kb.fusion_mode", "rrf"));
-    // 显式降级请求允许 FTS 与 Embedding 重叠；历史请求沿用原来的检索流程。
-    let fallback_enabled = allow_keyword_fallback && search_mode == "hybrid" && !kb_id.is_empty();
-    let embedding_started = Instant::now();
-    let (embedding_fraction, embedding_reserve) = if reserve_answer {
+    let request_id = client
+        .request_id()
+        .or_else(|| budget::current().map(|budget| budget.request_id().to_string()))
+        .unwrap_or_default();
+    let retrieval_started = Instant::now();
+    let embedding_budget = if reserve_answer {
         (0.4, 0.55)
     } else {
         (0.7, 0.2)
     };
-    let (retrieval_fraction, retrieval_reserve) = if reserve_answer {
+    // FTS 是并行阶段，保持原有软限额；Search 最后检索可以使用全部剩余时间。
+    let keyword_budget = if reserve_answer {
         (0.2, 0.35)
     } else {
         (0.3, 0.0)
     };
-    let mut degradation_reason = None;
-    let mut keyword_results = None;
-    let query_emb_opt = if search_mode != "keyword" {
-        if fallback_enabled {
-            client
-                .ensure_access(
-                    kb_id,
-                    embedding_model,
-                    crate::core::route_plan::EndpointKind::Embeddings,
+    let final_budget = if reserve_answer {
+        (0.2, 0.35)
+    } else {
+        (1.0, 0.0)
+    };
+    let hybrid = search_mode == "hybrid" && !kb_id.is_empty();
+    let keyword_fallback = hybrid && allow_keyword_fallback;
+    let vector_fallback = hybrid && allow_vector_fallback;
+    let legacy_local_fallback =
+        !strict_retrieval && !allow_keyword_fallback && !allow_vector_fallback;
+    let mut stages = Vec::new();
+    if hybrid && (keyword_fallback || vector_fallback) {
+        run_stage(
+            "permission",
+            1.0,
+            0.0,
+            client.ensure_access(
+                kb_id,
+                embedding_model,
+                crate::core::route_plan::EndpointKind::Embeddings,
+            ),
+        )
+        .await
+        .map_err(|error| {
+            diagnostic_failure(
+                error,
+                "permission",
+                retrieval_started,
+                &stages,
+                &request_id,
+                diagnostics_enabled,
+            )
+        })?;
+    }
+    let vector_future = Box::pin(vector_branch(
+        Box::pin(client.embed(query, embedding_model)),
+        |embedding| async move {
+            let count = if hybrid { retrieval_k * 2 } else { retrieval_k };
+            if kb_id.is_empty() {
+                retriever::search_all_with_details(
+                    pool,
+                    &embedding,
+                    count,
+                    mcp_only,
+                    strict_retrieval,
                 )
                 .await
-                .map_err(|error| {
-                    diagnostic_failure(
-                        error,
-                        "embedding",
-                        embedding_started,
-                        &stages,
-                        &request_id,
-                        diagnostics_enabled,
+                .map(|(results, partial)| {
+                    (
+                        results,
+                        partial.then(|| "knowledge_base_search_partial".into()),
                     )
-                })?;
-        }
-        let embedding_future = run_stage(
-            "embedding",
-            embedding_fraction,
-            embedding_reserve,
-            Box::pin(client.embed(&query, embedding_model)),
-        );
-        let embeddings = if fallback_enabled {
-            let mut embedding_future = Box::pin(embedding_future);
-            let mut keywords = Box::pin(run_stage(
-                "retrieval",
-                retrieval_fraction,
-                retrieval_reserve,
-                Box::pin(async {
-                    retriever::keyword_only_search(pool, kb_id, &query, retrieval_k * 2)
-                        .await
-                        .map_err(Into::into)
-                }),
-            ));
-            tokio::select! {
-                embedding = &mut embedding_future => {
-                    if let Err(error) = &embedding {
-                        if terminal_permission_error(error) {
-                            // 鉴权/额度拒绝立即终止并丢弃 FTS future，不等待其他阶段。
-                            return Err(diagnostic_failure(embedding.unwrap_err(), "embedding", embedding_started, &stages, &request_id, diagnostics_enabled));
-                        }
+                })
+                .map_err(|error| match error.as_str() {
+                    "client_cancelled" => {
+                        QueryError::from_budget(budget::BudgetElapsed::Cancelled, "vector_search")
                     }
-                    keyword_results = Some(keywords.await);
-                    embedding
-                }
-                results = &mut keywords => {
-                    keyword_results = Some(results);
-                    embedding_future.await
-                }
-            }
-        } else {
-            embedding_future.await
-        };
-        match embeddings {
-            Ok(embeddings) => Some(embeddings.into_iter().next().ok_or_else(|| {
-                diagnostic_failure(
-                    QueryError::new(
-                        axum::http::StatusCode::BAD_GATEWAY,
-                        "Embedding 响应缺少有效向量",
+                    "rag_deadline_exceeded" => {
+                        QueryError::from_budget(budget::BudgetElapsed::Deadline, "vector_search")
+                    }
+                    code @ ("stage_timeout"
+                    | "cross_kb_list_failed"
+                    | "cross_kb_pool_failed"
+                    | "cross_kb_search_failed") => QueryError::new(
+                        if code == "stage_timeout" {
+                            axum::http::StatusCode::GATEWAY_TIMEOUT
+                        } else {
+                            axum::http::StatusCode::INTERNAL_SERVER_ERROR
+                        },
+                        "跨库检索失败，请根据请求编号检查服务日志",
                     )
-                    .at_stage("embedding", "invalid_embedding_response"),
-                    "embedding",
-                    embedding_started,
-                    &stages,
-                    &request_id,
-                    diagnostics_enabled,
-                )
-            })?),
-            Err(error) if fallback_enabled && recoverable_embedding_error(&error) => {
-                // 每次重新核验权限和额度，绝不借 FTS 结果绕过权限撤销或额度拒绝。
-                client
-                    .ensure_model_permission(kb_id, embedding_model)
-                    .await?;
-                client.ensure_knowledge_access(kb_id, mcp_only).await?;
-                degradation_reason =
-                    Some(error.code.unwrap_or_else(|| "embedding_unavailable".into()));
-                tracing::warn!(
-                    request_id,
-                    reason = degradation_reason.as_deref(),
-                    "Embedding 可恢复失败，改用关键词检索"
-                );
-                None
+                    .at_stage("vector_search", code),
+                    _ => QueryError::new(
+                        axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                        "向量检索失败，请根据请求编号检查服务日志",
+                    )
+                    .at_stage("vector_search", "vector_search_failed"),
+                })
+            } else {
+                retriever::search(pool, kb_id, &embedding, count)
+                    .await
+                    .map(|results| (results, None))
+                    .map_err(|_| {
+                        QueryError::new(
+                            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                            "向量检索失败，请根据请求编号检查服务日志",
+                        )
+                        .at_stage("vector_search", "vector_search_failed")
+                    })
             }
-            Err(error) => {
-                return Err(diagnostic_failure(
-                    error,
-                    "embedding",
-                    embedding_started,
-                    &stages,
-                    &request_id,
-                    diagnostics_enabled,
-                ))
-            }
-        }
-    } else {
-        None
-    };
-    record_stage(
-        &mut stages,
-        "embedding",
-        if search_mode == "keyword" {
-            "skipped"
-        } else if degradation_reason.is_some() {
-            "degraded"
-        } else {
-            "passed"
         },
-        embedding_started,
-    );
-    let actual_mode = if degradation_reason.is_some() {
-        "keyword"
-    } else {
-        search_mode
-    };
-
-    // 2. Search based on mode
-    let retrieval_started = Instant::now();
-    let scored_results = run_stage(
-        "retrieval",
-        retrieval_fraction,
-        retrieval_reserve,
-        Box::pin(async {
-            Ok::<_, QueryError>(if actual_mode == "keyword" {
-                // Keyword-only search
-                let kw_results = if kb_id.is_empty() {
-                    // For search_all with keyword mode, we still need embeddings for cross-KB search
-                    // Fallback: embed and use hybrid
-                    let embeddings = client.embed(&query, embedding_model).await?;
-                    retriever::hybrid_search_with_details(
-                        pool,
-                        kb_id,
-                        &query,
-                        &embeddings[0],
-                        retrieval_k,
-                        vector_weight,
-                        keyword_weight,
-                        fusion_mode,
-                    )
-                    .await?
-                } else {
-                    let kw = match keyword_results.take() {
-                        Some(results) => results?,
-                        None => {
-                            retriever::keyword_only_search(pool, kb_id, &query, retrieval_k).await?
-                        }
-                    };
-                    let kw = kw.into_iter();
-                    kw.map(|r| {
-                        let score = r.score;
-                        retriever::ScoredSearchResult {
-                            result: r,
-                            vector_score: None,
-                            keyword_score: Some(score),
-                        }
-                    })
-                    .collect()
-                };
-                kw_results
-            } else if search_mode == "vector" {
-                // Vector-only search
-                let query_emb = query_emb_opt
-                    .as_ref()
-                    .ok_or("Embedding required for vector search")?;
-                let v_results = if kb_id.is_empty() {
-                    retriever::search_all(pool, query_emb, retrieval_k, mcp_only).await?
-                } else {
-                    retriever::search(pool, kb_id, query_emb, retrieval_k).await?
-                };
-                v_results
-                    .into_iter()
-                    .map(|r| {
-                        let score = r.score;
-                        retriever::ScoredSearchResult {
-                            result: r,
-                            vector_score: Some(score),
-                            keyword_score: None,
-                        }
-                    })
-                    .collect()
-            } else {
-                // Hybrid search (default)
-                let query_emb = query_emb_opt
-                    .as_ref()
-                    .ok_or("Embedding required for hybrid search")?;
-                if kb_id.is_empty() {
-                    // Cross-KB: use search_all then compute details
-                    let results =
-                        retriever::search_all(pool, query_emb, retrieval_k, mcp_only).await?;
-                    results
-                        .into_iter()
-                        .map(|r| {
-                            let score = r.score;
-                            retriever::ScoredSearchResult {
-                                result: r,
-                                vector_score: Some(score),
-                                keyword_score: None,
-                            }
-                        })
-                        .collect()
-                } else {
-                    if keyword_results.is_some() {
-                        let keywords = match keyword_results.take() {
-                            Some(results) => results?,
-                            None => unreachable!("keyword_results was checked"),
-                        };
-                        let vectors = retriever::search(pool, kb_id, query_emb, retrieval_k * 2)
-                            .await
-                            .unwrap_or_default();
-                        retriever::fuse_scored(
-                            &vectors,
-                            &keywords,
-                            retrieval_k,
-                            vector_weight,
-                            keyword_weight,
-                            fusion_mode,
-                        )
-                    } else {
-                        retriever::hybrid_search_with_details(
-                            pool,
-                            kb_id,
-                            &query,
-                            query_emb,
-                            retrieval_k,
-                            vector_weight,
-                            keyword_weight,
-                            fusion_mode,
-                        )
-                        .await?
-                    }
-                }
-            })
-        }),
-    )
-    .await
-    .map_err(|error| {
-        let error =
-            if client.is_internal() || error.code.as_deref() == Some("rag_deadline_exceeded") {
-                error
-            } else {
-                QueryError::new(
-                    axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-                    "知识库检索失败，请根据请求编号检查服务日志",
+        embedding_budget,
+        final_budget,
+    ));
+    let keyword_future = Box::pin(async {
+        let (results, stage) = timed_retrieval_stage(
+            "keyword_search",
+            if hybrid { keyword_budget } else { final_budget },
+            async {
+                retriever::keyword_only_search(
+                    pool,
+                    kb_id,
+                    query,
+                    if hybrid { retrieval_k * 2 } else { retrieval_k },
                 )
-                .at_stage("retrieval", "retrieval_failed")
-            };
+                .await
+                .map_err(|_| {
+                    QueryError::new(
+                        axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                        "关键词检索失败，请根据请求编号检查服务日志",
+                    )
+                    .at_stage("keyword_search", "keyword_search_failed")
+                })
+            },
+        )
+        .await;
+        RetrievalBranch {
+            results,
+            stages: vec![stage],
+            degradation_reason: None,
+        }
+    });
+    let mut degradation_reason = None;
+    let mut actual_mode = search_mode;
+    let outcome = if hybrid {
+        let (vector, keyword) = collect_hybrid_branches(vector_future, keyword_future).await;
+        let vector_result = vector.map(|branch| {
+            stages.extend(branch.stages);
+            branch.results
+        });
+        let keyword_result = keyword.map(|branch| {
+            stages.extend(branch.stages);
+            branch.results
+        });
+        let chosen = choose_hybrid_results(
+            vector_result,
+            keyword_result,
+            keyword_fallback,
+            vector_fallback,
+            strict_retrieval,
+        );
+        match chosen {
+            Ok((vectors, keywords, mode, reason)) => {
+                actual_mode = mode;
+                degradation_reason = reason;
+                // 失败降级前重新核对模型权限、KB 和额度，不复用旧授权快照。
+                if degradation_reason.is_some() {
+                    run_stage("permission", 1.0, 0.0, async {
+                        if stages
+                            .iter()
+                            .any(|stage| stage.stage == "embedding" && stage.status == "passed")
+                        {
+                            client
+                                .ensure_model_permission_after_answer(kb_id, embedding_model)
+                                .await?;
+                            client
+                                .ensure_knowledge_access_after_answer(kb_id, mcp_only)
+                                .await
+                        } else {
+                            client
+                                .ensure_model_permission(kb_id, embedding_model)
+                                .await?;
+                            client.ensure_knowledge_access(kb_id, mcp_only).await
+                        }
+                    })
+                    .await
+                    .map_err(|error| {
+                        diagnostic_failure(
+                            error,
+                            "retrieval",
+                            retrieval_started,
+                            &stages,
+                            &request_id,
+                            diagnostics_enabled,
+                        )
+                    })?;
+                }
+                let uses_fusion = mode == "hybrid" || legacy_local_fallback;
+                let fusion_started = Instant::now();
+                let fused = run_stage("fusion", final_budget.0, final_budget.1, async {
+                    Ok(finish_hybrid_results(
+                        vectors,
+                        keywords,
+                        mode,
+                        legacy_local_fallback,
+                        retrieval_k,
+                        (vector_weight, keyword_weight),
+                        fusion_mode,
+                    ))
+                })
+                .await;
+                let status = match &fused {
+                    Err(_) => "failed",
+                    Ok(_) if !uses_fusion => "skipped",
+                    Ok(results) if results.is_empty() => "empty",
+                    Ok(_) if degradation_reason.is_some() => "degraded",
+                    Ok(_) => "passed",
+                };
+                record_stage_result(
+                    &mut stages,
+                    "fusion",
+                    status,
+                    fusion_started,
+                    fused.as_ref().err().and_then(|error| error.code.as_deref()),
+                );
+                fused
+            }
+            Err(error) => Err(error),
+        }
+    } else if search_mode == "keyword" && !kb_id.is_empty() {
+        record_stage(&mut stages, "embedding", "skipped", Instant::now());
+        let branch = keyword_future.await;
+        stages.extend(branch.stages);
+        branch
+            .results
+            .map(|results| score_single_branch(results, false))
+    } else {
+        // 空 KB 沿用跨库向量检索；不把它标成执行了 FTS 的 hybrid。
+        actual_mode = "vector";
+        let branch = vector_future.await;
+        degradation_reason = branch.degradation_reason;
+        stages.extend(branch.stages);
+        branch
+            .results
+            .map(|results| score_single_branch(results, true))
+    };
+    let mut scored_results = outcome.map_err(|error| {
         diagnostic_failure(
             error,
             "retrieval",
@@ -745,26 +739,36 @@ pub(crate) async fn retrieve_with_client(
             diagnostics_enabled,
         )
     })?;
-
-    let mut scored_results = scored_results;
     scored_results.truncate(retrieval_k);
-
-    client
-        .ensure_knowledge_access_after_answer(kb_id, mcp_only)
-        .await
-        .map_err(|error| {
-            diagnostic_failure(
-                error,
-                "retrieval",
-                retrieval_started,
-                &stages,
-                &request_id,
-                diagnostics_enabled,
-            )
-        })?;
-    if !scored_results.is_empty() {
-        record_stage(&mut stages, "retrieval", "passed", retrieval_started);
-    }
+    run_stage(
+        "permission",
+        1.0,
+        0.0,
+        client.ensure_knowledge_access_after_answer(kb_id, mcp_only),
+    )
+    .await
+    .map_err(|error| {
+        diagnostic_failure(
+            error,
+            "retrieval",
+            retrieval_started,
+            &stages,
+            &request_id,
+            diagnostics_enabled,
+        )
+    })?;
+    record_stage(
+        &mut stages,
+        "retrieval",
+        if scored_results.is_empty() {
+            "empty"
+        } else if degradation_reason.is_some() {
+            "degraded"
+        } else {
+            "passed"
+        },
+        retrieval_started,
+    );
     Ok(RetrievedChunks {
         scored_results,
         stages,
@@ -772,6 +776,315 @@ pub(crate) async fn retrieve_with_client(
         degradation_reason,
         retrieval_started,
     })
+}
+
+struct RetrievalBranch {
+    results: Result<Vec<super::models::SearchResult>, QueryError>,
+    stages: Vec<RagDiagnosticStage>,
+    degradation_reason: Option<String>,
+}
+
+async fn timed_retrieval_stage<T>(
+    stage: &'static str,
+    limits: (f64, f64),
+    future: impl Future<Output = Result<Vec<T>, QueryError>>,
+) -> (Result<Vec<T>, QueryError>, RagDiagnosticStage) {
+    let started = Instant::now();
+    let result = run_stage(stage, limits.0, limits.1, future)
+        .await
+        .map_err(|mut error| {
+            if error.stage.is_none() {
+                error.stage = Some(stage.into());
+            }
+            if error.code.is_none() {
+                error.code = Some(format!("{stage}_failed"));
+            }
+            error
+        });
+    let mut stages = Vec::with_capacity(1);
+    let status = match &result {
+        Ok(results) if results.is_empty() => "empty",
+        Ok(_) => "passed",
+        Err(_) => "failed",
+    };
+    record_stage_result(
+        &mut stages,
+        stage,
+        status,
+        started,
+        result
+            .as_ref()
+            .err()
+            .and_then(|error| error.code.as_deref()),
+    );
+    (result, stages.pop().unwrap())
+}
+
+async fn vector_branch<E, V, F>(
+    embedding: E,
+    search: V,
+    embedding_budget: (f64, f64),
+    vector_budget: (f64, f64),
+) -> RetrievalBranch
+where
+    E: Future<Output = Result<Vec<Vec<f32>>, QueryError>>,
+    V: FnOnce(Vec<f32>) -> F,
+    F: Future<Output = Result<(Vec<super::models::SearchResult>, Option<String>), QueryError>>,
+{
+    let (embedding, stage) = timed_retrieval_stage("embedding", embedding_budget, async {
+        let vectors = embedding.await?;
+        vectors
+            .into_iter()
+            .next()
+            .filter(|vector| !vector.is_empty() && vector.iter().all(|value| value.is_finite()))
+            .ok_or_else(|| {
+                QueryError::new(
+                    axum::http::StatusCode::BAD_GATEWAY,
+                    "Embedding 响应缺少有效向量",
+                )
+                .at_stage("embedding", "invalid_embedding_response")
+            })
+    })
+    .await;
+    let mut stages = vec![stage];
+    let mut degradation_reason = None;
+    let results = match embedding {
+        Ok(embedding) => {
+            // Embedding 一完成立即开始向量检索，FTS 的完成与否不形成屏障。
+            let started = Instant::now();
+            let result = run_stage(
+                "vector_search",
+                vector_budget.0,
+                vector_budget.1,
+                search(embedding),
+            )
+            .await
+            .map_err(|mut error| {
+                if error.stage.is_none() {
+                    error.stage = Some("vector_search".into());
+                }
+                if error.code.is_none() {
+                    error.code = Some("vector_search_failed".into());
+                }
+                error
+            });
+            let status = match &result {
+                Err(_) => "failed",
+                Ok((_, Some(_))) => "degraded",
+                Ok((results, _)) if results.is_empty() => "empty",
+                Ok(_) => "passed",
+            };
+            let code = match &result {
+                Err(error) => error.code.as_deref(),
+                Ok((_, reason)) => reason.as_deref(),
+            };
+            record_stage_result(&mut stages, "vector_search", status, started, code);
+            result.map(|(results, reason)| {
+                degradation_reason = reason;
+                results
+            })
+        }
+        Err(error) => Err(error),
+    };
+    RetrievalBranch {
+        results,
+        stages,
+        degradation_reason,
+    }
+}
+
+async fn collect_hybrid_branches(
+    vector: impl Future<Output = RetrievalBranch>,
+    keyword: impl Future<Output = RetrievalBranch>,
+) -> (Option<RetrievalBranch>, Option<RetrievalBranch>) {
+    tokio::pin!(vector, keyword);
+    tokio::select! {
+        result = &mut vector => {
+            if result.results.as_ref().err().is_some_and(retrieval_terminal_error) {
+                (Some(result), None)
+            } else {
+                (Some(result), Some(keyword.await))
+            }
+        }
+        result = &mut keyword => {
+            if result.results.as_ref().err().is_some_and(retrieval_terminal_error) {
+                (None, Some(result))
+            } else {
+                (Some(vector.await), Some(result))
+            }
+        }
+    }
+}
+
+type HybridResults = (
+    Vec<super::models::SearchResult>,
+    Vec<super::models::SearchResult>,
+    &'static str,
+    Option<String>,
+);
+
+fn choose_hybrid_results(
+    vector: Option<Result<Vec<super::models::SearchResult>, QueryError>>,
+    keyword: Option<Result<Vec<super::models::SearchResult>, QueryError>>,
+    allow_keyword_fallback: bool,
+    allow_vector_fallback: bool,
+    strict_retrieval: bool,
+) -> Result<HybridResults, QueryError> {
+    // 终止失败优先于其他路可用结果；不绕过权限、额度、父截止或取消。
+    if let Some(Err(error)) = &vector {
+        if retrieval_terminal_error(error) {
+            return Err(vector.unwrap().unwrap_err());
+        }
+    }
+    if let Some(Err(error)) = &keyword {
+        if retrieval_terminal_error(error) {
+            return Err(keyword.unwrap().unwrap_err());
+        }
+    }
+    let legacy_local_fallback =
+        !strict_retrieval && !allow_keyword_fallback && !allow_vector_fallback;
+    match (vector, keyword) {
+        // 旧 hybrid 对本地两路错误使用局部结果；Embedding 从未拥有隐式降级授权。
+        (Some(Err(vector)), Some(Err(keyword))) if legacy_local_fallback => {
+            if local_retrieval_error(&vector) && local_retrieval_error(&keyword) {
+                Ok((vec![], vec![], "none", Some("retrieval_both_failed".into())))
+            } else if !local_retrieval_error(&vector) {
+                Err(vector)
+            } else {
+                Err(keyword)
+            }
+        }
+        (Some(Err(error)), Some(Ok(keywords)))
+            if legacy_local_fallback && local_retrieval_error(&error) =>
+        {
+            Ok((vec![], keywords, "keyword", error.code))
+        }
+        (Some(Ok(vectors)), Some(Err(error)))
+            if legacy_local_fallback && local_retrieval_error(&error) =>
+        {
+            Ok((vectors, vec![], "vector", error.code))
+        }
+        (Some(Ok(vectors)), Some(Ok(keywords))) => Ok((vectors, keywords, "hybrid", None)),
+        (Some(Err(_)), Some(Err(_))) => Err(QueryError::new(
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            "向量和关键词检索均失败，请根据请求编号检查服务日志",
+        )
+        .at_stage("retrieval", "retrieval_both_failed")),
+        (Some(Err(error)), Some(Ok(keywords)))
+            if allow_keyword_fallback && recoverable_retrieval_error(&error) =>
+        {
+            if keywords.is_empty() {
+                return Err(retrieval_empty());
+            }
+            Ok((
+                vec![],
+                keywords,
+                "keyword",
+                Some(error.code.unwrap_or_else(|| "embedding_unavailable".into())),
+            ))
+        }
+        (Some(Ok(vectors)), Some(Err(error)))
+            if allow_vector_fallback && recoverable_retrieval_error(&error) =>
+        {
+            if vectors.is_empty() {
+                return Err(retrieval_empty());
+            }
+            Ok((
+                vectors,
+                vec![],
+                "vector",
+                Some(error.code.unwrap_or_else(|| "keyword_search_failed".into())),
+            ))
+        }
+        (Some(Err(error)), _) | (_, Some(Err(error))) => Err(error),
+        _ => Err(retrieval_empty()),
+    }
+}
+
+fn retrieval_empty() -> QueryError {
+    QueryError::new(
+        axum::http::StatusCode::NOT_FOUND,
+        "未检索到相关片段，请检查知识库内容和索引",
+    )
+    .at_stage("retrieval", "retrieval_empty")
+}
+
+fn retrieval_terminal_error(error: &QueryError) -> bool {
+    terminal_permission_error(error)
+        || (error.status == axum::http::StatusCode::TOO_MANY_REQUESTS
+            && error.code.as_deref() != Some("upstream_rate_limited"))
+        || error.stage.as_deref() == Some("permission")
+        || matches!(
+            error.code.as_deref(),
+            Some("rag_deadline_exceeded" | "client_cancelled")
+        )
+}
+
+fn local_retrieval_error(error: &QueryError) -> bool {
+    !retrieval_terminal_error(error)
+        && match error.stage.as_deref() {
+            Some("keyword_search") => matches!(
+                error.code.as_deref(),
+                Some("keyword_search_failed" | "stage_timeout")
+            ),
+            Some("vector_search") => matches!(
+                error.code.as_deref(),
+                Some("vector_search_failed" | "stage_timeout")
+            ),
+            _ => false,
+        }
+}
+
+fn recoverable_retrieval_error(error: &QueryError) -> bool {
+    !retrieval_terminal_error(error)
+        && (recoverable_embedding_error(error)
+            || matches!(
+                error.code.as_deref(),
+                Some("vector_search_failed" | "keyword_search_failed" | "stage_timeout")
+            ))
+}
+
+/// 隐式本地容错沿用旧融合分数；显式单路降级保留该路原始分数。
+fn finish_hybrid_results(
+    vectors: Vec<super::models::SearchResult>,
+    keywords: Vec<super::models::SearchResult>,
+    mode: &str,
+    legacy_local_fallback: bool,
+    top_k: usize,
+    weights: (f32, f32),
+    fusion_mode: retriever::FusionMode,
+) -> Vec<retriever::ScoredSearchResult> {
+    if mode == "hybrid" || legacy_local_fallback {
+        retriever::fuse_scored(
+            &vectors,
+            &keywords,
+            top_k,
+            weights.0,
+            weights.1,
+            fusion_mode,
+        )
+    } else if mode == "vector" {
+        score_single_branch(vectors, true)
+    } else {
+        score_single_branch(keywords, false)
+    }
+}
+
+fn score_single_branch(
+    results: Vec<super::models::SearchResult>,
+    vector: bool,
+) -> Vec<retriever::ScoredSearchResult> {
+    results
+        .into_iter()
+        .map(|result| {
+            let score = result.score;
+            retriever::ScoredSearchResult {
+                result,
+                vector_score: vector.then_some(score),
+                keyword_score: (!vector).then_some(score),
+            }
+        })
+        .collect()
 }
 
 pub(crate) fn validate_candidate_k(
@@ -905,27 +1218,52 @@ mod reasoning_tests {
 }
 
 /// 阶段预算只作用于显式总预算请求，给后续检索/回答预留时间。
-async fn run_stage<T>(
+fn run_stage<T>(
     stage: &'static str,
     fraction: f64,
     reserve: f64,
     future: impl Future<Output = Result<T, QueryError>>,
-) -> Result<T, QueryError> {
-    let Some(parent) = budget::current() else {
-        return future.await;
-    };
-    let cap = parent.total_duration().mul_f64(fraction);
-    let child = parent.stage(stage, cap, parent.total_duration().mul_f64(reserve));
-    child
-        .scope(async {
-            let result = budget::run(cap, future).await;
-            // 后台工作可能先观察到截止并返回错误，不能把取消误报为 SQL 故障。
-            child
-                .check()
-                .map_err(|elapsed| QueryError::from_budget(elapsed, stage))?;
-            result.map_err(|elapsed| QueryError::from_budget(elapsed, stage))?
+) -> impl Future<Output = Result<T, QueryError>> {
+    let future = Box::pin(future);
+    async move {
+        let Some(parent) = budget::current() else {
+            return future.await;
+        };
+        parent
+            .check_request()
+            .map_err(|elapsed| QueryError::from_budget(elapsed, stage))?;
+        let cap = parent.total_duration().mul_f64(fraction);
+        let child = parent.stage(stage, cap, parent.total_duration().mul_f64(reserve));
+        let result = child.scope(budget::run(cap, future)).await;
+        // 权限和额度错误保持可信分类，绝不能因阶段计时边缘而变成可降级失败。
+        if matches!(&result, Ok(Err(error)) if terminal_permission_error(error) || error.stage.as_deref() == Some("permission"))
+        {
+            return result.unwrap();
+        }
+        parent
+            .check_request()
+            .map_err(|elapsed| QueryError::from_budget(elapsed, stage))?;
+        let timeout_error = |elapsed| {
+            if elapsed == budget::BudgetElapsed::Deadline {
+                QueryError::new(
+                    axum::http::StatusCode::GATEWAY_TIMEOUT,
+                    "RAG 阶段达到软超时上限",
+                )
+                .at_stage(stage, "stage_timeout")
+            } else {
+                QueryError::from_budget(elapsed, stage)
+            }
+        };
+        child.check().map_err(timeout_error)?;
+        let result = result.map_err(timeout_error)?;
+        result.map_err(|error| {
+            if error.code.as_deref() == Some("rag_deadline_exceeded") {
+                timeout_error(budget::BudgetElapsed::Deadline)
+            } else {
+                error
+            }
         })
-        .await
+    }
 }
 
 fn terminal_permission_error(error: &QueryError) -> bool {
@@ -947,7 +1285,7 @@ fn recoverable_embedding_error(error: &QueryError) -> bool {
         && matches!(
             error.code.as_deref(),
             Some(
-                "rag_deadline_exceeded"
+                "stage_timeout"
                     | "model_timeout"
                     | "upstream_transport_failed"
                     | "upstream_unavailable"
@@ -964,16 +1302,37 @@ pub(crate) fn record_stage(
     status: &str,
     started: Instant,
 ) {
+    record_stage_result(stages, stage, status, started, None);
+}
+
+fn record_stage_result(
+    stages: &mut Vec<RagDiagnosticStage>,
+    stage: &str,
+    status: &str,
+    started: Instant,
+    code: Option<&str>,
+) {
+    let elapsed_ms = started.elapsed().as_millis().min(u64::MAX as u128) as u64;
+    let deadline_scope = match code {
+        Some("stage_timeout") => Some("stage"),
+        Some("model_timeout") => Some("channel"),
+        Some("rag_deadline_exceeded" | "client_cancelled") => Some("request"),
+        _ => None,
+    };
     tracing::info!(
         stage,
         status,
-        elapsed_ms = started.elapsed().as_millis() as u64,
+        elapsed_ms,
+        code,
+        deadline_scope,
         "RAG 阶段完成"
     );
     stages.push(RagDiagnosticStage {
         stage: stage.to_string(),
         status: status.to_string(),
-        elapsed_ms: started.elapsed().as_millis().min(u64::MAX as u128) as u64,
+        elapsed_ms,
+        code: code.map(str::to_string),
+        deadline_scope: deadline_scope.map(str::to_string),
     });
 }
 
@@ -1003,7 +1362,7 @@ pub(crate) fn diagnostic_failure(
     );
     if enabled {
         let mut stages = stages.to_vec();
-        record_stage(&mut stages, stage, "failed", started);
+        record_stage_result(&mut stages, stage, "failed", started, error.code.as_deref());
         error.diagnostics = Some(Box::new(RagDiagnostics {
             request_id: request_id.to_string(),
             stages,
@@ -1846,3 +2205,7 @@ mod rerank_tests {
         assert_eq!(parse_rerank_order("[]", 3), Some(vec![0, 1, 2]));
     }
 }
+
+#[cfg(test)]
+#[path = "rag_retrieval_tests.rs"]
+mod retrieval_tests;

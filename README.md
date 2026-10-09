@@ -4,7 +4,7 @@
 
 ### 本地 LLM API 网关 · 多协议接入 · 知识库 RAG · MCP 工具服务
 
-[![Version](https://img.shields.io/badge/version-0.3.9-blue.svg)](./src-tauri/tauri.conf.json)
+[![Version](https://img.shields.io/badge/version-0.4.0-blue.svg)](./src-tauri/tauri.conf.json)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](./LICENSE)
 [![Platform](https://img.shields.io/badge/platform-macOS%20%7C%20Windows%20%7C%20Linux-lightgrey.svg)](#-使用方式)
 [![Built with Tauri](https://img.shields.io/badge/built%20with-Tauri%202-orange.svg)](https://tauri.app)
@@ -40,15 +40,15 @@
 
 | | 贡献者 | GitHub | 提交 | 代码变更 | 主要贡献 |
 |:---:|:---|:---|:---:|:---|:---|
-| 🏆 | **小傅哥** | [@fuzhengwei](https://github.com/fuzhengwei) | 314 | `+64,000 / -7,697` | 项目创建者 · 核心架构 · 多渠道网关 · 协议转换 · 安全审计 · 知识库引擎 · Wiki 知识引擎 · MCP Server · Codex 账号切换 · API Key 独立启停与负载均衡增强 |
+| 🏆 | **小傅哥** | [@fuzhengwei](https://github.com/fuzhengwei) | 318 | `+64,000 / -7,697` | 项目创建者 · 核心架构 · 多渠道网关 · 协议转换 · 安全审计 · 知识库引擎 · Wiki 知识引擎 · MCP Server · Codex 账号切换 · API Key 独立启停与负载均衡增强 |
 | ⚡ | **xian** | [@zsxink](https://github.com/zsxink) | 140 | `+97,192 / -24,477` | Anthropic Messages 协议兼容 · 渠道协议重构（T01-T14）· codec 加固 · SSRF 防护 · SSE 帧重组 · models 接口 · Kimi Code Auth · protocol 模块结构化重构 · Auth 多格式导入 |
 | 🛠 | **chyuan** | [@chyuan-cuihongyuan](https://github.com/chyuan-cuihongyuan) | 56 | `+11,881 / -1,729` | 统一上游重试判定决策函数与真值表测试 · 渠道健康探测与候选排序 · 语义缓存 · 流式内容持久化与断线续传 · X-Request-Id / OTLP 可观测性 · 知识库增量索引、查询改写与混合检索 · 配额强化 · 401/403 下游脱敏 · StepFun 渠道预设接入（PR #127） |
 | 🚀 | **GululuCopa** | [@GululuCopa](https://github.com/GululuCopa) | 24 | `+13,087 / -475` | Grok OAuth 登录（PR #122）· Antigravity OAuth Gemini 登录（PR #121）与 v0.3.6 修复（PR #128）· Grok 与 Antigravity namespace 工具兼容修复 · 网关客户端适配（流式出站无总超时、Grok 工具白名单与加密推理约束对齐、采样字段兼容、OpenCode/OpenClaw/Hermes 配置生成修正，PR #135）· codec 响应格式与防护修复（response_format 映射、safeguards fail-open、Gemini JSON Schema / Gemini 3 工具签名兼容、function_call fc_ 前缀修复，PR #136） |
 | 🐳 | **Fla1337** | [@Fla1337](https://github.com/Fla1337) | 15 | `+4,978 / -1,143` | Web 管理面板 · Docker / headless 部署 · waliapi-web 二进制 · 多阶段镜像构建 · Web 管理面板用户设置 |
 | 🔧 | **mw** | [@maowei0427](https://github.com/maowei0427) | 10 | `+1,228 / -244` | 日志响应内容记录 · Trace ID 追踪 · 详情页体验优化 · 知识库 embedding 批次配置 |
-| 🔧 | **Nelson** | [@Zhengmingming1](https://github.com/Zhengmingming1) | 27 | `+16,607 / -3,177` | 知识库扫描版 PDF VLM OCR（方案A）· 中文 PDF 与检索修复 · 知识库访问授权与连接检查 · RAG 检索回归修复（管理搜索模式/权重、失败重导、索引落后回退、向量校验）· Token 配额标签澄清 · 修复 Claude 渠道协议适配 · pdfium macOS 打包路径修复 · Embeddings 配置补齐与 RAG 链路诊断（内部 Embedding 统一网关路由、分阶段诊断、API Key 健康检测，PR #140） |
+| 🔧 | **Nelson** | [@Zhengmingming1](https://github.com/Zhengmingming1) | 29 | `+22,204 / -3,796` | 知识库扫描版 PDF VLM OCR（方案A）· 中文 PDF 与检索修复 · 知识库访问授权与连接检查 · RAG 检索回归修复（管理搜索模式/权重、失败重导、索引落后回退、向量校验）· Token 配额标签澄清 · 修复 Claude 渠道协议适配 · pdfium macOS 打包路径修复 · Embeddings 配置补齐与 RAG 链路诊断（内部 Embedding 统一网关路由、分阶段诊断、API Key 健康检测，PR #140）· RAG 健康检测按 API Key 选择回答模型（PR #152）· 通用 RAG 质量优化、PDF 解析补全与 SQLite 并发写入修复（PR #153） |
 | 🐞 | **xerina** | [@jiangnuonnuo](https://github.com/jiangnuonnuo) | 9 | `+1,801 / -666` | Wiki Unicode 文本切片 panic 进程崩溃修复 · 新增字符边界安全切片工具（utils/text.rs）· RAG/Wiki 设置保存后状态未即时更新修复（PR #60）· Codex 账号重置卡与手动重置额度、重置操作流水记录（PR #149）|
-| 🐛 | **Jason** | [@freakojc](https://github.com/freakojc) | 9 | `+2,578 / -123` | 新增「简要」日志级别，请求消息列表只留最新 3 条（PR #119）· 日志统计覆盖索引优化 · 探测日志降噪与恢复状态就地更新 · 流式日志 499 误记修复 + Token 用量恢复 · 仪表盘 cached_tokens 聚合覆盖索引消除 2 秒加载 · 流式 pre-commit 阶段多 Key failover（PR #150） |
+| 🐛 | **Jason** | [@freakojc](https://github.com/freakojc) | 17 | `+4,760 / -492` | 新增「简要」日志级别，请求消息列表只留最新 3 条（PR #119）· 日志统计覆盖索引优化 · 探测日志降噪与恢复状态就地更新 · 流式日志 499 误记修复 + Token 用量恢复 · 仪表盘 cached_tokens 聚合覆盖索引消除 2 秒加载 · 流式 pre-commit 阶段多 Key failover（PR #150）· 用量统计持久化与审计日志解耦、多条件组合清理、服务可用率健康口径、Token 趋势堆叠柱状图（PR #154）· 清理弹窗渠道日志 tab 与成功率公式修正、首页与弹窗 UI 优化（PR #155） |
 | 🔧 | **yuanqixun** | [@yuanqixun](https://github.com/yuanqixun) | 9 | `+2,745 / -665` | 审计日志存储与加载优化 · Codex 设备码登录 · Codex 剩余额度展示 · 手动刷新 Codex 额度 · 大响应 SSE 帧兼容修复 |
 | 🩹 | **wuchubuzai2018** | [@wuchubuzai2018](https://github.com/wuchubuzai2018) | 2 | `+129 / -9` | 低版本 WebKit 左侧菜单不显示修复（Tailwind v4 断点兼容，附 ADR）· Codex 订阅页表格操作按钮悬浮文案优化（PR #144）|
 | 🐛 | **cyd** | [@cydmacro](https://github.com/cydmacro) | 2 | `+105 / -9` | Codex 工具调用参数一次性下发，修复部分客户端截断 · Codex Responses 请求 strip `prompt_cache_options` 兼容修复（PR #59）|
@@ -682,7 +682,41 @@ WaLiAPI 定位为**本地 / 内网优先**的 LLM 网关。公网部署前请先
 
 ## 📌 版本历史
 
-### v0.3.9 (2026-10-05)
+### v0.4.0 (2026-10-09)
+
+#### 用量统计与日志（PR #154，@freakojc）
+
+- ✨ **用量统计与审计日志解耦**：新增 `usage_stats` 聚合表（迁移 046），按 `(hour, model, channel_id, api_key_id)` 四维主键持久化请求/成功/失败计数与 Token、耗时指标，`create_log` 同事务 UPSERT 累加；日志清理不再影响统计，彻底解决「清理日志后首页统计大幅缩水」
+- ✨ **六大统计接口改读聚合表**：首页 Dashboard、模型分布、Token 趋势、按天、渠道、Key 统计口径不变，前端无感迁移；小时桶为唯一物理存储粒度，天/周/月/趋势由小时桶聚合合成，统计表增长为 O(组合数×小时) 而非 O(请求数)
+- ✨ **多条件组合日志清理**：时间门限（before / after / keep_recent_days）+ 状态码/是否成功 + 渠道/Key/模型 AND 组合清理；`dry_run` 预览影响行数（前端两步确认）；`clear_usage_stats` 支持独立清统计（不动日志）；启动时自动从存量 `request_logs` 幂等回填聚合表
+- ✨ **服务可用率改健康口径**：分母=启用渠道/未禁用账号，分子=启用且健康/凭证有效；主动禁用的渠道与账号不再拉低可用率，只有真实探测失败才会下降
+- 🎨 **Token 趋势图改按模型堆叠柱状图**：手写 SVG（不引入图表库），按模型颜色堆叠，hover 浮层/图例/输入输出缓存开关保留
+
+#### 日志清理与 UI（PR #155，@freakojc）
+
+- ✨ **清理弹窗新增「渠道日志」tab**：按渠道维度组合执行——清渠道日志（级联 findings/segments，不动统计）、清渠道统计（删 `usage_stats` 行，不动日志）、重置失败计数（仅清 `fail_count`，成功率真实恢复）；支持时间范围、dry_run 预览与含备份提醒的二次确认
+- 🐛 **成功率公式修正**：渠道页（卡片+仪表盘）与密钥页由 `success/total` 改为 `success/(success+failed)`，重置失败计数后成功率真实回到 ~100%
+- 🐛 **「全局日志」tab 渠道下拉修复**：清理弹窗渠道下拉在挂载时即加载，修复下拉为空；全局日志表单简化，渠道 ID 改为可选下拉
+- 🎨 **首页与弹窗 UI 优化**：模型分布默认展示 8 行、「展开更多/收起」按钮；Token 趋势浮窗在最右侧自动翻转、不溢出视域
+- 🔧 **迁移文件锁定 LF 行尾**：防止 EOL 转换导致 sqlx checksum 漂移
+
+#### 知识库与 RAG（PR #152，@Zhengmingming1）
+
+- ✨ **RAG 健康检测支持按 API Key 选择回答模型**：候选目录复用 `/v1/models` 的渠道、模型黑白名单、映射别名与 Auth 账号聚合，再经 Chat 路由规划器过滤不可路由候选与仅 Embedding 渠道；保留「手动输入」与「刷新模型」，列表只读、不消耗额度；切换密钥/知识库自动清空旧选择与检测结果
+
+#### 知识库与 RAG（PR #153，@Zhengmingming1）
+
+- ✨ **通用 RAG 质量优化**：检索预算与受控降级诊断细化，检索器、模型客户端与问答链路全面加固
+- ✨ **PDF 解析质量补全**：解析器与处理器增强，提升中文 PDF 与复杂版式的切分质量
+- 🐛 **SQLite 并发写入修复**：内嵌修复版 libsqlite3-sys 兼容层（`sqlite-compat/`），启用修复版 WAL 并合并渠道状态写入，缓解并发写竞争
+
+#### 其他
+
+- 📝 **README 贡献者数据同步**：更新小傅哥（318 commits）、Jason（17 commits，PR #154 #155）、Nelson（29 commits，PR #152 #153）提交数与代码变更统计
+- 🔧 **版本号统一升级至 0.4.0**（package.json / Cargo.toml / tauri.conf.json / Cargo.lock）
+
+<details>
+<summary><b>v0.3.9 (2026-10-05)</b></summary>
 
 #### Auth 账号与额度（PR #149，@jiangnuonnuo）
 
@@ -711,6 +745,8 @@ WaLiAPI 定位为**本地 / 内网优先**的 LLM 网关。公网部署前请先
 
 - 📝 **README 贡献者数据同步**：新增贡献者 wuchubuzai2018（PR #144），更新小傅哥（314 commits）、Nelson（27 commits）、xerina（9 commits，PR #149）、Jason（9 commits，PR #150）、黄科铭（5 commits，PR #147 #148）提交数与代码变更统计
 - 🔧 **版本号统一升级至 0.3.9**（package.json / Cargo.toml / tauri.conf.json / Cargo.lock）
+
+</details>
 
 <details>
 <summary><b>v0.3.8 (2026-10-01)</b></summary>

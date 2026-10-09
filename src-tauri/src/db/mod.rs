@@ -2,8 +2,9 @@ pub mod models;
 pub mod repository;
 
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
-use sqlx::sqlite::{SqlitePool, SqlitePoolOptions};
+use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePool, SqlitePoolOptions};
 use tauri::{AppHandle, Manager};
 
 /// 迁移前备份文件名前缀。备份形如 `waliapi.db.pre-upgrade-20260806-190400`，与数据库同目录。
@@ -11,6 +12,31 @@ const BACKUP_PREFIX: &str = "waliapi.db.pre-upgrade-";
 
 /// 保留的最近备份份数（超出后删除最旧的）。
 const BACKUP_KEEP: usize = 3;
+
+/// 与 SQLx 原默认值一致；用于短写锁竞争，不替代请求预算或单实例部署。
+const SQLITE_BUSY_TIMEOUT: Duration = Duration::from_secs(5);
+const WAL_AUTOCHECKPOINT_PAGES: u32 = 1_000;
+
+/// 所有池连接使用同一配置，已有 DELETE 库在首次连接时转换为 WAL。
+/// 转换要求没有其他实例占用数据库；保持原默认 FULL synchronous。
+pub(crate) fn sqlite_connect_options(db_path: &Path) -> SqliteConnectOptions {
+    // bundled 依赖固定了修复版本；同时防止构建环境意外链接旧系统库后启用 WAL。
+    let version = unsafe { libsqlite3_sys::sqlite3_libversion_number() };
+    assert!(version >= 3_051_003, "WAL requires SQLite 3.51.3 or newer");
+    SqliteConnectOptions::new()
+        .filename(db_path)
+        .create_if_missing(true)
+        .journal_mode(SqliteJournalMode::Wal)
+        .busy_timeout(SQLITE_BUSY_TIMEOUT)
+        .pragma("wal_autocheckpoint", WAL_AUTOCHECKPOINT_PAGES.to_string())
+}
+
+/// 不等待活跃读事务结束，也不强制截断 WAL；未回写的帧保留供后续检查点处理。
+async fn checkpoint_wal(pool: &SqlitePool) -> Result<(i64, i64, i64), sqlx::Error> {
+    sqlx::query_as("PRAGMA wal_checkpoint(PASSIVE)")
+        .fetch_one(pool)
+        .await
+}
 
 pub struct Database {
     pub pool: SqlitePool,
@@ -111,9 +137,10 @@ fn prune_old_backups(db_path: &Path) -> Result<(), String> {
 
 /// 迁移前自动备份。仅当数据库已存在（有迁移记录）且 schema 版本低于当前迁移集时执行。
 ///
-/// 备份用 SQLite `VACUUM INTO` 生成一致快照（原子、对 live DB 安全），命名
+/// 备份用 SQLite `VACUUM INTO` 生成一致事务快照（包含 WAL 内已提交数据），命名
 /// `waliapi.db.pre-upgrade-<YYYYmmdd-HHMMSS>`，随后按 `BACKUP_KEEP` 清理旧备份。
-/// 恢复为纯文件级：手动把备份文件复制回 `waliapi.db` 即可。
+/// 恢复完整快照前必须停止全部实例并关闭连接，再隔离原库及其 -wal/-shm。
+/// 中断的 VACUUM INTO 可能留下不完整目标文件，不应作为成功备份使用。
 ///
 /// 无需备份时返回 `Ok(None)`。备份失败只记录错误，不阻断启动。
 async fn backup_before_migration(
@@ -128,7 +155,7 @@ async fn backup_before_migration(
     }
 
     let backup_path = make_backup_path(db_path);
-    // VACUUM INTO 目标已存在时行为未定义，先清除旧目标（同名同秒重复时防御）
+    // VACUUM INTO 拒绝非空目标，先清除旧目标（同名同秒重复时防御）
     if backup_path.exists() {
         std::fs::remove_file(&backup_path)
             .map_err(|e| format!("移除旧备份 {} 失败: {e}", backup_path.display()))?;
@@ -163,11 +190,10 @@ impl Database {
         std::fs::create_dir_all(app_data_dir).expect("failed to create app data dir");
 
         let db_path = app_data_dir.join("waliapi.db");
-        let db_url = format!("sqlite://{}?mode=rwc", db_path.display());
 
         let pool = SqlitePoolOptions::new()
             .max_connections(5)
-            .connect(&db_url)
+            .connect_with(sqlite_connect_options(&db_path))
             .await
             .expect("failed to connect to database");
 
@@ -175,7 +201,7 @@ impl Database {
         fix_legacy_migration_checksums(&pool).await;
 
         // 迁移前自动备份：schema 落后时先做文件级快照，再跑迁移。
-        // 失败不阻断启动——迁移本身是增量、可逆的，备份是额外保险。
+        // 失败继续启动沿用既有 best-effort 策略；不保证迁移普遍可逆。
         if let Err(e) = backup_before_migration(&pool, &db_path).await {
             log::error!("迁移前自动备份失败，继续启动: {e}");
         }
@@ -194,6 +220,15 @@ impl Database {
 
         // Seed built-in security rules if table exists and is empty
         let _ = crate::security::rules::seed_builtin_rules(&pool).await;
+
+        // 启动写入后尽量回写；运行中由每个连接的自动检查点继续处理。
+        // PASSIVE 未完成回写不影响已提交数据，检查点失败也不改变原启动异常语义。
+        match checkpoint_wal(&pool).await {
+            Ok((busy, wal_pages, checkpointed_pages)) => log::debug!(
+                "SQLite WAL 检查点: busy={busy}, wal_pages={wal_pages}, checkpointed_pages={checkpointed_pages}"
+            ),
+            Err(error) => log::warn!("SQLite WAL 检查点失败，继续启动: {error}"),
+        }
 
         Self { pool }
     }
@@ -215,6 +250,14 @@ mod tests {
             .connect(&format!("sqlite://{}?mode=rwc", db_path.display()))
             .await
             .expect("connect test db")
+    }
+
+    async fn wal_pool(db_path: &Path, max_connections: u32) -> SqlitePool {
+        SqlitePoolOptions::new()
+            .max_connections(max_connections)
+            .connect_with(sqlite_connect_options(db_path))
+            .await
+            .expect("connect WAL fixture")
     }
 
     /// 在数据库里模拟旧版迁移记录（版本 5）与一条业务数据。
@@ -367,5 +410,232 @@ mod tests {
 
         pool.close().await;
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn new_database_configures_wal_and_timeout_on_every_pool_connection() {
+        let dir = temp_dir();
+        let db = Database::new_with_path(&dir).await;
+        // 同时持有五个连接，确保不是在同一连接上重复检查 PRAGMA。
+        let mut connections = Vec::new();
+        for _ in 0..5 {
+            connections.push(db.pool.acquire().await.unwrap());
+        }
+        for connection in &mut connections {
+            let sqlite_version: String = sqlx::query_scalar("SELECT sqlite_version()")
+                .fetch_one(&mut **connection)
+                .await
+                .unwrap();
+            assert_eq!(sqlite_version, "3.51.3", "SQLx 使用已修复的实际 SQLite");
+            let journal: String = sqlx::query_scalar("PRAGMA journal_mode")
+                .fetch_one(&mut **connection)
+                .await
+                .unwrap();
+            assert_eq!(journal, "wal");
+            let timeout: i64 = sqlx::query_scalar("PRAGMA busy_timeout")
+                .fetch_one(&mut **connection)
+                .await
+                .unwrap();
+            assert_eq!(timeout, 5_000);
+            let pages: i64 = sqlx::query_scalar("PRAGMA wal_autocheckpoint")
+                .fetch_one(&mut **connection)
+                .await
+                .unwrap();
+            assert_eq!(pages, 1_000);
+            let synchronous: i64 = sqlx::query_scalar("PRAGMA synchronous")
+                .fetch_one(&mut **connection)
+                .await
+                .unwrap();
+            assert_eq!(synchronous, 2, "保持 FULL synchronous");
+        }
+        drop(connections);
+        db.pool.close().await;
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn startup_converts_legacy_delete_database_and_close_reopen_preserves_data() {
+        let dir = temp_dir();
+        std::fs::create_dir_all(&dir).unwrap();
+        let db_path = dir.join("waliapi.db");
+        let legacy = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(
+                SqliteConnectOptions::new()
+                    .filename(&db_path)
+                    .create_if_missing(true)
+                    .journal_mode(SqliteJournalMode::Delete),
+            )
+            .await
+            .unwrap();
+        sqlx::query("CREATE TABLE legacy_items (name TEXT NOT NULL)")
+            .execute(&legacy)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO legacy_items VALUES ('committed-before-WAL')")
+            .execute(&legacy)
+            .await
+            .unwrap();
+        let journal: String = sqlx::query_scalar("PRAGMA journal_mode")
+            .fetch_one(&legacy)
+            .await
+            .unwrap();
+        assert_eq!(journal, "delete");
+        legacy.close().await;
+
+        let db = Database::new_with_path(&dir).await;
+        let journal: String = sqlx::query_scalar("PRAGMA journal_mode")
+            .fetch_one(&db.pool)
+            .await
+            .unwrap();
+        assert_eq!(journal, "wal");
+        sqlx::query("INSERT INTO legacy_items VALUES ('committed-after-WAL')")
+            .execute(&db.pool)
+            .await
+            .unwrap();
+        db.pool.close().await;
+
+        let reopened = Database::new_with_path(&dir).await;
+        let names: Vec<String> = sqlx::query_scalar("SELECT name FROM legacy_items ORDER BY rowid")
+            .fetch_all(&reopened.pool)
+            .await
+            .unwrap();
+        assert_eq!(names, ["committed-before-WAL", "committed-after-WAL"]);
+        let journal: String = sqlx::query_scalar("PRAGMA journal_mode")
+            .fetch_one(&reopened.pool)
+            .await
+            .unwrap();
+        assert_eq!(journal, "wal");
+        reopened.pool.close().await;
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn wal_reader_keeps_snapshot_without_blocking_writer_or_passive_checkpoint() {
+        let dir = temp_dir();
+        std::fs::create_dir_all(&dir).unwrap();
+        let pool = wal_pool(&dir.join("waliapi.db"), 5).await;
+        sqlx::query("CREATE TABLE status_fixture (status TEXT NOT NULL)")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO status_fixture VALUES ('before')")
+            .execute(&pool)
+            .await
+            .unwrap();
+        checkpoint_wal(&pool).await.unwrap();
+
+        let mut reader = pool.begin().await.unwrap();
+        let before: String = sqlx::query_scalar("SELECT status FROM status_fixture")
+            .fetch_one(&mut *reader)
+            .await
+            .unwrap();
+        assert_eq!(before, "before");
+        tokio::time::timeout(
+            Duration::from_secs(2),
+            sqlx::query("UPDATE status_fixture SET status = 'after'").execute(&pool),
+        )
+        .await
+        .expect("WAL 读快照不应阻止另一个连接提交短写入")
+        .unwrap();
+        let snapshot: String = sqlx::query_scalar("SELECT status FROM status_fixture")
+            .fetch_one(&mut *reader)
+            .await
+            .unwrap();
+        assert_eq!(snapshot, "before", "原读快照仍然一致");
+        let (_, pages, checkpointed) =
+            tokio::time::timeout(Duration::from_secs(2), checkpoint_wal(&pool))
+                .await
+                .expect("PASSIVE 不等待长读结束")
+                .unwrap();
+        assert!(pages > checkpointed, "长读保留了尚不能回写的 WAL 帧");
+        reader.rollback().await.unwrap();
+        let (busy, pages, checkpointed) = checkpoint_wal(&pool).await.unwrap();
+        assert_eq!(busy, 0);
+        assert_eq!(pages, checkpointed);
+        let committed: String = sqlx::query_scalar("SELECT status FROM status_fixture")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(committed, "after");
+        pool.close().await;
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn vacuum_backup_restores_committed_data_that_is_only_in_wal() {
+        let dir = temp_dir();
+        std::fs::create_dir_all(&dir).unwrap();
+        let db_path = dir.join("waliapi.db");
+        let pool = wal_pool(&db_path, 1).await;
+        seed_legacy_db(&pool).await;
+        checkpoint_wal(&pool).await.unwrap();
+        // 单连接关闭自动检查点，证明新提交仍只位于 WAL，而不是主数据库文件。
+        sqlx::query("PRAGMA wal_autocheckpoint=0")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let main_before = std::fs::read(&db_path).unwrap();
+        sqlx::query("INSERT INTO items (name) VALUES ('committed-only-in-WAL')")
+            .execute(&pool)
+            .await
+            .unwrap();
+        assert_eq!(std::fs::read(&db_path).unwrap(), main_before);
+        assert!(std::fs::metadata(dir.join("waliapi.db-wal")).unwrap().len() > 32);
+
+        let backup = backup_before_migration(&pool, &db_path)
+            .await
+            .unwrap()
+            .unwrap();
+        let restored_path = dir.join("restored.db");
+        // VACUUM 成功后目标是独立完整快照；恢复到没有旧 sidecar 的新路径。
+        std::fs::copy(&backup, &restored_path).unwrap();
+        let restored = wal_pool(&restored_path, 1).await;
+        let names: Vec<String> = sqlx::query_scalar("SELECT name FROM items ORDER BY id")
+            .fetch_all(&restored)
+            .await
+            .unwrap();
+        assert_eq!(names, ["pre-upgrade-data", "committed-only-in-WAL"]);
+        let version: i64 = sqlx::query_scalar("SELECT MAX(version) FROM _sqlx_migrations")
+            .fetch_one(&restored)
+            .await
+            .unwrap();
+        assert_eq!(version, 5);
+        sqlx::query("INSERT INTO items (name) VALUES ('source-still-writable')")
+            .execute(&pool)
+            .await
+            .unwrap();
+        pool.close().await;
+        restored.close().await;
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn wal_backup_error_preserves_source_data_and_keeps_it_writable() {
+        let dir = temp_dir();
+        std::fs::create_dir_all(&dir).unwrap();
+        let pool = wal_pool(&dir.join("waliapi.db"), 1).await;
+        seed_legacy_db(&pool).await;
+        let invalid_target = dir.join("nonexistent-parent").join("waliapi.db");
+        let error = backup_before_migration(&pool, &invalid_target)
+            .await
+            .unwrap_err();
+        assert!(error.starts_with("创建备份失败:"));
+        let original: String = sqlx::query_scalar("SELECT name FROM items WHERE id = 1")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(original, "pre-upgrade-data");
+        sqlx::query("INSERT INTO items (name) VALUES ('continue-after-backup-error')")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM items")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(count, 2);
+        pool.close().await;
+        std::fs::remove_dir_all(dir).unwrap();
     }
 }

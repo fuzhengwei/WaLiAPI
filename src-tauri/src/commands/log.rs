@@ -392,6 +392,139 @@ pub async fn delete_all_logs_impl(state: &std::sync::Arc<AppState>) -> Result<u6
     repo.delete_all_logs().await.map_err(|e| e.to_string())
 }
 
+/// 多条件组合清理日志(Task 4 颗粒度重构)。所有条件 AND 组合,空条件 = 清理全部。
+/// `clear_stats=false`(默认)只删日志,统计表不动 —— 清理不影响首页统计。
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct DeleteLogsInput {
+    /// 清理该时刻之前的日志(RFC3339)。
+    pub before_date: Option<String>,
+    /// 清理该时刻之后的日志(与 before_date 组合成区间)。
+    pub after_date: Option<String>,
+    /// 保留最近 N 天,清理更早的(与 before_date 互斥,二者都传时取交集)。
+    pub keep_recent_days: Option<u64>,
+    /// 仅清理指定状态码的日志。
+    pub status_code: Option<i64>,
+    /// true=仅清理 2xx,false=仅清理非 2xx。
+    pub is_success: Option<bool>,
+    /// 仅清理指定渠道的日志。
+    pub channel_id: Option<String>,
+    /// 仅清理指定 Key 的日志。
+    pub api_key_id: Option<String>,
+    /// 仅清理指定模型的日志。
+    pub model: Option<String>,
+    /// true 时同步清除对应的 usage_stats(默认 false)。
+    pub clear_stats: Option<bool>,
+    /// true 时只返回匹配行数不执行删除,供前端确认弹窗展示预计影响。
+    pub dry_run: Option<bool>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct DeleteLogsReport {
+    pub dry_run: bool,
+    pub matched_logs: u64,
+    pub matched_stats: u64,
+}
+
+/// 「渠道清理」tab 输入(Task 渠道清理):按渠道维度组合执行
+/// 日志清理 / 统计清理 / 失败计数重置,区别于全局日志清理。
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct CleanupChannelInput {
+    /// 目标渠道 ID(必填)。
+    pub channel_id: String,
+    /// 清理该时刻之前的日志/统计(RFC3339)。
+    pub before_date: Option<String>,
+    /// 清理该时刻之后的日志/统计。
+    pub after_date: Option<String>,
+    /// 保留最近 N 天,清理更早的。
+    pub keep_recent_days: Option<u64>,
+    /// true=删除该渠道日志(级联 findings/segments),不动统计。
+    pub clear_logs: Option<bool>,
+    /// true=删除该渠道 usage_stats 行,不动日志。
+    pub clear_stats: Option<bool>,
+    /// true=仅把该渠道 fail_count 置 0(请求/成功/token 不动),恢复成功率。
+    pub reset_fail: Option<bool>,
+    /// true=只返回匹配行数不执行。
+    pub dry_run: Option<bool>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct CleanupChannelReport {
+    pub dry_run: bool,
+    pub matched_logs: u64,
+    pub matched_stats: u64,
+    pub reset_fail_rows: u64,
+}
+
+#[tauri::command]
+pub async fn cleanup_channel(
+    input: CleanupChannelInput,
+    state: tauri::State<'_, std::sync::Arc<AppState>>,
+) -> Result<CleanupChannelReport, String> {
+    cleanup_channel_impl(&input, &*state).await
+}
+
+pub async fn cleanup_channel_impl(
+    input: &CleanupChannelInput,
+    state: &std::sync::Arc<AppState>,
+) -> Result<CleanupChannelReport, String> {
+    let repo = Repository::new(state.db.pool.clone());
+    let dry_run = input.dry_run.unwrap_or(false);
+    let (matched_logs, matched_stats, reset_fail_rows) = repo
+        .cleanup_channel(input, dry_run)
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(CleanupChannelReport {
+        dry_run,
+        matched_logs,
+        matched_stats,
+        reset_fail_rows,
+    })
+}
+
+#[tauri::command]
+pub async fn delete_logs(
+    input: DeleteLogsInput,
+    state: tauri::State<'_, std::sync::Arc<AppState>>,
+) -> Result<DeleteLogsReport, String> {
+    delete_logs_impl(&input, &*state).await
+}
+
+pub async fn delete_logs_impl(
+    input: &DeleteLogsInput,
+    state: &std::sync::Arc<AppState>,
+) -> Result<DeleteLogsReport, String> {
+    let repo = Repository::new(state.db.pool.clone());
+    let dry_run = input.dry_run.unwrap_or(false);
+    let (matched_logs, matched_stats) = repo
+        .delete_logs_matching(input, dry_run)
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(DeleteLogsReport {
+        dry_run,
+        matched_logs,
+        matched_stats,
+    })
+}
+
+/// 独立清除历史统计数据(不删日志)。条件与 delete_logs 的统计侧一致。
+#[tauri::command]
+pub async fn clear_usage_stats(
+    input: DeleteLogsInput,
+    state: tauri::State<'_, std::sync::Arc<AppState>>,
+) -> Result<u64, String> {
+    clear_usage_stats_impl(&input, &*state).await
+}
+
+pub async fn clear_usage_stats_impl(
+    input: &DeleteLogsInput,
+    state: &std::sync::Arc<AppState>,
+) -> Result<u64, String> {
+    let repo = Repository::new(state.db.pool.clone());
+    repo.clear_usage_stats_matching(input)
+        .await
+        .map_err(|e| e.to_string())
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 pub struct LogStatsDto {
     pub date: String,

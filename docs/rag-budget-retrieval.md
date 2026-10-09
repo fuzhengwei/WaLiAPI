@@ -7,7 +7,7 @@ WaLiAPI 提供通用知识检索、RAG 问答和模型网关。业务客户端�
 `GET /api/kb/search` 返回授权范围内的原文切片，不调用回答模型。客户端可以使用检索结果调用标准 `/v1/chat/completions` 等模型接口，也可以只展示或分析资料。
 
 ```text
-/api/kb/search?kb_id=<id>&q=<query>&search_mode=hybrid&top_k=5&candidate_k=20&timeout_ms=20000&allow_keyword_fallback=true&diagnostics=true
+/api/kb/search?kb_id=<id>&q=<query>&search_mode=hybrid&top_k=5&candidate_k=20&timeout_ms=20000&strict_retrieval=true&allow_keyword_fallback=true&allow_vector_fallback=true&diagnostics=true
 ```
 
 保留既有 `{ "data": [SearchResult] }` 返回结构。每项包含 `chunk_id`、`doc_id`、`filename`、`content`、`score`、`metadata`。`content` 为授权切片正文；客户端引用定位和裁剪必须对应实际使用的内容。可选诊断返回请求标识、阶段耗时与降级原因，不返回凭据或上游地址。检索完成后的标准模型调用是独立请求，使用模型网关自己的鉴权；知识库撤权不能撤回已经返回给客户端的资料。
@@ -24,6 +24,8 @@ WaLiAPI 提供通用知识检索、RAG 问答和模型网关。业务客户端�
   "candidate_k": 20,
   "timeout_ms": 20000,
   "allow_keyword_fallback": true,
+  "allow_vector_fallback": true,
+  "strict_retrieval": true,
   "diagnostics": true,
   "reasoning_effort": "low"
 }
@@ -37,13 +39,21 @@ WaLiAPI 提供通用知识检索、RAG 问答和模型网关。业务客户端�
 
 `timeout_ms` 限幅为 100 至 120000 毫秒，整次请求共用绝对截止时间。省略时保留历史渠道超时策略。问答的权限检查、可选查询改写、Embedding、检索、重排、回答及结束处理共享预算；独立检索只执行需要的检索阶段。
 
-问答阶段上限以原始总预算计算：改写 10%、Embedding 40%、检索 20%、重排 10%；回答使用剩余时间并为结束处理预留 1%。独立检索没有回答阶段，Embedding 上限为总预算的 70%，为后续处理至少预留 20%；检索上限为 30%。阶段允许重叠，耗时不能简单相加。API Key 执行链的物理发送及正文读取受渠道上限与阶段剩余时间共同限制；Key 轮换、跨渠道尝试和 Retry-After 不重置截止时间。达到渠道或阶段超时后停止模型重试；权限、额度拒绝不通过可选降级绕过。
+问答阶段上限以原始总预算计算：改写 10%、Embedding 40%、检索 20%、重排 10%；回答使用剩余时间并为结束处理预留 1%。检索阶段仍为回答至少预留总预算的 35%。独立 Search 的 Embedding 上限为总预算的 70%，为后续处理预留 20%；并行关键词分支保留 30% 的软上限，而最终向量、融合阶段可使用请求剩余时间。仅关键词 Search 使用剩余时间。Embedding 完成后立即执行向量检索，关键词分支无需先完成；各阶段仍受父绝对截止及渠道上限约束，Key 轮换、跨渠道尝试和 Retry-After 均不重置预算。省略 `timeout_ms` 时不启用阶段软限额，仍执行已有渠道超时。
 
-`allow_keyword_fallback` 默认关闭，仅用于指定知识库的 hybrid 查询。API Key 路径先核验知识库、Embedding 模型、渠道和额度权限；可恢复的 Embedding 超时、传输或协议失败可以使用关键词结果。401/403、额度拒绝及 429 不直接触发关键词降级。降级前及返回资料前重新核验授权；问答生成前后也复核知识库授权。问答仅在显式允许降级时返回实际 `retrieval_mode`；独立检索在使用任一新增参数时返回实际模式和请求标识。有降级时才返回 `degradation_reason`。
+两个降级开关均默认关闭，只用于指定知识库的 hybrid 查询，方向独立：`allow_keyword_fallback` 授权可恢复的 Embedding / 向量分支失败后使用关键词结果；新增 `allow_vector_fallback` 授权可恢复的关键词分支失败后使用向量结果。`strict_retrieval` 默认关闭；旧请求在本地关键词或向量分支失败时保留历史部分结果及融合分数，但返回实际模式和降级原因，不能伪装 hybrid 完整成功。Embedding 失败仍需显式关键词授权，不属于历史本地部分成功。两本地分支失败时旧 Search 保留空数组，模式为 `none` 并附 `retrieval_both_failed`；Ask 沿用原有空结果处理。
 
-客户端中断或阶段截止时，丢弃后续请求并取消本地后台工作；已完成子请求仍记录实际用量。关闭本地 TCP 连接不证明供应商停止计算或计费。
+开启 `strict_retrieval` 或任一方向开关后，单库 hybrid 禁用历史隐式部分成功，只允许明确授权的方向；严格选项与方向开关可以组合。没有对应授权时单路失败为失败；授权降级后幸存路为空报告 `retrieval_empty`，两路失败报告 `retrieval_both_failed`。两路正常但一侧没有命中仍属于 hybrid。管理员跨库查询保留历史跳过单库本地失败的行为，返回 `knowledge_base_search_partial` 提示部分完成；`strict_retrieval=true` 时任一单库失败终止查询，两个 hybrid 方向开关不改变跨库策略。
 
-内部管理员路径仍有历史边界：字符串形式的 Embedding 错误不按未知类型自动降级；内部模型调用仍走历史 proxy 渠道循环，受外层预算限制，但未统一 API Key 路径的全部尝试分类。桌面 IPC 和管理员 MCP 沿用原参数接口。
+以上显式检索策略用于普通 RAG。管理端 `deep_research` 尚未接入这些策略，组合请求明确返回 `unsupported_retrieval_policy`，避免接收后静默忽略；不启用策略的旧深度研究流程保持。
+
+权限、额度、安全拒绝、整体取消或总截止不能通过降级绕过。降级前及返回资料前复核当前知识库、模型与渠道授权；问答生成前后也复核知识库授权。一次已合法完成的 Embedding 刚好用尽额度时，允许返回其授权资料，但下一模型调用仍受额度限制。响应返回实际 `retrieval_mode`，仅降级时附 `degradation_reason`；Search 在使用新增参数或实际部分成功时提供模式及请求编号，Ask 在显式选择策略或实际部分成功时提供实际模式。
+
+诊断增加 `embedding`、`keyword_search`、`vector_search`、`fusion` 的独立计时，保留 `retrieval` 汇总。未执行阶段标为 skipped 或省略，空路标为 empty；降级成功的最终 retrieval 为 degraded。失败阶段附安全 `code`，阶段软截止为 `stage_timeout` / `deadline_scope=stage`，渠道上限为 `model_timeout` / `channel`，整次截止为 `rag_deadline_exceeded` / `request`，取消为 `client_cancelled` / `request`。各阶段可并行，汇总及分支耗时不能简单相加。仅显式诊断请求返回阶段详情，不返回原文、凭据或上游错误正文。
+
+REST、MCP、桌面与 Web 管理搜索复用共享检索流程。API Key MCP 的 search 旧请求首文本仍返回数组，实际部分成功时追加模式、原因和请求编号文本块；显式预算、策略、候选或诊断时返回带 `data` 的完整元数据；显式诊断的 API Key MCP 失败保留原错误文本，并追加安全 JSON 诊断文本块，包含请求编号与阶段详情；未启用诊断仍保持原单文本错误。管理 MCP 保留旧文本结果，实际部分成功时追加安全元数据文本块，使用新参数时返回结构化响应。管理员 MCP Search 保留历史固定 RRF 融合；其他入口沿用各自的融合配置。桌面 IPC 沿用原参数与数组结果结构，部分检索失败仍返回历史可用结果，不自动启用新策略；完整元数据通过 REST/MCP 提供。管理员诊断仍要求使用普通 API Key，以覆盖真实权限、额度及安全审计；内部模型调用的历史渠道循环仍受外层预算限制，字符串形式的未知 Embedding 错误不自动降级。
+
+客户端中断或阶段截止时丢弃后续请求，并通知受预算约束的本地异步工作取消；已完成子请求仍记录实际用量。本地取消不保证同步读取、已经发送的数据库语句或供应商计算瞬间停止，也不保证免除计费。
 
 ## 存储与检索
 
@@ -52,6 +62,24 @@ HNSW 检索在同一个 SQLite 读事务内读取有效 ID/维度集合、检查
 索引读盘、解码、修复与计算进入最多四个后台任务，并检查取消状态。同步文件读取和单次反序列化不能在任意字节处中断。索引目录仍是历史 `dirs::data_local_dir()/waliapi/hnsw_indexes`，未改成由数据目录参数决定；未增加常驻索引缓存、查询缓存或在途请求合并。
 
 新增迁移 `043_kb_search_projection_version.sql` 管理 FTS 投影版本。版本 2 修复 PDF 文字层中的部首字形，保留正文、文档 hash 和向量；旧记录按知识库分批 CAS 回填，允许中断恢复。不得修改已发布的迁移。原文代码字符与检索投影分开处理，不能用整段兼容归一化改写引用原文。
+
+## PDF 文字层质量与来源
+
+新导入或用户主动重处理的普通 PDF 按实际页面树逐页提取，记录真实 `page_count`，切片 metadata 携带 `page_no`。损坏页不阻止提取后续页面，短页文本仍保留并参与分块。`doc_meta.pdf_text_extraction` 保存版本、页数、逐页非空白字符数、`extracted` / `insufficient` / `failed` 状态及安全错误码；不足沿用现有 50 字符阈值，仅作为文字层提示，不能证明扫描、内容缺失或资料语义完整。
+
+页数、质量信息与新切片在同一替换事务中发布；首导失败可查看安全质量信息，就绪文档重处理失败保留原切片与原质量。管理文档列表显示页数及质量提示。旧文档不静默重建；其页数为 0 表示未记录或未知。按页分块可能改变新导入及主动重处理的切片数。
+
+OCR 继续默认关闭，启用仍遵循原来的显式模型、页数与成本限制；文字层不足不会自动调用付费模型。本次不新增 OCR 策略或领域专用分块。
+
+## SQLite WAL 与渠道状态写入
+
+桌面与 Headless 的生产数据库连接池统一使用 WAL：五个连接均设置 5 秒 `busy_timeout`、1000 页自动检查点，继续使用 FULL 同步。已有 DELETE 数据库在首次连接时转换；迁移、回填和初始化结束后执行一次 PASSIVE 检查点，活跃读事务阻挡回写时保留 WAL 帧，不等待读事务结束。WAL 允许读取与写入并行，同一时刻仍只有一个写事务。数据目录应在本机文件系统中，继续保持单实例部署，不能放在网络文件系统上共享使用。
+
+原内置 SQLite 3.46.0 受 [WAL-reset 缺陷](https://sqlite.org/wal.html#walresetbug) 影响。本次通过小型 [FFI 兼容包](../src-tauri/sqlite-compat/README.md) 固定官方 `libsqlite3-sys 0.37.0` 的 SQLite 3.51.3，保留 SQLx 0.8 和 Tauri SQL 插件；只有实际包编译并链接 SQLite。打开 WAL 前核对实际库版本至少为 3.51.3，不允许意外链接未修复的系统库后继续运行。
+
+迁移前仍使用 `VACUUM INTO` 创建完整一致快照，包含已提交但尚未回写的 WAL 数据；备份失败继续启动沿用原策略，保留最近三份备份。在线只复制主 `waliapi.db` 文件可能漏掉 WAL 内已提交数据。退出时没有显式关闭所有连接，或进程异常退出，均可能留下合法的 `-wal` / `-shm` 文件；停止进程不代表可以删除这些文件。恢复完整快照前应停止全部实例，确认连接已关闭，并把原数据库及其 sidecar 文件一起隔离后再放入快照。普通重启应让 SQLite 自行恢复日志。
+
+网关成功请求的被动渠道健康更新先读取持久状态；健康且最近 30 秒已刷新时跳过写入，否则用 SQL 条件合并并发更新，并用数据库执行时的 UTC 时间刷新。失败、未知或无效时间仍立即恢复健康，主动探测及其延迟记录仍立即写入。端点模式健康行也在状态已经恢复时跳过重复写锁，首次创建及故障恢复保持即时更新，并按端点和流式模式隔离。没有跨请求缓存或后台延迟写入；日志、额度、故障记录等必要写入继续执行。被动 `last_probe_at` 是合并后的成功时间，不再逐个成功请求刷新。
 
 ## 新建记录的默认查询授权
 

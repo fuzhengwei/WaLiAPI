@@ -111,6 +111,7 @@ pub async fn process_document_with_reuse(
 
     emit_progress(events, doc_id, kb_id, filename, "processing", 0, "开始处理");
 
+    let mut pdf_info = None;
     let result = process_document_inner(
         pool,
         events,
@@ -122,10 +123,24 @@ pub async fn process_document_with_reuse(
         settings,
         data_dir,
         &reuse_embeddings,
+        &mut pdf_info,
     )
     .await;
 
     if let Err(ref e) = result {
+        // 首次导入失败仍保留页级检查结果；重处理失败不能覆盖旧切片对应的质量信息。
+        if !was_ready {
+            if let Some(info) = &pdf_info {
+                if repo
+                    .update_document_pdf_info_if_unready(doc_id, info)
+                    .await
+                    .is_err()
+                {
+                    // 不掩盖原始处理失败，也继续执行既有失败状态/事件写入。
+                    tracing::warn!(doc_id, "Failed to persist PDF extraction diagnostics");
+                }
+            }
+        }
         let err_msg = format!("文档「{}」处理失败: {}", filename, e);
         let _ = repo
             .update_document_status(
@@ -182,21 +197,34 @@ async fn process_document_inner(
     settings: &SettingsStore,
     data_dir: &Path,
     reuse_embeddings: &std::collections::HashMap<String, Vec<u8>>,
+    pdf_info: &mut Option<parser::PdfTextExtraction>,
 ) -> Result<(), String> {
     let repo = KbRepository::new(pool.clone());
 
     // 1. Parse file
     emit_progress(events, doc_id, kb_id, filename, "parsing", 5, "解析文件");
-    let parsed = parser::parse_file(filename, content)?;
+    let parsed = match parser::parse_file(filename, content) {
+        Ok(parsed) => parsed,
+        Err(error) => {
+            if parser::get_file_type(filename) == "pdf" {
+                *pdf_info = Some(parser::PdfTextExtraction::load_failure(&error));
+            }
+            return Err(error);
+        }
+    };
+    if let parser::ParsedContent::Pdf(pdf) = &parsed {
+        *pdf_info = Some(pdf.extraction.clone());
+    }
 
     let (text, file_type_label): (String, String) = match &parsed {
         parser::ParsedContent::PlainText(t) => (t.clone(), "text".to_string()),
         parser::ParsedContent::Markdown { text } => (text.clone(), "markdown".to_string()),
         parser::ParsedContent::Code { text, language } => (text.clone(), language.clone()),
         parser::ParsedContent::Structured(t) => (t.clone(), "structured".to_string()),
+        parser::ParsedContent::Pdf(_) => (String::new(), "pdf".to_string()),
     };
 
-    // 2. OCR 总开关（全局设置，默认关）：关闭时完全走原逻辑——不做判定、不调 LLM。
+    // 2. OCR 总开关（全局设置，默认关）：文字层质量检查不会启用 OCR 或调用 LLM。
     //    开启且为 PDF 时做页级判定：文字层充足的页直接用文字层（零成本、零幻觉），
     //    仅文字不足的页进入 OCR 子流水线（图文混合文档只为缺字页付费）。
     let kb = repo.get_kb(kb_id).await.map_err(|e| e.to_string())?;
@@ -278,6 +306,9 @@ async fn process_document_inner(
         all
     // 符号感知分块：代码文件且语言受支持时，按 AST 符号边界切分
     // 提前处理代码符号和进度更新（在 catch_unwind 外部，避免传递 EventSink）
+    } else if let parser::ParsedContent::Pdf(pdf) = &parsed {
+        std::panic::catch_unwind(|| split_pdf_pages(pdf, &config, &base_metadata))
+            .map_err(|_| "文本分块过程发生严重错误".to_string())?
     } else if let parser::ParsedContent::Code { text, language } = &parsed {
         if code_parser::is_supported_language(language) {
             let symbols = code_parser::extract_symbols(filename, text);
@@ -321,6 +352,9 @@ async fn process_document_inner(
     };
 
     if chunks.is_empty() {
+        if matches!(parsed, parser::ParsedContent::Pdf(_)) {
+            return Err("PDF_TEXT_LAYER_EMPTY: 未提取到可用文字层，未自动启用 OCR".into());
+        }
         return Err("分块后为空，无法继续处理".to_string());
     }
 
@@ -474,9 +508,15 @@ async fn process_document_inner(
         .as_ref()
         .zip(failed_pages.as_deref())
         .map(|(outcome, failed)| (outcome.page_count as i64, failed));
-    repo.replace_document_chunks(doc_id, kb_id, &prepared_chunks, ocr_info)
-        .await
-        .map_err(|e| e.to_string())?;
+    repo.replace_document_chunks_with_pdf_info(
+        doc_id,
+        kb_id,
+        &prepared_chunks,
+        ocr_info,
+        pdf_info.as_ref(),
+    )
+    .await
+    .map_err(|e| e.to_string())?;
 
     // 6. Update vector index incrementally (best-effort, non-blocking on failure)
     //    单文档增量（C-06/R1）：不再全库重建；索引缺失/旧格式时 delta 内部
@@ -531,6 +571,26 @@ async fn process_document_inner(
     Ok(())
 }
 
+/// 普通 PDF 逐页分块，页内重叠不会把两个来源页拼成无页码的正文。
+fn split_pdf_pages(
+    pdf: &parser::ParsedPdf,
+    config: &splitter::SplitConfig,
+    base_metadata: &splitter::ChunkMetadata,
+) -> Vec<splitter::Chunk> {
+    pdf.pages
+        .iter()
+        .zip(&pdf.extraction.pages)
+        .filter(|(text, _)| !text.trim().is_empty())
+        .flat_map(|(text, page)| {
+            let metadata = splitter::ChunkMetadata {
+                page_no: Some(page.page_no),
+                ..base_metadata.clone()
+            };
+            splitter::split(text, "text", config, &metadata)
+        })
+        .collect()
+}
+
 /// 重建文档：先读取/准备新内容，成功后原子替换旧切片。
 pub async fn reindex_document(
     pool: &SqlitePool,
@@ -569,6 +629,41 @@ pub async fn reindex_document(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn pdf_fixture(pages: &[(&str, bool)]) -> parser::ParsedPdf {
+        match parser::parse_file("synthetic.pdf", &parser::tests::synthetic_pdf(pages)).unwrap() {
+            parser::ParsedContent::Pdf(pdf) => pdf,
+            _ => panic!("expected PDF"),
+        }
+    }
+
+    #[test]
+    fn ordinary_pdf_chunks_keep_source_pages_and_short_captions() {
+        let pdf = pdf_fixture(&[
+            (
+                "Public first page with sufficient text. Line markers belong only to page one.",
+                false,
+            ),
+            ("Damaged page", true),
+            ("Short caption on page three", false),
+        ]);
+        let chunks = split_pdf_pages(
+            &pdf,
+            &splitter::SplitConfig::default(),
+            &splitter::ChunkMetadata {
+                file_path: Some("synthetic.pdf".into()),
+                ..Default::default()
+            },
+        );
+        assert_eq!(chunks.len(), 2);
+        assert_eq!(chunks[0].metadata.page_no, Some(1));
+        assert_eq!(chunks[1].metadata.page_no, Some(3));
+        assert_eq!(chunks[1].content.trim(), "Short caption on page three");
+        assert!(chunks
+            .iter()
+            .all(|c| c.metadata.file_path.as_deref() == Some("synthetic.pdf")));
+        assert!(!chunks[0].content.contains("page three"));
+    }
 
     #[test]
     fn split_reuses_matching_hashes() {
@@ -756,6 +851,188 @@ mod tests {
         let doc = repo.get_document(&doc_id).await.unwrap();
         assert_eq!((doc.chunk_count, doc.token_count), (1, 6));
         assert_eq!(repo.get_kb(&kb_id).await.unwrap().chunk_count, 1);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn failed_first_pdf_import_records_quality_and_does_not_start_ocr_or_embedding() {
+        let (pool, events, settings, dir, kb_id, _) = reindex_fixture().await;
+        let repo = KbRepository::new(pool.clone());
+        let bytes = parser::tests::synthetic_pdf(&[("", false), ("", false)]);
+        let doc = repo
+            .create_document(
+                &kb_id,
+                "synthetic.pdf",
+                None,
+                "pdf",
+                bytes.len() as i64,
+                "hash",
+            )
+            .await
+            .unwrap();
+        let error = process_document(
+            &pool,
+            &events,
+            &kb_id,
+            &doc.id,
+            "synthetic.pdf",
+            &bytes,
+            Some("embed-test"),
+            &settings,
+            &dir,
+        )
+        .await
+        .unwrap_err();
+        assert!(error.starts_with("PDF_TEXT_LAYER_EMPTY:"));
+        let doc = repo.get_document(&doc.id).await.unwrap();
+        assert_eq!(doc.status, "failed");
+        assert_eq!(doc.page_count, 2);
+        assert!(doc.ocr_engine.is_none());
+        assert_eq!(doc.chunk_count, 0);
+        let meta: serde_json::Value = serde_json::from_str(&doc.doc_meta).unwrap();
+        assert_eq!(meta["pdf_text_extraction"]["status"], "failed");
+        assert_eq!(
+            meta["pdf_text_extraction"]["error_code"],
+            "PDF_TEXT_LAYER_EMPTY"
+        );
+        assert_eq!(
+            meta["pdf_text_extraction"]["pages"]
+                .as_array()
+                .unwrap()
+                .len(),
+            2
+        );
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn failed_pdf_reprocessing_preserves_published_quality_and_chunks() {
+        let (pool, events, settings, dir, kb_id, doc_id) = reindex_fixture().await;
+        sqlx::query("UPDATE kb_documents SET page_count = 7, doc_meta = '{\"source_note\":\"retained\",\"pdf_text_extraction\":{\"version\":1,\"page_count\":7}}' WHERE id = ?")
+            .bind(&doc_id).execute(&pool).await.unwrap();
+        let bytes = parser::tests::synthetic_pdf(&[("", false), ("", false)]);
+        assert!(process_document(
+            &pool,
+            &events,
+            &kb_id,
+            &doc_id,
+            "synthetic.pdf",
+            &bytes,
+            Some("embed-test"),
+            &settings,
+            &dir
+        )
+        .await
+        .is_err());
+        let repo = KbRepository::new(pool.clone());
+        let doc = repo.get_document(&doc_id).await.unwrap();
+        assert_eq!(doc.status, "ready");
+        assert_eq!(doc.page_count, 7);
+        let meta: serde_json::Value = serde_json::from_str(&doc.doc_meta).unwrap();
+        assert_eq!(meta["pdf_text_extraction"]["page_count"], 7);
+        assert_eq!(
+            repo.get_chunks_by_kb(&kb_id).await.unwrap()[0].0,
+            "old-chunk"
+        );
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn pdf_quality_publishes_atomically_preserves_metadata_and_clears_stale_ocr() {
+        let (pool, _, _, dir, kb_id, doc_id) = reindex_fixture().await;
+        let repo = KbRepository::new(pool.clone());
+        sqlx::query("UPDATE kb_documents SET page_count = 7, doc_meta = '{\"source_note\":\"retained\"}', ocr_engine = 'vlm', ocr_failed_pages = '[7]' WHERE id = ?")
+            .bind(&doc_id).execute(&pool).await.unwrap();
+        let pdf = pdf_fixture(&[
+            (
+                "Public synthetic PDF page with enough visible characters for a normal text layer.",
+                false,
+            ),
+            ("Caption", false),
+        ]);
+        let chunks = split_pdf_pages(
+            &pdf,
+            &splitter::SplitConfig::default(),
+            &splitter::ChunkMetadata::default(),
+        );
+        let inserts: Vec<ChunkInsert> = chunks
+            .iter()
+            .enumerate()
+            .map(|(i, chunk)| ChunkInsert {
+                id: format!("pdf-{i}"),
+                doc_id: doc_id.clone(),
+                kb_id: kb_id.clone(),
+                chunk_index: i as i64,
+                content: chunk.content.clone(),
+                token_count: chunk.token_count as i64,
+                embedding: retriever::encode_embedding(&[1.0, 0.0]),
+                embedding_dim: 2,
+                metadata: serde_json::to_string(&chunk.metadata).unwrap(),
+                content_hash: None,
+                created_at: now_iso(),
+            })
+            .collect();
+        // 在页质量、切片都已写入后让最终统计更新失败，验证整个发布事务回滚。
+        sqlx::query("CREATE TRIGGER fail_pdf_publish BEFORE UPDATE ON kb_knowledge_bases BEGIN SELECT RAISE(ABORT, 'synthetic fixture failure'); END")
+            .execute(&pool).await.unwrap();
+        assert!(repo
+            .replace_document_chunks_with_pdf_info(
+                &doc_id,
+                &kb_id,
+                &inserts,
+                None,
+                Some(&pdf.extraction)
+            )
+            .await
+            .is_err());
+        let old = repo.get_document(&doc_id).await.unwrap();
+        assert_eq!(old.page_count, 7);
+        assert_eq!(old.ocr_engine.as_deref(), Some("vlm"));
+        assert_eq!(
+            repo.get_chunks_by_kb(&kb_id).await.unwrap()[0].0,
+            "old-chunk"
+        );
+        sqlx::query("DROP TRIGGER fail_pdf_publish")
+            .execute(&pool)
+            .await
+            .unwrap();
+        repo.replace_document_chunks_with_pdf_info(
+            &doc_id,
+            &kb_id,
+            &inserts,
+            None,
+            Some(&pdf.extraction),
+        )
+        .await
+        .unwrap();
+        let doc = repo.get_document(&doc_id).await.unwrap();
+        assert_eq!(doc.status, "ready");
+        assert_eq!(doc.page_count, 2);
+        assert!(doc.ocr_engine.is_none());
+        assert_eq!(doc.ocr_failed_pages, "[]");
+        let meta: serde_json::Value = serde_json::from_str(&doc.doc_meta).unwrap();
+        assert_eq!(meta["source_note"], "retained");
+        assert_eq!(meta["pdf_text_extraction"]["status"], "partial");
+        let published = repo.get_chunks_by_kb(&kb_id).await.unwrap();
+        assert_eq!(published.len(), 2);
+        let page_numbers: Vec<u32> = published
+            .iter()
+            .map(|chunk| {
+                serde_json::from_str::<splitter::ChunkMetadata>(&chunk.2)
+                    .unwrap()
+                    .page_no
+                    .unwrap()
+            })
+            .collect();
+        assert_eq!(page_numbers, vec![1, 2]);
+        // 失败诊断更新不能覆盖已发布文档。
+        repo.update_document_pdf_info_if_unready(
+            &doc_id,
+            &parser::PdfTextExtraction::load_failure("PDF_LOAD_FAILED"),
+        )
+        .await
+        .unwrap();
+        assert_eq!(repo.get_document(&doc_id).await.unwrap().page_count, 2);
         std::fs::remove_dir_all(dir).unwrap();
     }
 }

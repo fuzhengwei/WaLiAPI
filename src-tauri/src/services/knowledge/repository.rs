@@ -464,6 +464,19 @@ impl KbRepository {
         chunks: &[ChunkInsert],
         ocr_info: Option<(i64, &str)>,
     ) -> Result<(), sqlx::Error> {
+        self.replace_document_chunks_with_pdf_info(doc_id, kb_id, chunks, ocr_info, None)
+            .await
+    }
+
+    /// PDF 页数和文字层质量与新切片一起发布；普通文档继续使用原入口。
+    pub async fn replace_document_chunks_with_pdf_info(
+        &self,
+        doc_id: &str,
+        kb_id: &str,
+        chunks: &[ChunkInsert],
+        ocr_info: Option<(i64, &str)>,
+        pdf_info: Option<&super::parser::PdfTextExtraction>,
+    ) -> Result<(), sqlx::Error> {
         let mut tx = self.pool.begin().await?;
         sqlx::query("DELETE FROM kb_chunks WHERE doc_id = ?")
             .bind(doc_id)
@@ -481,6 +494,14 @@ impl KbRepository {
             sqlx::query("UPDATE kb_documents SET ocr_engine = 'vlm', page_count = ?, ocr_failed_pages = ? WHERE id = ?")
                 .bind(pages).bind(failed_pages).bind(doc_id).execute(&mut *tx).await?;
         }
+        if let Some(info) = pdf_info {
+            Self::write_pdf_info(&mut tx, doc_id, info, false).await?;
+            if ocr_info.is_none() {
+                // 普通文字层重处理成功后不能沿用先前的 OCR 标签。
+                sqlx::query("UPDATE kb_documents SET ocr_engine = NULL, ocr_failed_pages = '[]' WHERE id = ?")
+                    .bind(doc_id).execute(&mut *tx).await?;
+            }
+        }
         let dim = chunks.first().map(|chunk| chunk.embedding_dim).unwrap_or(0);
         let revision = chunks
             .first()
@@ -495,6 +516,29 @@ impl KbRepository {
             .bind(kb_id).bind(kb_id).bind(kb_id).bind(revision).bind(dim).bind(&now).bind(kb_id)
             .execute(&mut *tx).await?;
         tx.commit().await
+    }
+
+    /// 首次导入失败也可查看文字层质量；就绪文档只能在切片替换事务中更新。
+    pub async fn update_document_pdf_info_if_unready(
+        &self,
+        doc_id: &str,
+        info: &super::parser::PdfTextExtraction,
+    ) -> Result<(), sqlx::Error> {
+        let mut connection = self.pool.acquire().await?;
+        Self::write_pdf_info(&mut connection, doc_id, info, true).await
+    }
+
+    async fn write_pdf_info(
+        connection: &mut sqlx::SqliteConnection,
+        doc_id: &str,
+        info: &super::parser::PdfTextExtraction,
+        only_unready: bool,
+    ) -> Result<(), sqlx::Error> {
+        let json = serde_json::to_string(info).map_err(|e| sqlx::Error::Encode(Box::new(e)))?;
+        sqlx::query("UPDATE kb_documents SET page_count = ?, doc_meta = json_set(CASE WHEN json_valid(doc_meta) THEN CASE WHEN json_type(doc_meta) = 'object' THEN doc_meta ELSE '{}' END ELSE '{}' END, '$.pdf_text_extraction', json(?)), updated_at = ? WHERE id = ? AND (? = 0 OR status <> 'ready')")
+            .bind(info.page_count as i64).bind(json).bind(now_iso()).bind(doc_id).bind(only_unready)
+            .execute(connection).await?;
+        Ok(())
     }
 
     /// 缓存键同时包含配置版本和内容哈希，防止同维度模型切换时复用旧向量。

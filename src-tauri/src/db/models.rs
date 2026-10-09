@@ -871,6 +871,22 @@ pub struct TokenTrendPoint {
     pub request_count: i64,
 }
 
+/// 单条请求对 `usage_stats` 的累加增量(迁移 046)。由 create_log 漏斗在
+/// 同一事务内 UPSERT,日志清理不触碰此表,统计因此不受审计日志保留期影响。
+#[derive(Debug, Clone)]
+pub struct UsageStatsDelta {
+    pub hour: String, // YYYY-MM-DDTHH:00:00.000Z(UTC 小时桶)
+    pub model: String,
+    pub channel_id: String, // '' 表示无渠道(Auth 账号等)
+    pub api_key_id: String, // '' 表示无 Key
+    pub success: bool,
+    pub prompt_tokens: i64,
+    pub completion_tokens: i64,
+    pub total_tokens: i64,
+    pub cached_tokens: i64,
+    pub duration_ms: i64,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
 pub struct RequestSecurityFinding {
     pub id: String,

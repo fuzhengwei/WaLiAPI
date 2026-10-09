@@ -1,6 +1,6 @@
 [package]
 name = "waliapi"
-version = "0.3.9"
+version = "0.4.0"
 description = "WaLiAPI - Local LLM API Gateway"
 authors = ["xiaofuge"]
 edition = "2021"
@@ -49,6 +49,8 @@ toml_edit = "0.22"
 
 # Database
 sqlx = { version = "0.8", features = ["sqlite", "runtime-tokio", "chrono", "macros"] }
+# 固定含 WAL-reset 修复的原生库；旧 SQLx 通过下方薄转出补丁共享它。
+libsqlite3-sys = { version = "=0.37.0", default-features = false, features = ["bundled", "column_metadata"] }
 
 # Utils
 uuid = { version = "1", features = ["v4"] }
@@ -113,3 +115,6 @@ codegen-units = 1
 # 不要设置 panic = "abort"：release 下它会让 panic 直接终止进程，
 # 代码中依赖 catch_unwind 的护栏（如知识库解析/摄入）与 tokio 任务级 panic 隔离将全部失效（issue #55）
 strip = "debuginfo"
+
+[patch.crates-io]
+libsqlite3-sys = { path = "sqlite-compat/libsqlite3-sys" }

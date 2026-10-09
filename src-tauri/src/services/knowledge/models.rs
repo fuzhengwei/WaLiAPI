@@ -73,7 +73,7 @@ pub struct KbDocument {
     pub doc_meta: String,
     /// OCR 识别引擎（'vlm' / NULL = 未经过 OCR）
     pub ocr_engine: Option<String>,
-    /// PDF 页数（仅 OCR 文档回填）
+    /// PDF 实际页数；未重新导入的旧文档可能为 0。
     pub page_count: i64,
     /// OCR 失败页码的 JSON 数组（如 "[3,7]"）
     pub ocr_failed_pages: String,
@@ -133,7 +133,7 @@ pub struct RagAnswer {
     pub retrieval_details: Option<Vec<RetrievalDetail>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub diagnostics: Option<RagDiagnostics>,
-    /// 仅显式启用关键词降级的请求返回实际检索模式。
+    /// 显式选择检索策略或实际部分成功时返回检索模式。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub retrieval_mode: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -168,6 +168,11 @@ pub struct RagDiagnosticStage {
     pub stage: String,
     pub status: String,
     pub elapsed_ms: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub code: Option<String>,
+    /// stage / channel / request；仅失败的截止或取消阶段提供。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deadline_scope: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -274,6 +279,12 @@ pub struct AskInput {
     /// 授权通过后的可恢复向量查询失败，允许使用关键词检索。
     #[serde(default)]
     pub allow_keyword_fallback: bool,
+    /// hybrid 的可恢复关键词检索失败，允许使用已授权的向量结果；默认关闭。
+    #[serde(default)]
+    pub allow_vector_fallback: bool,
+    /// 禁用历史本地分支隐式部分成功；仍允许显式授权的降级方向。
+    #[serde(default)]
+    pub strict_retrieval: bool,
     /// 最终截断前的候选池；省略时保持普通请求原有行为。
     #[serde(default)]
     pub candidate_k: Option<usize>,

@@ -465,8 +465,8 @@ export function ChannelsPage() {
                       </div>
                       <div className="flex items-center gap-1 text-xs">
                         <span className="text-slate-400">成功率</span>
-                        <span className="font-semibold tabular-nums" style={{ color: (stats.success_calls / stats.total_calls * 100) >= 95 ? "#10b981" : (stats.success_calls / stats.total_calls * 100) >= 80 ? "#f59e0b" : "#ef4444" }}>
-                          {(stats.success_calls / stats.total_calls * 100).toFixed(0)}%
+                        <span className="font-semibold tabular-nums" style={{ color: (stats.success_calls + stats.failed_calls > 0 ? stats.success_calls / (stats.success_calls + stats.failed_calls) * 100 : 0) >= 95 ? "#10b981" : (stats.success_calls + stats.failed_calls > 0 ? stats.success_calls / (stats.success_calls + stats.failed_calls) * 100 : 0) >= 80 ? "#f59e0b" : "#ef4444" }}>
+                          {(stats.success_calls + stats.failed_calls > 0 ? stats.success_calls / (stats.success_calls + stats.failed_calls) * 100 : 0).toFixed(0)}%
                         </span>
                       </div>
                       <div className="flex items-center gap-1 text-xs">
@@ -644,7 +644,7 @@ export function ChannelsPage() {
 
                     {/* 详细统计仪表盘 */}
                     {stats && stats.total_calls > 0 ? (() => {
-                      const successRate = (stats.success_calls / stats.total_calls * 100);
+                      const successRate = (stats.success_calls + stats.failed_calls > 0 ? stats.success_calls / (stats.success_calls + stats.failed_calls) * 100 : 0);
                       const rateColor = successRate >= 95 ? "#10b981" : successRate >= 80 ? "#f59e0b" : "#ef4444";
                       const latColor = stats.avg_latency_ms < 500 ? "#10b981" : stats.avg_latency_ms < 2000 ? "#f59e0b" : "#ef4444";
                       const latPct = Math.min(stats.avg_latency_ms / 3000, 1) * 100;
