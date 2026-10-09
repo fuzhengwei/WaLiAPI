@@ -688,7 +688,7 @@ export function SettingsPage() {
                   <option value={90}>90 天</option>
                   <option value={0}>永久保留</option>
                 </select>
-                <p className="mt-1 text-xs text-muted-foreground">过期审计日志会由服务自动清理；删除后数据库文件需单独压缩才会缩小。</p>
+                <p className="mt-1 text-xs text-muted-foreground">过期审计日志会由服务自动清理；清理日志不影响已统计的调用量与 Token 用量（统计数据独立持久化）。如需重置统计数据，请在日志页清理时勾选「同时清除统计数据」（会二次确认并要求先备份）。删除后数据库文件需单独压缩才会缩小。</p>
               </div>
             </div>
           </div>

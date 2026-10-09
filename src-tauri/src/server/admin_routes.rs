@@ -574,6 +574,21 @@ async fn dispatch(shared: &SharedState, cmd: &str, args: Value) -> Result<Value,
             to_json(commands::log::delete_logs_before(arg(&args, "beforeDate")?, state).await)
         }
         "delete_all_logs" => to_json(commands::log::delete_all_logs(state).await),
+        // 多条件组合清理(Task 4):时间 + 状态/成功与否 + 渠道/Key/模型,AND 组合;
+        // clear_stats=false 默认只删日志不动统计;dry_run=true 只返回匹配数。
+        "delete_logs" => {
+            let input: commands::log::DeleteLogsInput =
+                serde_json::from_value(arg(&args, "input")?)
+                    .map_err(|e| format!("参数 input 无效: {e}"))?;
+            to_json(commands::log::delete_logs(input, state).await)
+        }
+        // 独立清除历史统计数据(不删日志)。
+        "clear_usage_stats" => {
+            let input: commands::log::DeleteLogsInput =
+                serde_json::from_value(arg(&args, "input")?)
+                    .map_err(|e| format!("参数 input 无效: {e}"))?;
+            to_json(commands::log::clear_usage_stats(input, state).await)
+        }
         // 历史 499 日志一次性修复：默认 dry-run，input.apply=true 才写库。
         // input 缺省为 {}，让不带参数直接调用也能拿到报告。
         "repair_stream_cancel_logs" => {

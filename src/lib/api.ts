@@ -130,7 +130,31 @@ export const logApi = {
   delete: (id: string) => invoke<void>("delete_log", { id }),
   deleteBefore: (beforeDate: string) => invoke<number>("delete_logs_before", { beforeDate }),
   deleteAll: () => invoke<number>("delete_all_logs"),
+  /** 多条件组合清理日志(Task 4):时间 + 状态/成功与否 + 渠道/Key/模型,AND 组合。
+   *  clear_stats=true 同步清除对应 usage_stats;dry_run=true 只返回匹配行数不删除。 */
+  deleteMany: (input: DeleteLogsInput) => invoke<DeleteLogsReport>("delete_logs", { input }),
+  /** 独立清除历史统计数据(不删日志)。 */
+  clearStats: (input: DeleteLogsInput) => invoke<number>("clear_usage_stats", { input }),
 };
+
+export interface DeleteLogsInput {
+  before_date?: string;
+  after_date?: string;
+  keep_recent_days?: number;
+  status_code?: number;
+  is_success?: boolean;
+  channel_id?: string;
+  api_key_id?: string;
+  model?: string;
+  clear_stats?: boolean;
+  dry_run?: boolean;
+}
+
+export interface DeleteLogsReport {
+  dry_run: boolean;
+  matched_logs: number;
+  matched_stats: number;
+}
 
 // Auth account commands. All result contracts are safe summaries; credential
 // payloads remain inside the native command layer.

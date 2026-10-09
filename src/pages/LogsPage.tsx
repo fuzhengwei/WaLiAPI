@@ -1,6 +1,7 @@
 import { useEffect, useLayoutEffect, useState, useCallback, useMemo, useRef } from "react";
 import { Link } from "react-router-dom";
 import { logApi } from "../lib/api";
+import type { DeleteLogsInput, DeleteLogsReport } from "../lib/api";
 import type { RequestLog, SecurityFinding } from "../types";
 import { formatTime, formatDuration, formatNumber } from "../lib/constants";
 import { writeClipboard } from "../lib/runtime";
@@ -339,20 +340,35 @@ export function LogsPage() {
     }
   };
 
-  const handleCleanLogs = async (type: "all" | "7d" | "30d") => {
+  const [cleanConfirm, setCleanConfirm] = useState<{
+    input: DeleteLogsInput;
+    preview: DeleteLogsReport;
+  } | null>(null);
+  const [cleanRunning, setCleanRunning] = useState(false);
+
+  const handleCleanLogs = async (input: DeleteLogsInput) => {
+    // 两步确认:先 dry_run 预览影响行数,展示给用户确认后才真正删除。
     try {
-      if (type === "all") {
-        await logApi.deleteAll();
-      } else {
-        const days = type === "7d" ? 7 : 30;
-        const before = new Date(Date.now() - days * 86400000).toISOString();
-        await logApi.deleteBefore(before);
-      }
+      const preview = await logApi.deleteMany({ ...input, dry_run: true });
+      setCleanConfirm({ input, preview });
+    } catch (e) {
+      console.error("Failed to preview clean:", e);
+    }
+  };
+
+  const handleConfirmClean = async () => {
+    if (!cleanConfirm) return;
+    setCleanRunning(true);
+    try {
+      await logApi.deleteMany(cleanConfirm.input);
+      setCleanConfirm(null);
       setShowCleanModal(false);
       setPage(0);
       load(0);
     } catch (e) {
       console.error("Failed to clean logs:", e);
+    } finally {
+      setCleanRunning(false);
     }
   };
 
@@ -645,9 +661,19 @@ export function LogsPage() {
         </div>
       </div>
 
-      {/* Clean modal */}
+      {/* Clean modal(第一步:条件选择) */}
       {showCleanModal && (
         <CleanLogsModal onConfirm={handleCleanLogs} onCancel={() => setShowCleanModal(false)} />
+      )}
+
+      {/* 清理确认(第二步:预览影响 + 备份提醒 + 二次确认) */}
+      {cleanConfirm && (
+        <CleanConfirmModal
+          preview={cleanConfirm.preview}
+          onConfirm={handleConfirmClean}
+          onCancel={() => setCleanConfirm(null)}
+          running={cleanRunning}
+        />
       )}
     </div>
   );
@@ -1916,43 +1942,137 @@ function LogDetail({ log }: { log: RequestLog }) {
   );
 }
 
-// ─── CleanLogsModal ──────────────────────────────────────────────────────────
+// ─── CleanLogsModal(第一步:条件选择)───────────────────────────────────────
 
 function CleanLogsModal({
   onConfirm,
   onCancel,
 }: {
-  onConfirm: (type: "all" | "7d" | "30d") => void;
+  onConfirm: (input: DeleteLogsInput) => void;
   onCancel: () => void;
 }) {
+  const [retention, setRetention] = useState("30"); // 保留最近 N 天,空=全部
+  const [isSuccess, setIsSuccess] = useState("");
+  const [channelId, setChannelId] = useState("");
+  const [apiKeyId, setApiKeyId] = useState("");
+  const [model, setModel] = useState("");
+  const [clearStats, setClearStats] = useState(false);
+
+  const submit = () => {
+    const input: DeleteLogsInput = {
+      keep_recent_days: retention ? Number(retention) : undefined,
+      is_success: isSuccess ? isSuccess === "success" : undefined,
+      channel_id: channelId || undefined,
+      api_key_id: apiKeyId || undefined,
+      model: model || undefined,
+      clear_stats: clearStats || undefined,
+    };
+    onConfirm(input);
+  };
+
+  const inputCls = "w-full px-3 py-2 text-sm rounded-lg border border-slate-200 focus:outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 bg-white";
+
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/30 backdrop-blur-sm" onClick={onCancel}>
-      <div className="surface rounded-2xl p-6 max-w-sm w-full mx-4" onClick={e => e.stopPropagation()}>
-        <h3 className="text-lg font-semibold mb-2">清理日志</h3>
-        <p className="text-sm text-muted-foreground mb-4">选择要清理的日志范围，此操作不可撤销</p>
-        <div className="space-y-2">
-          <button
-            onClick={() => onConfirm("7d")}
-            className="w-full text-left px-4 py-3 rounded-xl border border-border hover:bg-white/60 transition-colors text-sm"
-          >
-            清理 7 天前的日志
-          </button>
-          <button
-            onClick={() => onConfirm("30d")}
-            className="w-full text-left px-4 py-3 rounded-xl border border-border hover:bg-white/60 transition-colors text-sm"
-          >
-            清理 30 天前的日志
-          </button>
-          <button
-            onClick={() => onConfirm("all")}
-            className="w-full text-left px-4 py-3 rounded-xl border border-red-200 text-red-500 hover:bg-red-50 transition-colors text-sm"
-          >
-            清理全部日志
+      <div className="surface rounded-2xl p-6 max-w-md w-full mx-4" onClick={e => e.stopPropagation()}>
+        <h3 className="text-lg font-semibold mb-1">清理日志</h3>
+        <p className="text-sm text-muted-foreground mb-4">选择清理范围（多条件组合），下一步将显示预计影响的日志条数并二次确认。</p>
+
+        <div className="space-y-3">
+          <div>
+            <label className="mb-1 block text-xs font-medium text-slate-600">时间范围</label>
+            <select value={retention} onChange={e => setRetention(e.target.value)} className={inputCls}>
+              <option value="">清理全部日志</option>
+              <option value={1}>保留最近 1 天（清理更早的）</option>
+              <option value={7}>保留最近 7 天（清理更早的）</option>
+              <option value={30}>保留最近 30 天（清理更早的）</option>
+              <option value={90}>保留最近 90 天（清理更早的）</option>
+            </select>
+          </div>
+          <div>
+            <label className="mb-1 block text-xs font-medium text-slate-600">请求结果（可选）</label>
+            <select value={isSuccess} onChange={e => setIsSuccess(e.target.value)} className={inputCls}>
+              <option value="">全部结果</option>
+              <option value="success">仅成功（2xx）</option>
+              <option value="failed">仅失败（非 2xx）</option>
+            </select>
+          </div>
+          <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
+            <div>
+              <label className="mb-1 block text-xs font-medium text-slate-600">渠道 ID（可选）</label>
+              <input type="text" value={channelId} onChange={e => setChannelId(e.target.value)} placeholder="留空=全部" className={inputCls} />
+            </div>
+            <div>
+              <label className="mb-1 block text-xs font-medium text-slate-600">Key ID（可选）</label>
+              <input type="text" value={apiKeyId} onChange={e => setApiKeyId(e.target.value)} placeholder="留空=全部" className={inputCls} />
+            </div>
+            <div>
+              <label className="mb-1 block text-xs font-medium text-slate-600">模型（可选）</label>
+              <input type="text" value={model} onChange={e => setModel(e.target.value)} placeholder="留空=全部" className={inputCls} />
+            </div>
+          </div>
+          <label className="flex items-start gap-2 rounded-xl border border-slate-200 bg-slate-50 px-3 py-2.5 cursor-pointer">
+            <input type="checkbox" checked={clearStats} onChange={e => setClearStats(e.target.checked)} className="mt-0.5" />
+            <span className="text-sm">
+              <span className="font-medium text-slate-800">同时清除对应的历史统计数据</span>
+              <span className="block text-xs text-red-500">默认不清除；勾选后对应时间段的调用量与 Token 统计将不可恢复。</span>
+            </span>
+          </label>
+        </div>
+
+        <div className="mt-5 flex gap-2">
+          <button onClick={onCancel} className="flex-1 action-secondary justify-center">取消</button>
+          <button onClick={submit} className="flex-1 rounded-lg bg-red-500 px-4 py-2 text-sm font-medium text-white hover:bg-red-600">
+            下一步：预览影响
           </button>
         </div>
-        <button onClick={onCancel} className="mt-4 w-full action-secondary justify-center">
-          取消
-        </button>
+      </div>
+    </div>
+  );
+}
+
+// ─── CleanConfirmModal(第二步:确认,含备份提醒)────────────────────────────
+
+function CleanConfirmModal({
+  preview,
+  onConfirm,
+  onCancel,
+  running,
+}: {
+  preview: DeleteLogsReport;
+  onConfirm: () => void;
+  onCancel: () => void;
+  running: boolean;
+}) {
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/30 backdrop-blur-sm" onClick={running ? undefined : onCancel}>
+      <div className="surface rounded-2xl p-6 max-w-md w-full mx-4" onClick={e => e.stopPropagation()}>
+        <h3 className="text-lg font-semibold mb-1 text-red-600">确认清理？</h3>
+        <p className="text-sm text-muted-foreground mb-4">此操作不可撤销</p>
+
+        <div className="space-y-2 rounded-xl border border-slate-200 bg-slate-50 p-4 text-sm">
+          <div className="flex justify-between">
+            <span className="text-slate-500">将清理日志</span>
+            <span className="font-semibold text-slate-900">{formatNumber(preview.matched_logs)} 条</span>
+          </div>
+          {preview.matched_stats > 0 && (
+            <div className="flex justify-between">
+              <span className="text-slate-500">将同步清除统计数据</span>
+              <span className="font-semibold text-red-600">{formatNumber(preview.matched_stats)} 行</span>
+            </div>
+          )}
+        </div>
+
+        <div className="mt-3 rounded-xl border border-amber-200 bg-amber-50 p-3 text-xs leading-5 text-amber-800">
+          清理前建议先备份数据库：应用启动迁移时会自动生成 <code className="font-mono">waliapi.db.pre-upgrade-*</code> 快照，也可手动复制数据库文件备份。清理后日志不可恢复；若勾选了清除统计数据，对应统计同样不可恢复。
+        </div>
+
+        <div className="mt-5 flex gap-2">
+          <button onClick={onCancel} disabled={running} className="flex-1 action-secondary justify-center">取消</button>
+          <button onClick={onConfirm} disabled={running} className="flex-1 rounded-lg bg-red-500 px-4 py-2 text-sm font-medium text-white hover:bg-red-600 disabled:opacity-50">
+            {running ? "清理中…" : "确认清理"}
+          </button>
+        </div>
       </div>
     </div>
   );

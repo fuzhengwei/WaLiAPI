@@ -479,23 +479,65 @@ mod tests {
         let pool = memory_db().await;
         let repo = Repository::new(pool.clone());
         let now = crate::db::models::now_iso();
-        // 一条正常请求行 + 一条探测行（model 都为 m）
-        for (model, is_probe) in [("m", 0), ("m", 1)] {
-            sqlx::query(
-                "INSERT INTO request_logs (id, seq, model, mode, status_code, duration_ms, \
-                 is_stream, is_retry, created_at, risk_level, security_action, upstream_type, \
-                 is_probe, total_tokens) \
-                 VALUES (?, (SELECT COALESCE(MAX(seq), 0) + 1 FROM request_logs), ?, 'chat', 200, \
-                 10, 0, 0, ?, 'low', 'audit', 'channel', ?, 100)",
-            )
-            .bind(uuid::Uuid::new_v4().to_string())
-            .bind(model)
-            .bind(&now)
-            .bind(is_probe)
-            .execute(&pool)
-            .await
-            .unwrap();
-        }
+        // 一条正常请求行(走 create_log 漏斗 → 计入 usage_stats)+ 一条探测行
+        // (直接 SQL 插 request_logs,不走漏斗 → 天然不进统计)。
+        let mut log = crate::db::models::RequestLog {
+            id: uuid::Uuid::new_v4().to_string(),
+            seq: None,
+            api_key_id: None,
+            api_key_name: None,
+            channel_id: None,
+            channel_name: None,
+            model: "m".into(),
+            upstream_model: None,
+            mode: "chat".into(),
+            status_code: 200,
+            prompt_tokens: 0,
+            completion_tokens: 0,
+            total_tokens: 100,
+            cached_tokens: 0,
+            duration_ms: 10,
+            error_message: None,
+            is_stream: 0,
+            is_retry: 0,
+            created_at: now.clone(),
+            request_body: None,
+            response_choices: None,
+            risk_level: "low".into(),
+            risk_score: 0,
+            risk_summary: None,
+            security_action: "audit".into(),
+            sanitized: 0,
+            blocked_reason: None,
+            trace_id: None,
+            reasoning_effort: None,
+            downstream_protocol: None,
+            downstream_endpoint: None,
+            route_group: None,
+            upstream_protocol: None,
+            upstream_endpoint: None,
+            provider: None,
+            codec_version: None,
+            failure_class: None,
+            identity_revision: None,
+            client_cancelled: None,
+            stream_committed: None,
+            upstream_type: "channel".into(),
+        };
+        repo.create_log(&log).await.unwrap();
+        // 探测行直接 SQL 插入(record_channel_probe 等价的最小路径)。
+        sqlx::query(
+            "INSERT INTO request_logs (id, seq, model, mode, status_code, duration_ms, \
+             is_stream, is_retry, created_at, risk_level, security_action, upstream_type, \
+             is_probe, total_tokens) \
+             VALUES (?, (SELECT COALESCE(MAX(seq), 0) + 1 FROM request_logs), 'm', 'chat', 200, \
+             10, 0, 0, ?, 'low', 'audit', 'channel', 1, 100)",
+        )
+        .bind(uuid::Uuid::new_v4().to_string())
+        .bind(&now)
+        .execute(&pool)
+        .await
+        .unwrap();
 
         let model_stats = repo.get_model_stats().await.unwrap();
         let row = model_stats
