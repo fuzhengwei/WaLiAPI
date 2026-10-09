@@ -520,8 +520,7 @@ pub async fn test_channel_impl(
     let repo = Repository::new(state.db.pool.clone());
     let mut channel = repo.get_channel(id).await.map_err(|e| e.to_string())?;
     // 主 Key 停用时走第一个启用的从 Key（与真实调度语义一致）。
-    channel.api_key =
-        channel_test::effective_probe_key(&repo, id, &channel.api_key).await;
+    channel.api_key = channel_test::effective_probe_key(&repo, id, &channel.api_key).await;
 
     let config = ChannelConfig {
         base_url: channel.base_url.clone(),

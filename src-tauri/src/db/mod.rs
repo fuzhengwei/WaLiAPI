@@ -4,7 +4,9 @@ pub mod repository;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePool, SqlitePoolOptions};
+#[cfg(test)]
+use sqlx::sqlite::SqliteJournalMode;
+use sqlx::sqlite::{SqliteConnectOptions, SqlitePool, SqlitePoolOptions};
 use tauri::{AppHandle, Manager};
 
 /// 迁移前备份文件名前缀。备份形如 `waliapi.db.pre-upgrade-20260806-190400`，与数据库同目录。
@@ -15,20 +17,70 @@ const BACKUP_KEEP: usize = 3;
 
 /// 与 SQLx 原默认值一致；用于短写锁竞争，不替代请求预算或单实例部署。
 const SQLITE_BUSY_TIMEOUT: Duration = Duration::from_secs(5);
-const WAL_AUTOCHECKPOINT_PAGES: u32 = 1_000;
 
-/// 所有池连接使用同一配置，已有 DELETE 库在首次连接时转换为 WAL。
-/// 转换要求没有其他实例占用数据库；保持原默认 FULL synchronous。
+/// WAL 启用要求 SQLite 至少 3.51.3：低于该版本存在 WAL-reset 缺陷
+/// （见 sqlite-compat/README.md），宁可保持 DELETE 模式也不启用。
+const WAL_MIN_SQLITE_VERSION: i64 = 3_051_003;
+
+/// WAL 启用失败时的重试次数与间隔：文件可能被杀毒/同步工具或
+/// 升级期间未完全退出的旧实例短暂持有，稍候重试通常即可成功。
+const WAL_ENABLE_ATTEMPTS: u32 = 3;
+const WAL_ENABLE_RETRY_INTERVAL: Duration = Duration::from_millis(300);
+
+/// 所有池连接使用同一基础配置。
+///
+/// journal 模式不在此处设置：DELETE→WAL 转换需要独占访问，若在建连
+/// 选项里强制执行，文件被占用（升级时旧实例未退出、杀毒/同步工具持锁、
+/// AppData 被重定向到网络盘等，Windows 上高发）会让连接直接失败，
+/// 叠加启动路径的 `expect` 变成「启动即 panic → 白屏」。
+/// WAL 启用改为 `enable_wal_best_effort` 启动期一次性尽力而为。
 pub(crate) fn sqlite_connect_options(db_path: &Path) -> SqliteConnectOptions {
-    // bundled 依赖固定了修复版本；同时防止构建环境意外链接旧系统库后启用 WAL。
-    let version = unsafe { libsqlite3_sys::sqlite3_libversion_number() };
-    assert!(version >= 3_051_003, "WAL requires SQLite 3.51.3 or newer");
     SqliteConnectOptions::new()
         .filename(db_path)
         .create_if_missing(true)
-        .journal_mode(SqliteJournalMode::Wal)
         .busy_timeout(SQLITE_BUSY_TIMEOUT)
-        .pragma("wal_autocheckpoint", WAL_AUTOCHECKPOINT_PAGES.to_string())
+}
+
+/// 启动期把数据库切换到 WAL 模式（持久属性，一次成功对全部连接生效）。
+///
+/// best-effort，绝不阻断启动：
+/// - SQLite 低于 3.51.3（构建环境意外链接旧系统库）时跳过，避免在
+///   受 WAL-reset 缺陷影响的版本上启用 WAL；
+/// - 文件被占用导致转换失败时重试数次，仍失败则沿用原 journal 模式
+///   继续启动（等价 v0.4.0 之前的行为）。
+///
+/// 返回是否已处于 WAL 模式。
+pub(crate) async fn enable_wal_best_effort(pool: &SqlitePool) -> bool {
+    // bundled 依赖固定了修复版本；此检查防止构建环境意外链接旧系统库。
+    let version = unsafe { libsqlite3_sys::sqlite3_libversion_number() } as i64;
+    if version < WAL_MIN_SQLITE_VERSION {
+        log::warn!("SQLite {version} 低于 3.51.3，跳过 WAL 启用，沿用原 journal 模式继续启动");
+        return false;
+    }
+    for attempt in 1..=WAL_ENABLE_ATTEMPTS {
+        // PRAGMA journal_mode=WAL 成功时返回生效后的模式字符串；转换被
+        // 占用拒绝时以错误（SQLITE_BUSY）或原模式字符串两种形式出现，
+        // 两种都按「未启用」处理而不是失败退出。
+        match sqlx::query_scalar::<_, String>("PRAGMA journal_mode = WAL")
+            .fetch_one(pool)
+            .await
+        {
+            Ok(mode) if mode.eq_ignore_ascii_case("wal") => return true,
+            Ok(mode) => {
+                log::warn!("journal_mode=WAL 未生效（当前为 {mode}），沿用原模式继续启动");
+                return false;
+            }
+            Err(error) if attempt < WAL_ENABLE_ATTEMPTS => {
+                log::warn!("启用 WAL 失败，稍后重试: {error}");
+                tokio::time::sleep(WAL_ENABLE_RETRY_INTERVAL).await;
+            }
+            Err(error) => {
+                log::warn!("启用 WAL 失败，沿用原 journal 模式继续启动: {error}");
+                return false;
+            }
+        }
+    }
+    false
 }
 
 /// 不等待活跃读事务结束，也不强制截断 WAL；未回写的帧保留供后续检查点处理。
@@ -197,6 +249,13 @@ impl Database {
             .await
             .expect("failed to connect to database");
 
+        // 启动期一次性启用 WAL（best-effort）：文件被占用时降级为原
+        // journal 模式继续启动，不因 journal 模式转换失败而 panic。
+        let wal_enabled = enable_wal_best_effort(&pool).await;
+        if !wal_enabled {
+            log::warn!("数据库未处于 WAL 模式，沿用原 journal 模式继续启动");
+        }
+
         // 修复旧版迁移 checksum（v0.1.1 → v0.1.3 兼容）
         fix_legacy_migration_checksums(&pool).await;
 
@@ -253,11 +312,13 @@ mod tests {
     }
 
     async fn wal_pool(db_path: &Path, max_connections: u32) -> SqlitePool {
-        SqlitePoolOptions::new()
+        let pool = SqlitePoolOptions::new()
             .max_connections(max_connections)
             .connect_with(sqlite_connect_options(db_path))
             .await
-            .expect("connect WAL fixture")
+            .expect("connect WAL fixture");
+        assert!(enable_wal_best_effort(&pool).await, "WAL 应启用");
+        pool
     }
 
     /// 在数据库里模拟旧版迁移记录（版本 5）与一条业务数据。
@@ -413,7 +474,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn new_database_configures_wal_and_timeout_on_every_pool_connection() {
+    async fn new_database_enables_wal_and_pool_connections_keep_timeout_config() {
         let dir = temp_dir();
         let db = Database::new_with_path(&dir).await;
         // 同时持有五个连接，确保不是在同一连接上重复检查 PRAGMA。
@@ -427,6 +488,7 @@ mod tests {
                 .await
                 .unwrap();
             assert_eq!(sqlite_version, "3.51.3", "SQLx 使用已修复的实际 SQLite");
+            // WAL 是启动期一次性设置的持久属性，对所有连接生效。
             let journal: String = sqlx::query_scalar("PRAGMA journal_mode")
                 .fetch_one(&mut **connection)
                 .await
@@ -437,6 +499,7 @@ mod tests {
                 .await
                 .unwrap();
             assert_eq!(timeout, 5_000);
+            // SQLite 默认 wal_autocheckpoint 即 1000 页。
             let pages: i64 = sqlx::query_scalar("PRAGMA wal_autocheckpoint")
                 .fetch_one(&mut **connection)
                 .await
@@ -507,6 +570,77 @@ mod tests {
             .unwrap();
         assert_eq!(journal, "wal");
         reopened.pool.close().await;
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// 回归测试（Windows 升级白屏）：v0.4.0 初版把 DELETE→WAL 转换放在
+    /// 建连选项里强制执行，文件被占用时连接失败 → 启动 `expect` panic。
+    /// 现在 WAL 启用是 best-effort：被独占写锁持有时应放弃并保持原模式，
+    /// 锁释放后重试成功。
+    #[tokio::test]
+    async fn wal_enable_failure_while_locked_degrades_instead_of_panicking() {
+        let dir = temp_dir();
+        std::fs::create_dir_all(&dir).unwrap();
+        let db_path = dir.join("waliapi.db");
+
+        // 夹具：DELETE 模式库 + 另一连接持有写锁（模拟升级时旧实例
+        // 未退出、杀毒/同步工具短暂持锁等占用场景）。
+        let locker = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(
+                SqliteConnectOptions::new()
+                    .filename(&db_path)
+                    .create_if_missing(true)
+                    .journal_mode(SqliteJournalMode::Delete),
+            )
+            .await
+            .unwrap();
+        sqlx::query("CREATE TABLE t (x INTEGER)")
+            .execute(&locker)
+            .await
+            .unwrap();
+        let mut tx = locker.begin().await.unwrap();
+        sqlx::query("INSERT INTO t VALUES (1)")
+            .execute(&mut *tx)
+            .await
+            .unwrap();
+
+        // 待启用 WAL 的池：busy_timeout 调短，避免测试等待完整 5 秒。
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(
+                SqliteConnectOptions::new()
+                    .filename(&db_path)
+                    .busy_timeout(Duration::from_millis(50)),
+            )
+            .await
+            .unwrap();
+
+        // 关键断言：转换失败不 panic，优雅返回 false 并保持原模式。
+        assert!(
+            !enable_wal_best_effort(&pool).await,
+            "被写锁占用时应放弃启用 WAL"
+        );
+        let journal: String = sqlx::query_scalar("PRAGMA journal_mode")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(journal, "delete", "库应保持原 DELETE 模式");
+
+        // 锁释放后重试应成功（升级后下一次启动的常规路径）。
+        tx.rollback().await.unwrap();
+        locker.close().await;
+        assert!(
+            enable_wal_best_effort(&pool).await,
+            "锁释放后 WAL 启用应成功"
+        );
+        let journal: String = sqlx::query_scalar("PRAGMA journal_mode")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(journal, "wal");
+
+        pool.close().await;
         std::fs::remove_dir_all(dir).unwrap();
     }
 
