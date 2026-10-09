@@ -131,6 +131,64 @@ async fn fix_legacy_migration_checksums(pool: &SqlitePool) {
     }
 }
 
+/// 兼容旧 Windows 安装包内嵌的 CRLF 迁移，保留未知 SQL 内容差异的校验。
+/// 必须在迁移前备份之后执行，避免把新版校验值写入供旧版恢复的快照。
+async fn fix_migration_line_ending_checksums(pool: &SqlitePool) -> Result<u64, sqlx::Error> {
+    use sha2::Digest;
+
+    let exists: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = '_sqlx_migrations'",
+    )
+    .fetch_one(pool)
+    .await?;
+    if exists == 0 {
+        return Ok(0);
+    }
+
+    let mut tx = pool.begin().await?;
+    let applied: Vec<(i64, Vec<u8>)> =
+        sqlx::query_as("SELECT version, checksum FROM _sqlx_migrations WHERE success = 1")
+            .fetch_all(&mut *tx)
+            .await?;
+    let migrator = sqlx::migrate!("./migrations");
+    let mut repaired = 0;
+    for (version, stored_checksum) in applied {
+        let Some(migration) = migrator
+            .iter()
+            .find(|migration| migration.version == version)
+        else {
+            continue;
+        };
+        if migration.checksum.as_ref() == stored_checksum.as_slice() {
+            continue;
+        }
+
+        // 只接受当前 SQL 的两种行尾变体；不能直接覆盖任意历史 checksum。
+        let lf = migration.sql.replace("\r\n", "\n");
+        let crlf = lf.replace('\n', "\r\n");
+        let lf_checksum = sha2::Sha384::digest(lf.as_bytes()).to_vec();
+        let crlf_checksum = sha2::Sha384::digest(crlf.as_bytes()).to_vec();
+        if stored_checksum != lf_checksum && stored_checksum != crlf_checksum {
+            continue;
+        }
+
+        repaired += sqlx::query(
+            "UPDATE _sqlx_migrations SET checksum = ? WHERE version = ? AND checksum = ? AND success = 1",
+        )
+        .bind(migration.checksum.as_ref())
+        .bind(version)
+        .bind(&stored_checksum)
+        .execute(&mut *tx)
+        .await?
+        .rows_affected();
+    }
+    tx.commit().await?;
+    if repaired > 0 {
+        log::warn!("已兼容 {repaired} 条历史迁移的 LF/CRLF 校验值差异");
+    }
+    Ok(repaired)
+}
+
 /// 迁移集内的最大版本号（当前编译进二进制的迁移文件）。
 fn migration_max_version() -> i64 {
     sqlx::migrate!("./migrations")
@@ -264,6 +322,10 @@ impl Database {
         if let Err(e) = backup_before_migration(&pool, &db_path).await {
             log::error!("迁移前自动备份失败，继续启动: {e}");
         }
+
+        fix_migration_line_ending_checksums(&pool)
+            .await
+            .expect("failed to reconcile migration line endings");
 
         // Run migrations
         sqlx::migrate!("./migrations")
@@ -471,6 +533,112 @@ mod tests {
 
         pool.close().await;
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// 旧 Windows 安装包按 CRLF 编译迁移，新版锁定 LF；真实启动路径仍须能升级。
+    #[tokio::test]
+    async fn startup_upgrades_windows_crlf_migration_history() {
+        let dir = temp_dir();
+        std::fs::create_dir_all(&dir).unwrap();
+        let pool = test_pool(&dir.join("waliapi.db")).await;
+        let legacy = sqlx::migrate::Migrator {
+            migrations: std::borrow::Cow::Owned(
+                sqlx::migrate!("./migrations")
+                    .iter()
+                    .filter(|migration| migration.version <= 45)
+                    .map(|migration| {
+                        sqlx::migrate::Migration::new(
+                            migration.version,
+                            migration.description.clone(),
+                            migration.migration_type,
+                            migration
+                                .sql
+                                .replace("\r\n", "\n")
+                                .replace('\n', "\r\n")
+                                .into(),
+                            migration.no_tx,
+                        )
+                    })
+                    .collect(),
+            ),
+            ..sqlx::migrate::Migrator::DEFAULT
+        };
+        legacy.run(&pool).await.unwrap();
+        sqlx::query("INSERT INTO prompt_templates (id, template_key, version, content, active, created_at) VALUES ('upgrade-sentinel', 'upgrade-test', 1, 'preserved', 0, '2026-10-09')")
+            .execute(&pool).await.unwrap();
+        pool.close().await;
+
+        let startup_dir = dir.clone();
+        let startup = tokio::spawn(async move {
+            let db = Database::new_with_path(&startup_dir).await;
+            assert_eq!(current_db_version(&db.pool).await, migration_max_version());
+            let content: String = sqlx::query_scalar(
+                "SELECT content FROM prompt_templates WHERE id = 'upgrade-sentinel'",
+            )
+            .fetch_one(&db.pool)
+            .await
+            .unwrap();
+            assert_eq!(content, "preserved");
+            assert_eq!(
+                fix_migration_line_ending_checksums(&db.pool).await.unwrap(),
+                0
+            );
+            db.pool.close().await;
+            // 重启不会再次修复，也不会重复执行历史迁移。
+            let reopened = Database::new_with_path(&startup_dir).await;
+            assert_eq!(
+                current_db_version(&reopened.pool).await,
+                migration_max_version()
+            );
+            reopened.pool.close().await;
+        })
+        .await;
+        std::fs::remove_dir_all(dir).unwrap();
+        assert!(
+            startup.is_ok(),
+            "CRLF 迁移历史不能导致启动 panic: {startup:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn line_ending_repair_preserves_unknown_checksums_and_is_idempotent() {
+        let dir = temp_dir();
+        std::fs::create_dir_all(&dir).unwrap();
+        let pool = test_pool(&dir.join("waliapi.db")).await;
+        let migrator = sqlx::migrate!("./migrations");
+        migrator.run(&pool).await.unwrap();
+        let unknown = vec![0xab; 48];
+        sqlx::query("UPDATE _sqlx_migrations SET checksum = ? WHERE version = 1")
+            .bind(&unknown)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let migration = migrator
+            .iter()
+            .find(|migration| migration.version == 2)
+            .unwrap();
+        use sha2::Digest;
+        let crlf = migration.sql.replace("\r\n", "\n").replace('\n', "\r\n");
+        sqlx::query("UPDATE _sqlx_migrations SET checksum = ? WHERE version = 2")
+            .bind(sha2::Sha384::digest(crlf.as_bytes()).to_vec())
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        assert_eq!(fix_migration_line_ending_checksums(&pool).await.unwrap(), 1);
+        assert_eq!(fix_migration_line_ending_checksums(&pool).await.unwrap(), 0);
+        let stored: Vec<u8> =
+            sqlx::query_scalar("SELECT checksum FROM _sqlx_migrations WHERE version = 1")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(stored, unknown);
+        assert!(matches!(
+            migrator.run(&pool).await,
+            Err(sqlx::migrate::MigrateError::VersionMismatch(1))
+        ));
+        pool.close().await;
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[tokio::test]

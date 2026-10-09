@@ -219,6 +219,25 @@ textarea:focus {
   font-weight: 500;
 }
 
+.action-destructive {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 16px;
+  border-radius: 12px;
+  border: 1px solid rgba(220, 76, 100, 0.2);
+  background: linear-gradient(180deg, #e05a72 0%, #dc4c64 100%);
+  color: white;
+  font-size: 14px;
+  font-weight: 600;
+  box-shadow: 0 10px 20px rgba(220, 76, 100, 0.16);
+}
+
+.action-destructive:hover {
+  background: linear-gradient(180deg, #dc4c64 0%, #c93e56 100%);
+  transform: translateY(-1px);
+}
+
 .action-secondary:hover {
   background: #ffffff;
   box-shadow: 0 6px 14px rgba(15, 23, 42, 0.06);
