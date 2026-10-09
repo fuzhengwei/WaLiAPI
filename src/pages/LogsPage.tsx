@@ -1,4 +1,5 @@
 import { useEffect, useLayoutEffect, useState, useCallback, useMemo, useRef } from "react";
+import type { ChangeEvent, ReactNode } from "react";
 import { Link } from "react-router-dom";
 import { logApi, channelApi } from "../lib/api";
 import type { DeleteLogsInput, DeleteLogsReport, CleanupChannelInput, CleanupChannelReport } from "../lib/api";
@@ -1980,6 +1981,27 @@ function LogDetail({ log }: { log: RequestLog }) {
 
 // ─── CleanLogsModal(第一步:条件选择,含「清理日志/渠道清理」双 tab)──────────
 
+// 弹窗内下拉框:appearance-none 去掉 macOS 原生控件外观,右侧统一渲染
+// ChevronDown,与页面筛选器/全局输入框风格保持一致。
+function ModalSelect({ value, onChange, children }: {
+  value: string;
+  onChange: (e: ChangeEvent<HTMLSelectElement>) => void;
+  children: ReactNode;
+}) {
+  return (
+    <div className="relative">
+      <select
+        value={value}
+        onChange={onChange}
+        className="w-full appearance-none px-3 py-2 pr-9 text-sm rounded-lg border border-slate-200 bg-white focus:outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500"
+      >
+        {children}
+      </select>
+      <ChevronDown size={14} className="pointer-events-none absolute right-3 top-1/2 -translate-y-1/2 text-slate-400" />
+    </div>
+  );
+}
+
 function CleanLogsModal({
   channels,
   onLoadChannels,
@@ -2001,7 +2023,6 @@ function CleanLogsModal({
     if (channels.length === 0) onLoadChannels();
   }, [channels.length, onLoadChannels]);
 
-  const inputCls = "w-full px-3 py-2 text-sm rounded-lg border border-slate-200 focus:outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 bg-white";
   const tabCls = (active: boolean) =>
     `flex-1 rounded-lg px-4 py-2 text-sm font-medium transition-all ${active ? "bg-white text-slate-900 shadow-sm" : "text-slate-500 hover:text-slate-700"}`;
 
@@ -2018,9 +2039,9 @@ function CleanLogsModal({
         </div>
 
         {tab === "logs" ? (
-          <CleanLogsForm inputCls={inputCls} channels={channels} onConfirm={onConfirmLogs} />
+          <CleanLogsForm channels={channels} onConfirm={onConfirmLogs} />
         ) : (
-          <CleanChannelForm inputCls={inputCls} channels={channels} onConfirm={onConfirmChannel} />
+          <CleanChannelForm channels={channels} onConfirm={onConfirmChannel} />
         )}
 
         <div className="mt-5">
@@ -2033,11 +2054,9 @@ function CleanLogsModal({
 
 // 全局日志表单(全局维度:时间 + 请求结果 + 可选目标渠道)。
 function CleanLogsForm({
-  inputCls,
   channels,
   onConfirm,
 }: {
-  inputCls: string;
   channels: Channel[];
   onConfirm: (input: DeleteLogsInput) => void;
 }) {
@@ -2060,40 +2079,40 @@ function CleanLogsForm({
     <div className="space-y-3">
       <div>
         <label className="mb-1 block text-xs font-medium text-slate-600">时间范围</label>
-        <select value={retention} onChange={e => setRetention(e.target.value)} className={inputCls}>
+        <ModalSelect value={retention} onChange={e => setRetention(e.target.value)}>
           <option value="">清理全部日志</option>
           <option value={1}>保留最近 1 天（清理更早的）</option>
           <option value={7}>保留最近 7 天（清理更早的）</option>
           <option value={30}>保留最近 30 天（清理更早的）</option>
           <option value={90}>保留最近 90 天（清理更早的）</option>
-        </select>
+        </ModalSelect>
       </div>
       <div>
         <label className="mb-1 block text-xs font-medium text-slate-600">请求结果（可选）</label>
-        <select value={isSuccess} onChange={e => setIsSuccess(e.target.value)} className={inputCls}>
+        <ModalSelect value={isSuccess} onChange={e => setIsSuccess(e.target.value)}>
           <option value="">全部结果</option>
           <option value="success">仅成功（2xx）</option>
           <option value="failed">仅失败（非 2xx）</option>
-        </select>
+        </ModalSelect>
       </div>
       <div>
         <label className="mb-1 block text-xs font-medium text-slate-600">目标渠道（可选）</label>
-        <select value={channelId} onChange={e => setChannelId(e.target.value)} className={inputCls}>
+        <ModalSelect value={channelId} onChange={e => setChannelId(e.target.value)}>
           <option value="">全部渠道</option>
           {channels.map(ch => (
             <option key={ch.id} value={ch.id}>{ch.name}（{ch.id}）</option>
           ))}
-        </select>
+        </ModalSelect>
       </div>
       <label className="flex items-start gap-2 rounded-xl border border-slate-200 bg-slate-50 px-3 py-2.5 cursor-pointer">
         <input type="checkbox" checked={clearStats} onChange={e => setClearStats(e.target.checked)} className="mt-0.5" />
         <span className="text-sm">
           <span className="font-medium text-slate-800">同时清除对应的历史统计数据</span>
-          <span className="block text-xs text-red-500">默认不清除；勾选后对应时间段的调用量与 Token 统计将不可恢复。</span>
+          <span className="block text-xs text-destructive">默认不清除；勾选后对应时间段的调用量与 Token 统计将不可恢复。</span>
         </span>
       </label>
 
-      <button onClick={submit} className="w-full rounded-lg bg-red-500 px-4 py-2 text-sm font-medium text-white hover:bg-red-600">
+      <button onClick={submit} className="w-full action-primary justify-center">
         下一步：预览影响
       </button>
     </div>
@@ -2102,11 +2121,9 @@ function CleanLogsForm({
 
 // 渠道清理表单(按渠道维度:清日志 / 清统计 / 重置失败计数)。
 function CleanChannelForm({
-  inputCls,
   channels,
   onConfirm,
 }: {
-  inputCls: string;
   channels: Channel[];
   onConfirm: (input: CleanupChannelInput) => void;
 }) {
@@ -2133,22 +2150,22 @@ function CleanChannelForm({
     <div className="space-y-3">
       <div>
         <label className="mb-1 block text-xs font-medium text-slate-600">目标渠道</label>
-        <select value={channelId} onChange={e => setChannelId(e.target.value)} className={inputCls}>
+        <ModalSelect value={channelId} onChange={e => setChannelId(e.target.value)}>
           <option value="">请选择渠道…</option>
           {channels.map(ch => (
             <option key={ch.id} value={ch.id}>{ch.name}（{ch.id}）</option>
           ))}
-        </select>
+        </ModalSelect>
       </div>
       <div>
         <label className="mb-1 block text-xs font-medium text-slate-600">时间范围</label>
-        <select value={retention} onChange={e => setRetention(e.target.value)} className={inputCls}>
+        <ModalSelect value={retention} onChange={e => setRetention(e.target.value)}>
           <option value="">全部时间</option>
           <option value={1}>保留最近 1 天（清理更早的）</option>
           <option value={7}>保留最近 7 天（清理更早的）</option>
           <option value={30}>保留最近 30 天（清理更早的）</option>
           <option value={90}>保留最近 90 天（清理更早的）</option>
-        </select>
+        </ModalSelect>
       </div>
       <div className="space-y-2">
         <label className="flex items-start gap-2 rounded-xl border border-slate-200 bg-slate-50 px-3 py-2.5 cursor-pointer">
@@ -2162,7 +2179,7 @@ function CleanChannelForm({
           <input type="checkbox" checked={clearStats} onChange={e => setClearStats(e.target.checked)} className="mt-0.5" />
           <span className="text-sm">
             <span className="font-medium text-slate-800">清除该渠道的统计数据</span>
-            <span className="block text-xs text-red-500">删除该渠道的调用量、成功/失败、Token 统计，不可恢复。</span>
+            <span className="block text-xs text-destructive">删除该渠道的调用量、成功/失败、Token 统计，不可恢复。</span>
           </span>
         </label>
         <label className="flex items-start gap-2 rounded-xl border border-slate-200 bg-slate-50 px-3 py-2.5 cursor-pointer">
@@ -2177,7 +2194,7 @@ function CleanChannelForm({
       <button
         onClick={submit}
         disabled={!canSubmit}
-        className="w-full rounded-lg bg-red-500 px-4 py-2 text-sm font-medium text-white hover:bg-red-600 disabled:opacity-40"
+        className="w-full action-primary justify-center disabled:opacity-40"
       >
         下一步：预览影响
       </button>
@@ -2206,7 +2223,7 @@ function CleanConfirmModal({
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/30 backdrop-blur-sm" onClick={running ? undefined : onCancel}>
       <div className="surface rounded-2xl p-6 max-w-md w-full mx-4" onClick={e => e.stopPropagation()}>
-        <h3 className="text-lg font-semibold mb-1 text-red-600">确认清理？</h3>
+        <h3 className="text-lg font-semibold mb-1 text-destructive">确认清理？</h3>
         <p className="text-sm text-muted-foreground mb-4">此操作不可撤销</p>
 
         <div className="space-y-2 rounded-xl border border-slate-200 bg-slate-50 p-4 text-sm">
@@ -2254,7 +2271,7 @@ function CleanConfirmModal({
 
         <div className="mt-5 flex gap-2">
           <button onClick={onCancel} disabled={running} className="flex-1 action-secondary justify-center">取消</button>
-          <button onClick={onConfirm} disabled={running} className="flex-1 rounded-lg bg-red-500 px-4 py-2 text-sm font-medium text-white hover:bg-red-600 disabled:opacity-50">
+          <button onClick={onConfirm} disabled={running} className="flex-1 action-destructive justify-center">
             {running ? "清理中…" : "确认清理"}
           </button>
         </div>
