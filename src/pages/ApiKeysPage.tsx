@@ -177,7 +177,7 @@ export function ApiKeysPage() {
                   {/* 使用量统计 — 仪表盘风格 */}
                   {stats[k.id] && (() => {
                     const s = stats[k.id];
-                    const successRate = s.total_calls > 0 ? (s.success_calls / s.total_calls * 100) : 0;
+                    const successRate = (s.success_calls + s.failed_calls) > 0 ? (s.success_calls / (s.success_calls + s.failed_calls) * 100) : 0;
                     const cacheRate = s.prompt_tokens > 0 ? (s.cached_tokens / s.prompt_tokens * 100) : 0;
                     return (
                       <div className="mt-4 rounded-2xl border border-slate-200/60 bg-gradient-to-br from-slate-50/80 to-white p-4">

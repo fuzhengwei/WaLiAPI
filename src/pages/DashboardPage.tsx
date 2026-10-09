@@ -24,6 +24,8 @@ import {
   Network,
   Puzzle,
   DatabaseZap,
+  ChevronDown,
+  ChevronUp,
 } from "lucide-react";
 
 export function DashboardPage() {
@@ -444,6 +446,11 @@ const MODEL_COLORS = [
 
 function ModelDistributionTable({ data }: { data: ModelStats[] }) {
   const maxTokens = Math.max(...data.map(d => d.total_tokens), 1);
+  // 默认展示 8 个模型,更多折叠;模型少时无需展开。
+  const COLLAPSED_ROWS = 8;
+  const [expanded, setExpanded] = useState(false);
+  const visible = expanded ? data : data.slice(0, COLLAPSED_ROWS);
+  const canExpand = data.length > COLLAPSED_ROWS;
 
   return (
     <section className="surface rounded-[20px] p-6">
@@ -476,7 +483,7 @@ function ModelDistributionTable({ data }: { data: ModelStats[] }) {
               </tr>
             </thead>
             <tbody>
-              {data.map((row, i) => (
+              {visible.map((row, i) => (
                 <tr key={row.model} className="border-b border-slate-100 last:border-0">
                   <td className="py-2.5 pr-4">
                     <div className="flex items-center gap-2">
@@ -518,6 +525,28 @@ function ModelDistributionTable({ data }: { data: ModelStats[] }) {
               ))}
             </tbody>
           </table>
+
+          {/* 展开/收起按钮:模块底部居中,淡色边框 hover 强调色(主题审美) */}
+          {canExpand && (
+            <div className="mt-4 flex justify-center">
+              <button
+                onClick={() => setExpanded(e => !e)}
+                className="flex items-center gap-1.5 rounded-lg border border-slate-200 px-4 py-1.5 text-xs font-medium text-slate-500 transition-all hover:border-blue-400 hover:text-blue-600"
+              >
+                {expanded ? (
+                  <>
+                    <ChevronUp size={13} />
+                    收起
+                  </>
+                ) : (
+                  <>
+                    <ChevronDown size={13} />
+                    展开更多（{data.length - COLLAPSED_ROWS}）
+                  </>
+                )}
+              </button>
+            </div>
+          )}
         </div>
       )}
     </section>
@@ -959,10 +988,15 @@ function TokenTrendChart({
           <div
             className="pointer-events-none absolute z-10 min-w-[180px] max-w-xs rounded-xl border border-slate-200 bg-white/95 p-3 shadow-xl backdrop-blur-sm"
             style={{
-              left: Math.min(
-                hoverBar.x + 16,
-                containerW - 220,
-              ),
+              // 浮窗边缘翻转逻辑:默认显示在柱子右侧;若右侧空间不足
+              // (鼠标位置 + 浮窗预估宽度超出容器),翻转到柱子左侧;
+              // 两侧均不足时钳制在容器内,保证完整显示不溢出视域。
+              left: (() => {
+                const w = 220; // 浮窗预估宽度(min-w 180 + 内边距余量)
+                const preferRight = hoverBar.x + 16 + w <= containerW;
+                const left = preferRight ? hoverBar.x + 16 : hoverBar.x - 16 - w;
+                return Math.max(8, Math.min(left, containerW - w - 8));
+              })(),
               top: Math.max(hoverBar.y - 90, 8),
             }}
           >

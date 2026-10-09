@@ -135,7 +135,27 @@ export const logApi = {
   deleteMany: (input: DeleteLogsInput) => invoke<DeleteLogsReport>("delete_logs", { input }),
   /** 独立清除历史统计数据(不删日志)。 */
   clearStats: (input: DeleteLogsInput) => invoke<number>("clear_usage_stats", { input }),
+  /** 按渠道维度组合清理(渠道清理 tab):清日志/清统计/重置失败计数,dry_run 预览。 */
+  cleanupChannel: (input: CleanupChannelInput) => invoke<CleanupChannelReport>("cleanup_channel", { input }),
 };
+
+export interface CleanupChannelInput {
+  channel_id: string;
+  before_date?: string;
+  after_date?: string;
+  keep_recent_days?: number;
+  clear_logs?: boolean;
+  clear_stats?: boolean;
+  reset_fail?: boolean;
+  dry_run?: boolean;
+}
+
+export interface CleanupChannelReport {
+  dry_run: boolean;
+  matched_logs: number;
+  matched_stats: number;
+  reset_fail_rows: number;
+}
 
 export interface DeleteLogsInput {
   before_date?: string;

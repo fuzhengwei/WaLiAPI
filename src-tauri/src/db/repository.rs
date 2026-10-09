@@ -2221,6 +2221,84 @@ impl Repository {
         Ok(r.rows_affected())
     }
 
+    /// 按渠道维度组合清理(「渠道清理」tab,Task 渠道清理):
+    /// - `clear_logs`: 删除该渠道日志(级联 findings/segments),不动统计;
+    /// - `clear_stats`: 删除该渠道 usage_stats 行,不动日志;
+    /// - `reset_fail`: 仅把该渠道 usage_stats 的 fail_count 置 0(请求/成功/token 不动),
+    ///   使渠道成功率恢复到 ~100%;
+    /// 三者可按需组合;dry_run=true 只返回各动作的匹配行数,不执行任何删除。
+    /// 返回 `(matched_logs, matched_stats, reset_fail_rows)`。
+    pub async fn cleanup_channel(
+        &self,
+        input: &crate::commands::log::CleanupChannelInput,
+        dry_run: bool,
+    ) -> Result<(u64, u64, u64), sqlx::Error> {
+        // 把渠道清理条件映射成既有 DeleteLogsInput 的条件构造器可复用的形式:
+        // 时间门限 + channel_id,其余为空。
+        let delete_input = crate::commands::log::DeleteLogsInput {
+            before_date: input.before_date.clone(),
+            after_date: input.after_date.clone(),
+            keep_recent_days: input.keep_recent_days,
+            channel_id: Some(input.channel_id.clone()),
+            ..Default::default()
+        };
+
+        let (log_where, log_bind) = build_log_delete_where(&delete_input);
+        let (stats_where, stats_bind) = build_stats_delete_where(&delete_input);
+
+        if dry_run {
+            let matched_logs = if input.clear_logs.unwrap_or(false) {
+                Self::count_matching(&self.pool, "request_logs", &log_where, &log_bind).await?
+            } else {
+                0
+            };
+            let matched_stats = if input.clear_stats.unwrap_or(false) {
+                Self::count_matching(&self.pool, "usage_stats", &stats_where, &stats_bind).await?
+            } else {
+                0
+            };
+            let reset_fail_rows = if input.reset_fail.unwrap_or(false) {
+                let sql = format!(
+                    "SELECT COUNT(*) FROM usage_stats WHERE {stats_where} AND fail_count > 0"
+                );
+                let mut q = sqlx::query(&sql);
+                for b in &stats_bind {
+                    q = q.bind(b.as_deref());
+                }
+                let n: i64 = q.fetch_one(&self.pool).await?.get(0);
+                n.max(0) as u64
+            } else {
+                0
+            };
+            return Ok((matched_logs, matched_stats, reset_fail_rows));
+        }
+
+        // 执行阶段:三个动作各按需执行,统计与日志互不影响。
+        let mut matched_logs = 0u64;
+        let mut matched_stats = 0u64;
+        let mut reset_fail_rows = 0u64;
+
+        if input.clear_logs.unwrap_or(false) {
+            matched_logs = self.delete_logs_matching(&delete_input, false).await?.0;
+        }
+        if input.clear_stats.unwrap_or(false) {
+            matched_stats = self.clear_usage_stats_matching(&delete_input).await?;
+        }
+        if input.reset_fail.unwrap_or(false) {
+            let sql = format!(
+                "UPDATE usage_stats SET fail_count = 0 WHERE {stats_where} AND fail_count > 0"
+            );
+            let mut q = sqlx::query(&sql);
+            for b in &stats_bind {
+                q = q.bind(b);
+            }
+            let r = q.execute(&self.pool).await?;
+            reset_fail_rows = r.rows_affected();
+        }
+
+        Ok((matched_logs, matched_stats, reset_fail_rows))
+    }
+
     async fn count_matching(
         pool: &SqlitePool,
         table: &str,

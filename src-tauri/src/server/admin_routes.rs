@@ -589,6 +589,13 @@ async fn dispatch(shared: &SharedState, cmd: &str, args: Value) -> Result<Value,
                     .map_err(|e| format!("参数 input 无效: {e}"))?;
             to_json(commands::log::clear_usage_stats(input, state).await)
         }
+        // 渠道清理(按渠道维度:清日志/清统计/重置失败计数,dry_run 可预览)。
+        "cleanup_channel" => {
+            let input: commands::log::CleanupChannelInput =
+                serde_json::from_value(arg(&args, "input")?)
+                    .map_err(|e| format!("参数 input 无效: {e}"))?;
+            to_json(commands::log::cleanup_channel(input, state).await)
+        }
         // 历史 499 日志一次性修复：默认 dry-run，input.apply=true 才写库。
         // input 缺省为 {}，让不带参数直接调用也能拿到报告。
         "repair_stream_cancel_logs" => {

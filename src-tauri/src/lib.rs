@@ -354,6 +354,7 @@ pub fn run() {
             commands::log::delete_all_logs,
             commands::log::delete_logs,
             commands::log::clear_usage_stats,
+            commands::log::cleanup_channel,
             commands::log::get_log_stats,
             commands::prompt_template::list_prompt_templates,
             commands::prompt_template::create_prompt_template,
