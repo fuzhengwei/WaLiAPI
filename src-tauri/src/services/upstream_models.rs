@@ -64,6 +64,7 @@ pub async fn fetch_upstream_models(
         "anthropic" => ("/models", parse_openai_list),
         "ollama" => ("api/tags", parse_ollama_tags),
         _ if identity.provider == "kilo" => ("models", parse_kilo_free_list),
+        _ if identity.provider == "opencode" => ("models", parse_opencode_free_list),
         _ => ("models", parse_openai_list),
     };
     let url = ensure_scheme(&final_url(&base_url, path, None));
@@ -156,6 +157,22 @@ fn parse_kilo_free_list(body: &Value) -> Vec<String> {
             arr.iter()
                 .filter(|m| m.get("isFree").and_then(Value::as_bool) == Some(true))
                 .filter_map(|m| m.get("id").and_then(Value::as_str).map(String::from))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// OpenCode 免费车道 `/models`：只保留 `-free` 后缀的模型。
+/// 上游列表返回网关全目录（实测 86 个，含 claude/gpt/gemini 等），但非
+/// `-free` 模型免 Key 调用必 401 `AuthError`；`-free` 是免费可用的必要条件
+/// （个别 `-free` 模型仍可能因地区 403，无法静态预判）。
+fn parse_opencode_free_list(body: &Value) -> Vec<String> {
+    body.get("data")
+        .and_then(Value::as_array)
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|m| m.get("id").and_then(Value::as_str).map(String::from))
+                .filter(|id| id.ends_with("-free"))
                 .collect()
         })
         .unwrap_or_default()
@@ -351,6 +368,27 @@ mod tests {
         assert_eq!(
             r.models,
             vec!["kilo-auto/free", "minimax/minimax-m3.1-flash:free"]
+        );
+    }
+
+    #[tokio::test]
+    async fn opencode_sync_keeps_only_free_suffix_models() {
+        // OpenCode 上游 /models 返回网关全目录；非 -free 后缀模型免 Key 必 401。
+        let m = start_mock(json!({"data": [
+            {"id": "deepseek-v4.1-flash-free"},
+            {"id": "glm-5.3-flash-free"},
+            {"id": "kimi-k3"},
+            {"id": "claude-opus-5-5"},
+            {"id": "test"},
+            {"id": "big-pickle"}
+        ]}))
+        .await;
+        let mut input = draft("openai", &m.addr);
+        input.provider = Some("opencode".to_string());
+        let r = fetch_upstream_models(&input, "public", 5).await.unwrap();
+        assert_eq!(
+            r.models,
+            vec!["deepseek-v4.1-flash-free", "glm-5.3-flash-free"]
         );
     }
 

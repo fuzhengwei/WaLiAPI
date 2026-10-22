@@ -29,8 +29,8 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{LazyLock, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use serde_json::{json, Map, Value};
 use futures_util::StreamExt;
+use serde_json::{json, Map, Value};
 
 /// 门禁指纹的客户端 User-Agent：整串匹配，任何前缀/后缀都会失效。
 pub const CLIENT_UA: &str = "opencode/latest/2.0.26/cli";
@@ -52,7 +52,10 @@ static SEQ: AtomicUsize = AtomicUsize::new(0);
 
 /// 渲染 `bytes` 为恰好 `width` 个 base62 字符（大端，逐字节取模，非严格大数）。
 fn base62_from(bytes: &[u8]) -> String {
-    bytes.iter().map(|b| BASE62[(*b % 62) as usize] as char).collect()
+    bytes
+        .iter()
+        .map(|b| BASE62[(*b % 62) as usize] as char)
+        .collect()
 }
 
 /// 铸造一个门禁形状的规范会话 id：`~(ts_ms * 0x1000 + counter)` 的 48 位取反
@@ -90,9 +93,9 @@ fn next_session(channel_id: &str) -> String {
         LazyLock::new(|| Mutex::new(HashMap::new()));
     static CURSOR: AtomicUsize = AtomicUsize::new(0);
     let mut pools = POOLS.lock().expect("session pool poisoned");
-    let pool = pools.entry(channel_id.to_string()).or_insert_with(|| {
-        (0..SESSION_POOL_SIZE).map(|_| mint_session_id()).collect()
-    });
+    let pool = pools
+        .entry(channel_id.to_string())
+        .or_insert_with(|| (0..SESSION_POOL_SIZE).map(|_| mint_session_id()).collect());
     let idx = CURSOR.fetch_add(1, Ordering::Relaxed) % pool.len();
     pool[idx].clone()
 }
@@ -115,7 +118,11 @@ pub fn gateway_headers(channel_id: &str, stream: bool) -> Vec<(String, String)> 
         ("x-opencode-project".to_string(), "global".to_string()),
         (
             "accept".to_string(),
-            if stream { "text/event-stream".to_string() } else { "*/*".to_string() },
+            if stream {
+                "text/event-stream".to_string()
+            } else {
+                "*/*".to_string()
+            },
         ),
     ]
 }
@@ -205,7 +212,11 @@ fn carries_fingerprint_definition(tool: &Value, name: &str) -> bool {
 
 /// 注入工具时附带的占位提示（压住模型对注入项的调用，不误伤调用方自己的工具）。
 fn placeholder_note(names: &[&str]) -> String {
-    let list = names.iter().map(|n| format!("`{n}`")).collect::<Vec<_>>().join(" or ");
+    let list = names
+        .iter()
+        .map(|n| format!("`{n}`"))
+        .collect::<Vec<_>>()
+        .join(" or ");
     if names.len() > 1 {
         format!("Do not call the {list} tools; they are placeholders that do nothing. Use the other tools you have been given instead.")
     } else {
@@ -262,14 +273,26 @@ pub fn apply_fingerprint(body: &mut Value) -> AliasMap {
     let taken: Vec<String> = body
         .get("tools")
         .and_then(Value::as_array)
-        .map(|tools| tools.iter().map(tool_name_of).filter(|n| !n.is_empty()).map(str::to_string).collect())
+        .map(|tools| {
+            tools
+                .iter()
+                .map(tool_name_of)
+                .filter(|n| !n.is_empty())
+                .map(str::to_string)
+                .collect()
+        })
         .unwrap_or_default();
 
     // 先改写调用方同名但定义不同的工具，再注入缺失的门禁定义。
     let mut out: Vec<Value> = Vec::new();
     let mut seen: Vec<String> = Vec::new();
     let mut present: Vec<String> = Vec::new();
-    for tool in body.get("tools").and_then(Value::as_array).cloned().unwrap_or_default() {
+    for tool in body
+        .get("tools")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default()
+    {
         let name = tool_name_of(&tool).to_string();
         if name != "read" && name != "shell" {
             out.push(tool);
@@ -498,11 +521,13 @@ pub fn aggregate_stream_body(bytes: &[u8]) -> Option<Value> {
         let Ok(frame) = serde_json::from_str::<Value>(payload) else {
             continue;
         };
-        let base = base.get_or_insert_with(|| json!({
-            "object": "chat.completion",
-            "created": 0,
-            "choices": [],
-        }));
+        let base = base.get_or_insert_with(|| {
+            json!({
+                "object": "chat.completion",
+                "created": 0,
+                "choices": [],
+            })
+        });
         merge_stream_frame(base, frame);
     }
     base
@@ -537,7 +562,9 @@ fn merge_stream_frame(base: &mut Value, frame: Value) {
     for choice in choices {
         let index = choice.get("index").and_then(Value::as_u64).unwrap_or(0) as usize;
         while base_choices.len() <= index {
-            base_choices.push(json!({ "index": base_choices.len(), "message": {}, "finish_reason": Value::Null }));
+            base_choices.push(
+                json!({ "index": base_choices.len(), "message": {}, "finish_reason": Value::Null }),
+            );
         }
         merge_stream_choice(&mut base_choices[index], choice);
     }
@@ -592,7 +619,11 @@ fn merge_stream_choice(base_choice: &mut Value, choice: &Value) {
 }
 
 /// 拼接一段流式文本（null/非字符串帧忽略）。
-fn append_stream_text(message: &mut serde_json::Map<String, Value>, key: &str, value: Option<&Value>) {
+fn append_stream_text(
+    message: &mut serde_json::Map<String, Value>,
+    key: &str,
+    value: Option<&Value>,
+) {
     let Some(text) = value.and_then(Value::as_str) else {
         return;
     };
@@ -610,7 +641,12 @@ fn merge_stream_tool_call(base_call: &mut Value, call: &Value) {
         return;
     };
     if let Some(id) = call.get("id").and_then(Value::as_str) {
-        if obj.get("id").and_then(Value::as_str).unwrap_or("").is_empty() {
+        if obj
+            .get("id")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .is_empty()
+        {
             obj.insert("id".into(), Value::String(id.to_string()));
         }
     }
@@ -627,7 +663,12 @@ fn merge_stream_tool_call(base_call: &mut Value, call: &Value) {
         return;
     };
     if let Some(name) = function.get("name").and_then(Value::as_str) {
-        if base_function.get("name").and_then(Value::as_str).unwrap_or("").is_empty() {
+        if base_function
+            .get("name")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .is_empty()
+        {
             base_function.insert("name".into(), Value::String(name.to_string()));
         }
     }
@@ -657,15 +698,23 @@ mod tests {
         let tenth = hex.as_bytes()[9] as char;
         assert!(('c'..='f').contains(&tenth), "{id}");
         let tail = &id[16..];
-        assert!(tail.chars().all(|c| BASE62.iter().any(|b| *b as char == c)), "{id}");
+        assert!(
+            tail.chars().all(|c| BASE62.iter().any(|b| *b as char == c)),
+            "{id}"
+        );
     }
 
     #[test]
     fn session_pool_rotates_stable_ids() {
         let a = next_session("pool-test-channel");
-        let ids: std::collections::HashSet<String> =
-            (0..SESSION_POOL_SIZE * 2).map(|_| next_session("pool-test-channel")).collect();
-        assert_eq!(ids.len(), SESSION_POOL_SIZE, "池应稳定为 {SESSION_POOL_SIZE} 个会话");
+        let ids: std::collections::HashSet<String> = (0..SESSION_POOL_SIZE * 2)
+            .map(|_| next_session("pool-test-channel"))
+            .collect();
+        assert_eq!(
+            ids.len(),
+            SESSION_POOL_SIZE,
+            "池应稳定为 {SESSION_POOL_SIZE} 个会话"
+        );
         assert!(ids.contains(&a));
     }
 
@@ -716,7 +765,9 @@ mod tests {
             .iter()
             .map(|t| t["function"]["name"].as_str().unwrap())
             .collect();
-        assert!(names.contains(&alias.as_str()) && names.contains(&"read") && names.contains(&"shell"));
+        assert!(
+            names.contains(&alias.as_str()) && names.contains(&"read") && names.contains(&"shell")
+        );
         assert_eq!(tools.len(), 3);
         // 占位提示插在最前，assistant 消息移到 messages[2]。
         assert_eq!(body["messages"][0]["role"], "system");
@@ -738,7 +789,10 @@ mod tests {
         let map = apply_fingerprint(&mut body);
         assert!(map.is_empty());
         assert_eq!(body["tools"].as_array().unwrap().len(), 2);
-        assert_eq!(body["messages"][0]["content"], snapshot["messages"][0]["content"]);
+        assert_eq!(
+            body["messages"][0]["content"],
+            snapshot["messages"][0]["content"]
+        );
     }
 
     #[test]

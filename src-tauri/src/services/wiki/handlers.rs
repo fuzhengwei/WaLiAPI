@@ -489,7 +489,9 @@ fn expand_image_refs(text: &str, assets: &[(String, String)], base_url: Option<&
     let marker = "/api/wiki/projects/";
     let mut scan = 0usize;
     while scan < out.len() {
-        let Some(pos) = out[scan..].find(marker) else { break };
+        let Some(pos) = out[scan..].find(marker) else {
+            break;
+        };
         let abs_pos = scan + pos;
         let head = &out[..abs_pos];
         let scheme_start = ["http://", "https://"]
@@ -1077,9 +1079,7 @@ mod tests {
         // 「湖南省政务数据共享网站」页含 `门户地址：` + `http://59.232.3.14:18080/portal/home`
         // 与图片链接；marker 前最近分隔符是中文冒号 `：`（UTF-8 3 字节）。
         // 旧实现用 `p + 1` 前进 1 字节，会切在 `：` 中间 → panic: byte index is not a char boundary
-        let real = format!(
-            "**门户地址**：`http://59.232.3.14:18080/portal/home`\n\n![x]({rel})"
-        );
+        let real = format!("**门户地址**：`http://59.232.3.14:18080/portal/home`\n\n![x]({rel})");
         let out = absolutize_asset_urls(&real, Some(base));
         assert!(out.contains(rel), "{out}");
         assert!(out.contains(&format!("{base}{rel}")), "{out}");
@@ -1134,7 +1134,10 @@ mod tests {
         let assets = vec![("page-2-1.jpg".to_string(), rel.clone())];
         let out = expand_image_refs(&text, &assets, Some(base));
         assert!(!out.contains("![page-2-1.jpg]"), "嵌套损坏: {out}");
-        assert!(out.contains("![page 2 screenshot 1]("), "完整图片被破坏: {out}");
+        assert!(
+            out.contains("![page 2 screenshot 1]("),
+            "完整图片被破坏: {out}"
+        );
         // 裸文件名（非 URL 内）仍应被补全
         let bare = format!("见附件 {base}{rel} 或直接查看 page-2-1.jpg");
         let out2 = expand_image_refs(&bare, &assets, Some(base));

@@ -1074,14 +1074,18 @@ async fn dispatch(shared: &SharedState, cmd: &str, args: Value) -> Result<Value,
             to_json(commands::wiki::pick_wiki_import_file(app.clone()).await)
         }
         #[cfg(not(feature = "desktop-ui"))]
-        "pick_wiki_import_file" => Err("文件选择仅桌面版可用，请在浏览器中选择备份文件".to_string()),
-        "rebuild_wiki_index" => to_json(commands::wiki::rebuild_wiki_index(
-            state,
-            arg(&args, "projectId")?,
-            arg(&args, "mode")?,
-            arg(&args, "model")?,
-        )
-        .await),
+        "pick_wiki_import_file" => {
+            Err("文件选择仅桌面版可用，请在浏览器中选择备份文件".to_string())
+        }
+        "rebuild_wiki_index" => to_json(
+            commands::wiki::rebuild_wiki_index(
+                state,
+                arg(&args, "projectId")?,
+                arg(&args, "mode")?,
+                arg(&args, "model")?,
+            )
+            .await,
+        ),
 
         // ── 应用配置（容器内通常全部不可用，由前端置灰）──
         "get_app_configs" => to_json(commands::app_config::get_app_configs(state).await),

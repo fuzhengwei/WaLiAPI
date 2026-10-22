@@ -100,9 +100,7 @@ pub fn responses_to_openai(
     // answers (finish_reason=length), and clients such as Codex never send the
     // field at all. The cap also budgets reasoning tokens, so a conservative
     // constant truncates thinking-heavy turns even earlier.
-    let max_tokens = body
-        .get("max_output_tokens")
-        .and_then(|m| m.as_u64());
+    let max_tokens = body.get("max_output_tokens").and_then(|m| m.as_u64());
 
     let stream = body
         .get("stream")

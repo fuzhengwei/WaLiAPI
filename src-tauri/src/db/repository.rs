@@ -167,13 +167,12 @@ impl Repository {
         protocol: &str,
         provider: &str,
     ) -> Result<bool, sqlx::Error> {
-        let row: (i64,) = sqlx::query_as(
-            "SELECT COUNT(*) FROM channels WHERE protocol = ? AND provider = ?",
-        )
-        .bind(protocol)
-        .bind(provider)
-        .fetch_one(&self.pool)
-        .await?;
+        let row: (i64,) =
+            sqlx::query_as("SELECT COUNT(*) FROM channels WHERE protocol = ? AND provider = ?")
+                .bind(protocol)
+                .bind(provider)
+                .fetch_one(&self.pool)
+                .await?;
         Ok(row.0 > 0)
     }
 

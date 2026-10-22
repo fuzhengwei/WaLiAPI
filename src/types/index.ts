@@ -661,6 +661,12 @@ export type ChannelProvider =
   | "mistral"
   | "nvidia_nim"
   | "openrouter"
+  | "modelscope"
+  | "github_models"
+  | "siliconflow"
+  | "huggingface"
+  | "sambanova"
+  | "cohere"
   | "anthropic"
   | "ollama"
   | "custom";

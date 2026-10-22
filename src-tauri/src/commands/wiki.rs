@@ -532,16 +532,11 @@ pub async fn pick_wiki_export_dir(app: tauri::AppHandle) -> Result<Option<String
         use tauri_plugin_dialog::DialogExt;
 
         let (tx, rx) = tokio::sync::oneshot::channel();
-        app.dialog()
-            .file()
-            .pick_folder(move |folder_path| {
-                let result = folder_path.and_then(|f| {
-                    f.into_path()
-                        .ok()
-                        .map(|p| p.to_string_lossy().to_string())
-                });
-                let _ = tx.send(result);
-            });
+        app.dialog().file().pick_folder(move |folder_path| {
+            let result = folder_path
+                .and_then(|f| f.into_path().ok().map(|p| p.to_string_lossy().to_string()));
+            let _ = tx.send(result);
+        });
         let result = rx.await.map_err(|_| "对话框取消".to_string())?;
         Ok(result)
     }
@@ -564,11 +559,8 @@ pub async fn pick_wiki_import_file(app: tauri::AppHandle) -> Result<Option<Strin
             .file()
             .add_filter("Wiki 备份", &["zip"])
             .pick_file(move |file_path| {
-                let result = file_path.and_then(|f| {
-                    f.into_path()
-                        .ok()
-                        .map(|p| p.to_string_lossy().to_string())
-                });
+                let result = file_path
+                    .and_then(|f| f.into_path().ok().map(|p| p.to_string_lossy().to_string()));
                 let _ = tx.send(result);
             });
         let result = rx.await.map_err(|_| "对话框取消".to_string())?;
@@ -589,13 +581,10 @@ pub async fn rebuild_wiki_index(
     let pool = state.db.pool.clone();
     let log_rebuilt = rebuild::ensure_log_rebuilt(&pool, &project_id).await?;
     let page_count = match mode.as_str() {
-        "llm" => rebuild::rebuild_index_with_llm(
-            &state.settings,
-            &pool,
-            &project_id,
-            model.as_deref(),
-        )
-        .await?,
+        "llm" => {
+            rebuild::rebuild_index_with_llm(&state.settings, &pool, &project_id, model.as_deref())
+                .await?
+        }
         _ => rebuild::rebuild_index_programmatic(&pool, &project_id).await?,
     };
     Ok(serde_json::json!({

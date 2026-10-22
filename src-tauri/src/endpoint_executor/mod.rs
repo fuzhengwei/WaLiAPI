@@ -1241,10 +1241,11 @@ pub async fn dispatch_executor(
     safe_headers: &[(String, String)],
     query: Option<&str>,
 ) -> AttemptResult {
-    let (resp, opencode_aliases) = match send_request(attempt, channel, identity, safe_headers, query).await {
-        Ok((r, aliases)) => (r, aliases),
-        Err(f) => return AttemptResult::Failure(f),
-    };
+    let (resp, opencode_aliases) =
+        match send_request(attempt, channel, identity, safe_headers, query).await {
+            Ok((r, aliases)) => (r, aliases),
+            Err(f) => return AttemptResult::Failure(f),
+        };
     let status = resp.status().as_u16();
     if status >= 400 {
         let retry_after = retry_after_from_headers(resp.headers());
@@ -1304,57 +1305,57 @@ pub async fn dispatch_executor(
                     }
                 }
             } else {
-            // A 2xx that fails to parse is either non-JSON content (HTML/plain
-            // text) or an undecoded compressed body (gzip etc.) — the distinction
-            // only shows up in the bytes and headers, so log them before failing.
-            let preview = String::from_utf8_lossy(&bytes[..bytes.len().min(200)]).to_string();
-            if crate::services::knowledge::budget::current().is_some() {
-                tracing::warn!(status, content_encoding = ?content_encoding, content_type = ?content_type,
+                // A 2xx that fails to parse is either non-JSON content (HTML/plain
+                // text) or an undecoded compressed body (gzip etc.) — the distinction
+                // only shows up in the bytes and headers, so log them before failing.
+                let preview = String::from_utf8_lossy(&bytes[..bytes.len().min(200)]).to_string();
+                if crate::services::knowledge::budget::current().is_some() {
+                    tracing::warn!(status, content_encoding = ?content_encoding, content_type = ?content_type,
                     body_len = bytes.len(), "RAG 上游响应不是有效 JSON");
-            } else {
-                tracing::warn!(
-                    url = %final_url(
-                        &attempt.native_base_url,
-                        &endpoint_path(&attempt.upstream_protocol, &attempt.upstream_endpoint),
-                        query
-                    ),
-                    status = status,
-                    content_encoding = ?content_encoding,
-                    content_type = ?content_type,
-                    body_len = bytes.len(),
-                    body_preview = %preview,
-                    err = %e,
-                    "2xx upstream body failed JSON decode"
-                );
-            }
-            // Draft-test probes only: a gateway that ignores `stream:false` and
-            // ALWAYS returns SSE is still speaking the endpoint's protocol, so a
-            // probe must not fail it just because the body is SSE-framed rather
-            // than a single JSON document.  Extract the first `data:` JSON frame
-            // and treat that as the probe body.  Gating on the route_group (not
-            // content-type) keeps this robust against gateways that emit SSE
-            // under an `application/json` header.  Production requests never
-            // take this path (their route_group is not `draft_test/...`).
-            if attempt.route_group.starts_with("draft_test/") {
-                match first_sse_data_json(&bytes) {
-                    Some(v) => v,
-                    None => {
-                        return AttemptResult::Failure(undecodable_body(
-                            status,
-                            bytes.len(),
-                            content_type.as_deref(),
-                            e,
-                        ))
-                    }
+                } else {
+                    tracing::warn!(
+                        url = %final_url(
+                            &attempt.native_base_url,
+                            &endpoint_path(&attempt.upstream_protocol, &attempt.upstream_endpoint),
+                            query
+                        ),
+                        status = status,
+                        content_encoding = ?content_encoding,
+                        content_type = ?content_type,
+                        body_len = bytes.len(),
+                        body_preview = %preview,
+                        err = %e,
+                        "2xx upstream body failed JSON decode"
+                    );
                 }
-            } else {
-                return AttemptResult::Failure(undecodable_body(
-                    status,
-                    bytes.len(),
-                    content_type.as_deref(),
-                    e,
-                ));
-            }
+                // Draft-test probes only: a gateway that ignores `stream:false` and
+                // ALWAYS returns SSE is still speaking the endpoint's protocol, so a
+                // probe must not fail it just because the body is SSE-framed rather
+                // than a single JSON document.  Extract the first `data:` JSON frame
+                // and treat that as the probe body.  Gating on the route_group (not
+                // content-type) keeps this robust against gateways that emit SSE
+                // under an `application/json` header.  Production requests never
+                // take this path (their route_group is not `draft_test/...`).
+                if attempt.route_group.starts_with("draft_test/") {
+                    match first_sse_data_json(&bytes) {
+                        Some(v) => v,
+                        None => {
+                            return AttemptResult::Failure(undecodable_body(
+                                status,
+                                bytes.len(),
+                                content_type.as_deref(),
+                                e,
+                            ))
+                        }
+                    }
+                } else {
+                    return AttemptResult::Failure(undecodable_body(
+                        status,
+                        bytes.len(),
+                        content_type.as_deref(),
+                        e,
+                    ));
+                }
             }
         }
     };
@@ -1531,10 +1532,11 @@ pub async fn dispatch_stream_executor(
     safe_headers: &[(String, String)],
     query: Option<&str>,
 ) -> StreamAttemptResult {
-    let (resp, opencode_aliases) = match send_request(attempt, channel, identity, safe_headers, query).await {
-        Ok((r, aliases)) => (r, aliases),
-        Err(f) => return StreamAttemptResult::Failure(f),
-    };
+    let (resp, opencode_aliases) =
+        match send_request(attempt, channel, identity, safe_headers, query).await {
+            Ok((r, aliases)) => (r, aliases),
+            Err(f) => return StreamAttemptResult::Failure(f),
+        };
     let status = resp.status().as_u16();
     if status >= 400 {
         let retry_after = retry_after_from_headers(resp.headers());

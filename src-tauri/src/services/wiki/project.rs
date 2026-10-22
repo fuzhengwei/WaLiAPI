@@ -166,11 +166,7 @@ pub async fn write_file_atomic(full_path: &std::path::Path, content: &str) -> Re
         .file_name()
         .and_then(|n| n.to_str())
         .unwrap_or("wiki-file");
-    let tmp_path = full_path.with_file_name(format!(
-        ".{}.tmp-{}",
-        file_name,
-        std::process::id()
-    ));
+    let tmp_path = full_path.with_file_name(format!(".{}.tmp-{}", file_name, std::process::id()));
     fs::write(&tmp_path, content)
         .await
         .map_err(|e| format!("Failed to write temp file: {}", e))?;

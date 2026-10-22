@@ -47,11 +47,15 @@ async fn lock_project(project_id: &str) -> tokio::sync::MutexGuard<'static, ()> 
 }
 
 fn index_path(project_id: &str) -> std::path::PathBuf {
-    project::project_wiki_dir(project_id).join("wiki").join("index.md")
+    project::project_wiki_dir(project_id)
+        .join("wiki")
+        .join("index.md")
 }
 
 fn log_path(project_id: &str) -> std::path::PathBuf {
-    project::project_wiki_dir(project_id).join("wiki").join("log.md")
+    project::project_wiki_dir(project_id)
+        .join("wiki")
+        .join("log.md")
 }
 
 /// 程序化重建 index.md（带锁入口）。返回索引到的内容页数量。
@@ -81,9 +85,7 @@ async fn rebuild_index_programmatic_inner(
 }
 
 /// 按 page_type 机械分组（entity/concept/summary/review/其他）。系统页（index/log）不参与。
-fn build_programmatic_index(
-    pages: &[crate::services::wiki::models::WikiPage],
-) -> String {
+fn build_programmatic_index(pages: &[crate::services::wiki::models::WikiPage]) -> String {
     let mut groups: HashMap<&'static str, Vec<&crate::services::wiki::models::WikiPage>> =
         HashMap::new();
     for p in pages {
@@ -101,7 +103,9 @@ fn build_programmatic_index(
     }
     let mut out = String::from("# Wiki 目录\n\n");
     for key in ["实体", "概念", "摘要", "评审", "其他"] {
-        let Some(list) = groups.get(key) else { continue };
+        let Some(list) = groups.get(key) else {
+            continue;
+        };
         if list.is_empty() {
             continue;
         }
@@ -154,8 +158,11 @@ pub async fn rebuild_index_with_llm(
         .chat_channel_id
         .as_deref()
         .filter(|id| !id.is_empty())
-        .or_else(|| proj.ingest_channel_id.as_deref().filter(|id| !id.is_empty()))
-    {
+        .or_else(|| {
+            proj.ingest_channel_id
+                .as_deref()
+                .filter(|id| !id.is_empty())
+        }) {
         Some(id) => id.to_string(),
         None => {
             let row: Option<(String,)> = sqlx::query_as(
@@ -242,7 +249,10 @@ pub async fn rebuild_index_with_llm(
 
 /// LLM 归组输出的保底补齐：LLM 可能漏页，缺失的 path 一律补到《未分组》，
 /// 保证 LLM 永不可能造成丢页面（这是 C′ 方案的刚性前提）。
-fn ensure_all_pages_covered(llm_text: &str, pages: &[crate::services::wiki::models::WikiPage]) -> String {
+fn ensure_all_pages_covered(
+    llm_text: &str,
+    pages: &[crate::services::wiki::models::WikiPage],
+) -> String {
     let cleaned = strip_md_fence(llm_text);
     let mut out = cleaned.trim_end().to_string();
     out.push('\n');
@@ -293,10 +303,7 @@ Rules:
 /// log.md 一致性检测 + 一次性回溯（老项目修复）：
 /// 文件缺失 / 为空 / 无头部 / "ingest |" 条目数少于已摄入源数 → 从 `wiki_sources` 重建整份。
 /// 返回是否执行了回溯。回溯后 M==N，此后仅程序 append，不会重复触发。
-pub async fn ensure_log_rebuilt(
-    pool: &sqlx::SqlitePool,
-    project_id: &str,
-) -> Result<bool, String> {
+pub async fn ensure_log_rebuilt(pool: &sqlx::SqlitePool, project_id: &str) -> Result<bool, String> {
     let _guard = lock_project(project_id).await;
     let repo = WikiRepository::new(pool.clone());
     let sources = repo.list_sources(project_id).await?;
@@ -386,7 +393,12 @@ async fn write_log(project_id: &str, content: &str) -> Result<(), String> {
 mod tests {
     use super::*;
 
-    fn page(path: &str, title: &str, page_type: &str, tags: &str) -> crate::services::wiki::models::WikiPage {
+    fn page(
+        path: &str,
+        title: &str,
+        page_type: &str,
+        tags: &str,
+    ) -> crate::services::wiki::models::WikiPage {
         crate::services::wiki::models::WikiPage {
             id: "id".into(),
             project_id: "p".into(),
@@ -411,13 +423,16 @@ mod tests {
             page("concepts/乙.md", "乙概念", "concept", "[]"),
             page("summaries/丙.md", "丙摘要", "summary", "[]"),
             page("index.md", "目录", "index", "[]"), // 系统页，须排除
-            page("log.md", "日志", "log", "[]"),       // 系统页，须排除
+            page("log.md", "日志", "log", "[]"),     // 系统页，须排除
         ];
         let index = build_programmatic_index(&pages);
         assert!(index.contains("## 实体") && index.contains("[[entities/甲]] — 甲实体"));
         assert!(index.contains("## 概念") && index.contains("[[concepts/乙]] — 乙概念"));
         assert!(index.contains("## 摘要") && index.contains("[[summaries/丙]] — 丙摘要"));
-        assert!(!index.contains("[[index]]") && !index.contains("[[log]]"), "系统页不得入目录");
+        assert!(
+            !index.contains("[[index]]") && !index.contains("[[log]]"),
+            "系统页不得入目录"
+        );
     }
 
     #[test]

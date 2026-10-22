@@ -68,6 +68,24 @@ pub enum ChannelProvider {
     /// OpenRouter（聚合网关，:free 后缀模型免费调用）。
     #[serde(rename = "openrouter")]
     OpenRouter,
+    /// ModelScope 魔搭免费推理 API（注册实名送每日 2000 次调用）。
+    #[serde(rename = "modelscope")]
+    ModelScope,
+    /// GitHub Models（GitHub PAT 即用的免费推理层）。
+    #[serde(rename = "github_models")]
+    GithubModels,
+    /// SiliconFlow 硅基流动（注册送额度 + 多款永久免费小模型）。
+    #[serde(rename = "siliconflow")]
+    SiliconFlow,
+    /// Hugging Face Inference Providers（免费账户月度额度）。
+    #[serde(rename = "huggingface")]
+    HuggingFace,
+    /// SambaNova Cloud 免费层（20 RPM / 20 RPD，免信用卡）。
+    #[serde(rename = "sambanova")]
+    SambaNova,
+    /// Cohere Trial Key（每月 1000 次评估调用）。
+    #[serde(rename = "cohere")]
+    Cohere,
     Anthropic,
     Ollama,
     Custom,
@@ -92,6 +110,12 @@ impl ChannelProvider {
             ChannelProvider::Mistral => "mistral",
             ChannelProvider::NvidiaNim => "nvidia_nim",
             ChannelProvider::OpenRouter => "openrouter",
+            ChannelProvider::ModelScope => "modelscope",
+            ChannelProvider::GithubModels => "github_models",
+            ChannelProvider::SiliconFlow => "siliconflow",
+            ChannelProvider::HuggingFace => "huggingface",
+            ChannelProvider::SambaNova => "sambanova",
+            ChannelProvider::Cohere => "cohere",
             ChannelProvider::Anthropic => "anthropic",
             ChannelProvider::Ollama => "ollama",
             ChannelProvider::Custom => "custom",
@@ -232,7 +256,8 @@ pub struct ProtocolPresetGroup {
 }
 
 /// 当前 registry revision（YYYY-MM-DD）。2026-08-06 建立基线，2026-10-22 加入
-/// OpenCode 免费车道与 Kilo 免费池两个 preset。
+/// OpenCode 免费车道与 Kilo 免费池两个 preset，并补齐免费层标注
+/// （Google/智谱 signup）与 ModelScope 魔搭、GitHub Models 两个免费层 preset。
 pub const PRESET_REVISION: &str = "2026-10-22";
 
 /// 2026-08-06 基线时入库的模型建议复核日（与 registry revision 解耦，
@@ -263,6 +288,12 @@ const SRC_CEREBRAS: &str = "https://inference-docs.cerebras.ai/models";
 const SRC_MISTRAL: &str = "https://docs.mistral.ai/getting-started/models";
 const SRC_NVIDIA: &str = "https://build.nvidia.com/explore/reasoning";
 const SRC_OPENROUTER: &str = "https://openrouter.ai/docs/models";
+const SRC_MODELSCOPE: &str = "https://modelscope.cn/headlines/article/795";
+const SRC_GITHUB_MODELS: &str = "https://docs.github.com/en/github-models";
+const SRC_SILICONFLOW: &str = "https://siliconflow.cn/pricing";
+const SRC_HUGGINGFACE: &str = "https://huggingface.co/docs/inference-providers/index";
+const SRC_SAMBANOVA: &str = "https://docs.sambanova.ai/docs/en/models";
+const SRC_COHERE: &str = "https://docs.cohere.com/docs/models";
 
 /// 构建一个 preset 的便捷函数。
 #[allow(clippy::too_many_arguments)]
@@ -392,7 +423,7 @@ fn openai_presets() -> Vec<ChannelPreset> {
             ChannelProvider::Google,
             "Google",
             RegionGroup::International,
-            "Google Gemini 官方 OpenAI 接口。",
+            "Google Gemini 官方 OpenAI 接口。AI Studio 免费层：Flash 系列每日 100 万 token 免费额度（15 RPM），免费层内容可能被 Google 用于改进产品。",
             "google",
             "https://generativelanguage.googleapis.com/v1beta/openai",
             "https://generativelanguage.googleapis.com/v1beta/openai",
@@ -407,7 +438,8 @@ fn openai_presets() -> Vec<ChannelPreset> {
             ],
             ModelEnumStrategy::StaticPlusSync,
             EndpointTestStrategy::ProbeFirstModel,
-        ),
+        )
+        .signup("https://aistudio.google.com/apikey"),
         preset(
             ChannelProtocol::OpenAI,
             ChannelProvider::DeepSeek,
@@ -462,7 +494,7 @@ fn openai_presets() -> Vec<ChannelPreset> {
             ChannelProvider::Zhipu,
             "智谱 GLM",
             RegionGroup::Domestic,
-            "智谱 GLM OpenAI 接口（PAAS v4）。",
+            "智谱 GLM OpenAI 接口（PAAS v4）。glm-4.7-flash 等 Flash 系列免费（免费层仅 1 条并发请求），旗舰模型计费。",
             "zhipu",
             "https://open.bigmodel.cn/api/paas/v4",
             "https://open.bigmodel.cn/api/paas/v4",
@@ -477,7 +509,8 @@ fn openai_presets() -> Vec<ChannelPreset> {
             ],
             ModelEnumStrategy::StaticPlusSync,
             EndpointTestStrategy::ProbeFirstModel,
-        ),
+        )
+        .signup("https://open.bigmodel.cn/usercenter/apikeys"),
         preset(
             ChannelProtocol::OpenAI,
             ChannelProvider::Doubao,
@@ -545,6 +578,57 @@ fn openai_presets() -> Vec<ChannelPreset> {
             ModelEnumStrategy::StaticPlusSync,
             EndpointTestStrategy::ProbeFirstModel,
         ),
+        // ModelScope 魔搭免费推理 API：注册并实名后每日 2000 次免费调用，
+        // 单模型 ≤500 次/天（动态限速）。仅支持中国手机号注册，境外用户
+        // 不可用；凭据为魔搭 SDK Token，Bearer 方式。
+        preset(
+            ChannelProtocol::OpenAI,
+            ChannelProvider::ModelScope,
+            "ModelScope 魔搭（免费层）",
+            RegionGroup::Domestic,
+            "魔搭社区免费推理 API：注册并实名后每日 2000 次免费调用（单模型 ≤500 次/天，动态限速）。需中国手机号注册；请勿用于高并发或 SLA 保障场景。",
+            "modelscope",
+            "https://api-inference.modelscope.cn/v1",
+            "https://api-inference.modelscope.cn/v1",
+            "openai",
+            vec![NativeEndpoint::ChatCompletions],
+            vec![NativeEndpoint::ChatCompletions],
+            AuthScheme::Bearer,
+            vec![
+                model("Qwen/Qwen3.5-35B-A3B", "2026-10-22", SRC_MODELSCOPE),
+                model("Qwen/Qwen3.5-27B", "2026-10-22", SRC_MODELSCOPE),
+                model("deepseek-ai/DeepSeek-V3", "2026-10-22", SRC_MODELSCOPE),
+            ],
+            ModelEnumStrategy::StaticPlusSync,
+            EndpointTestStrategy::ProbeFirstModel,
+        )
+        .signup("https://modelscope.cn/my/myaccesstoken"),
+        // SiliconFlow 硅基流动：注册（需实名）送体验额度，另有若干永久免费
+        // 小模型（固定限速，超额 429）。免费清单动态变化，以官网价格页为准，
+        // 可经「同步上游模型」覆盖。
+        preset(
+            ChannelProtocol::OpenAI,
+            ChannelProvider::SiliconFlow,
+            "SiliconFlow 硅基流动（免费层）",
+            RegionGroup::Domestic,
+            "硅基流动 OpenAI 接口：注册并实名后部分小模型永久免费（固定限速，超额 429），注册另送体验额度（付费模型可用）。免费模型清单动态变化，以官网价格页为准。",
+            "siliconflow",
+            "https://api.siliconflow.cn/v1",
+            "https://api.siliconflow.cn/v1",
+            "openai",
+            vec![NativeEndpoint::ChatCompletions],
+            vec![NativeEndpoint::ChatCompletions],
+            AuthScheme::Bearer,
+            vec![
+                model("THUDM/GLM-4-9B-0414", "2026-10-22", SRC_SILICONFLOW),
+                model("THUDM/GLM-Z1-9B-0414", "2026-10-22", SRC_SILICONFLOW),
+                model("tencent/Hunyuan-MT-7B", "2026-10-22", SRC_SILICONFLOW),
+                model("deepseek-ai/DeepSeek-R1-Distill-Qwen-7B", "2026-10-22", SRC_SILICONFLOW),
+            ],
+            ModelEnumStrategy::StaticPlusSync,
+            EndpointTestStrategy::ProbeFirstModel,
+        )
+        .signup("https://cloud.siliconflow.cn/account/ak"),
         // StepFun 模型建议的排除项（依据 2026-09-20 官方文档调研）：
         // - 音频族（stepaudio-* / step-1o-audio / step-audio-2 / step-audio-r1.5）：
         //   走 chat completions 需厂商私有 modalities/audio 参数，网关不透传；
@@ -723,6 +807,108 @@ fn openai_presets() -> Vec<ChannelPreset> {
             EndpointTestStrategy::ProbeFirstModel,
         )
         .signup("https://openrouter.ai/keys"),
+        // GitHub Models：GitHub 官方免费推理层。凭据是 GitHub PAT（需勾选
+        // models:read 权限），Bearer 方式即可，无需 OAuth 登录流程。个人账户
+        // 免费层限速、上下文受限；模型 id 为 publisher/model 复合格式，
+        // 清单以 docs.github.com 的模型目录为准，可经「同步上游模型」覆盖。
+        preset(
+            ChannelProtocol::OpenAI,
+            ChannelProvider::GithubModels,
+            "GitHub Models（免费层）",
+            RegionGroup::International,
+            "GitHub 官方推理网关：GitHub PAT（需 models:read 权限）即可调用多厂商模型，个人账户免费层限速、上下文受限。模型 id 为 publisher/model 格式。",
+            "github_models",
+            "https://models.github.ai/inference",
+            "https://models.github.ai/inference",
+            "openai",
+            vec![NativeEndpoint::ChatCompletions],
+            vec![NativeEndpoint::ChatCompletions],
+            AuthScheme::Bearer,
+            vec![
+                model("openai/gpt-4.1", "2026-10-22", SRC_GITHUB_MODELS),
+                model("openai/gpt-4o", "2026-10-22", SRC_GITHUB_MODELS),
+                model("openai/gpt-4o-mini", "2026-10-22", SRC_GITHUB_MODELS),
+            ],
+            ModelEnumStrategy::StaticPlusSync,
+            EndpointTestStrategy::ProbeFirstModel,
+        )
+        .signup("https://github.com/settings/tokens"),
+        // SambaNova Cloud 免费层：无绑卡状态即 Free Tier（20 RPM / 20 RPD /
+        // 200K tokens/天，超额 429）。模型清单可无凭据经 GET /models 拉取，
+        // 可经「同步上游模型」覆盖；DeepSeek-V3.2 与 MiniMax-M3 为 Preview，
+        // 上游可能随时下线。
+        preset(
+            ChannelProtocol::OpenAI,
+            ChannelProvider::SambaNova,
+            "SambaNova（免费层）",
+            RegionGroup::International,
+            "SambaNova RDU 高速推理免费层：邮箱注册即用（无需信用卡），免费层 20 次/分钟、20 次/天、20 万 token/天，超额返回 429。DeepSeek-V3.2 / MiniMax-M3 为 Preview 型号，可能随时下线。",
+            "sambanova",
+            "https://api.sambanova.ai/v1",
+            "https://api.sambanova.ai/v1",
+            "openai",
+            vec![NativeEndpoint::ChatCompletions],
+            vec![NativeEndpoint::ChatCompletions],
+            AuthScheme::Bearer,
+            vec![
+                model("DeepSeek-V3.1", "2026-10-22", SRC_SAMBANOVA),
+                model("Meta-Llama-3.3-70B-Instruct", "2026-10-22", SRC_SAMBANOVA),
+                model("gpt-oss-120b", "2026-10-22", SRC_SAMBANOVA),
+                model("MiniMax-M3", "2026-10-22", SRC_SAMBANOVA),
+            ],
+            ModelEnumStrategy::StaticPlusSync,
+            EndpointTestStrategy::ProbeFirstModel,
+        )
+        .signup("https://cloud.sambanova.ai/apis"),
+        // Hugging Face Inference Providers：免费账户每月赠送 Inference
+        // 额度，token 需「Make calls to Inference Providers」权限。router
+        // 按 model id 自动路由到合作的推理 Provider，模型清单可经
+        // 「同步上游模型」覆盖。
+        preset(
+            ChannelProtocol::OpenAI,
+            ChannelProvider::HuggingFace,
+            "Hugging Face（免费层）",
+            RegionGroup::International,
+            "Hugging Face Inference Providers：免费账户每月赠送推理额度，请求自动路由到合作 Provider。token 需勾选 Inference Providers 调用权限；额度用尽后返回 402/429。",
+            "huggingface",
+            "https://router.huggingface.co/v1",
+            "https://router.huggingface.co/v1",
+            "openai",
+            vec![NativeEndpoint::ChatCompletions],
+            vec![NativeEndpoint::ChatCompletions],
+            AuthScheme::Bearer,
+            vec![
+                model("deepseek-ai/DeepSeek-V3-0324", "2026-10-22", SRC_HUGGINGFACE),
+                model("Qwen/Qwen3-235B-A22B", "2026-10-22", SRC_HUGGINGFACE),
+            ],
+            ModelEnumStrategy::StaticPlusSync,
+            EndpointTestStrategy::ProbeFirstModel,
+        )
+        .signup("https://huggingface.co/settings/tokens"),
+        // Cohere Trial Key：每月 1000 次调用（20 RPM），仅评估用途。
+        // compatibility 端点提供 OpenAI Chat Completions 兼容层。
+        preset(
+            ChannelProtocol::OpenAI,
+            ChannelProvider::Cohere,
+            "Cohere（Trial）",
+            RegionGroup::International,
+            "Cohere 官方 OpenAI 兼容端点：Trial Key 每月 1000 次调用（20 RPM），仅用于评估，不可用于生产。Aya 系列擅长多语言。",
+            "cohere",
+            "https://api.cohere.ai/compatibility/v1",
+            "https://api.cohere.ai/compatibility/v1",
+            "openai",
+            vec![NativeEndpoint::ChatCompletions],
+            vec![NativeEndpoint::ChatCompletions],
+            AuthScheme::Bearer,
+            vec![
+                model("command-a-03-2025", "2026-10-22", SRC_COHERE),
+                model("command-r-plus-08-2024", "2026-10-22", SRC_COHERE),
+                model("command-r7b-12-2024", "2026-10-22", SRC_COHERE),
+            ],
+            ModelEnumStrategy::StaticPlusSync,
+            EndpointTestStrategy::ProbeFirstModel,
+        )
+        .signup("https://dashboard.cohere.com/api-keys"),
         preset(
             ChannelProtocol::OpenAI,
             ChannelProvider::Ollama,
@@ -811,7 +997,7 @@ fn anthropic_presets() -> Vec<ChannelPreset> {
             ChannelProvider::Zhipu,
             "智谱 GLM",
             RegionGroup::Domestic,
-            "智谱 GLM 官方 Anthropic 接口。",
+            "智谱 GLM 官方 Anthropic 接口。glm-4.7-flash 等 Flash 系列免费（免费层仅 1 条并发请求），旗舰模型计费。",
             "zhipu",
             "https://open.bigmodel.cn/api/anthropic/v1",
             "https://open.bigmodel.cn/api/anthropic/v1",
@@ -825,7 +1011,8 @@ fn anthropic_presets() -> Vec<ChannelPreset> {
             ],
             ModelEnumStrategy::StaticOnly,
             EndpointTestStrategy::ProbeFirstModel,
-        ),
+        )
+        .signup("https://open.bigmodel.cn/usercenter/apikeys"),
         preset(
             ChannelProtocol::Anthropic,
             ChannelProvider::DoubaoCodingPlan,
@@ -1093,7 +1280,10 @@ mod tests {
         );
         assert_eq!(p.auth_scheme, AuthScheme::Bearer);
         assert_eq!(p.model_enum_strategy, ModelEnumStrategy::StaticPlusSync);
-        assert_eq!(p.endpoint_test_strategy, EndpointTestStrategy::ProbeFirstModel);
+        assert_eq!(
+            p.endpoint_test_strategy,
+            EndpointTestStrategy::ProbeFirstModel
+        );
         assert_eq!(p.icon_key, "opencode");
         assert_eq!(p.provider.as_str(), "opencode");
         assert_eq!(
@@ -1128,6 +1318,176 @@ mod tests {
         // 免费池以自动路由模型为主：不预置具体的上游私有型号。
         assert_eq!(p.model_suggestions.len(), 1);
         assert_eq!(p.model_suggestions[0].id, "kilo-auto/free");
+    }
+
+    /// ModelScope 魔搭免费层预设契约：URL/鉴权/端点/策略/文案逐项锁定。
+    #[test]
+    fn modelscope_openai_preset_contract() {
+        let p = presets_for_protocol(ChannelProtocol::OpenAI)
+            .into_iter()
+            .find(|p| p.provider == ChannelProvider::ModelScope)
+            .expect("openai modelscope preset");
+        assert_eq!(p.id, "openai:modelscope");
+        assert_eq!(p.region, RegionGroup::Domestic);
+        assert_eq!(p.native_base_url, "https://api-inference.modelscope.cn/v1");
+        assert_eq!(p.legacy_base_url, "https://api-inference.modelscope.cn/v1");
+        assert_eq!(p.legacy_type, "openai");
+        assert_eq!(p.native_endpoints, vec![NativeEndpoint::ChatCompletions]);
+        assert_eq!(
+            p.default_checked_endpoints,
+            vec![NativeEndpoint::ChatCompletions]
+        );
+        assert_eq!(p.auth_scheme, AuthScheme::Bearer);
+        assert_eq!(p.model_enum_strategy, ModelEnumStrategy::StaticPlusSync);
+        assert_eq!(
+            p.endpoint_test_strategy,
+            EndpointTestStrategy::ProbeFirstModel
+        );
+        assert_eq!(p.icon_key, "modelscope");
+        assert_eq!(p.provider.as_str(), "modelscope");
+        assert_eq!(
+            serde_json::to_string(&p.provider).unwrap(),
+            "\"modelscope\"".to_string()
+        );
+        // 凭据为魔搭 SDK Token，signup 直达访问令牌页。
+        assert_eq!(
+            p.key_signup_url.as_deref(),
+            Some("https://modelscope.cn/my/myaccesstoken")
+        );
+        // 模型 id 为 ModelScope 的 owner/model 复合格式。
+        assert!(p
+            .model_suggestions
+            .iter()
+            .all(|m| m.id.contains('/') && m.source_url == SRC_MODELSCOPE));
+        assert_eq!(m_verified_at(&p), "2026-10-22");
+    }
+
+    /// GitHub Models 免费层预设契约：URL/鉴权/端点/策略/文案逐项锁定。
+    #[test]
+    fn github_models_openai_preset_contract() {
+        let p = presets_for_protocol(ChannelProtocol::OpenAI)
+            .into_iter()
+            .find(|p| p.provider == ChannelProvider::GithubModels)
+            .expect("openai github_models preset");
+        assert_eq!(p.id, "openai:github_models");
+        assert_eq!(p.region, RegionGroup::International);
+        assert_eq!(p.native_base_url, "https://models.github.ai/inference");
+        assert_eq!(p.legacy_base_url, "https://models.github.ai/inference");
+        assert_eq!(p.legacy_type, "openai");
+        assert_eq!(p.native_endpoints, vec![NativeEndpoint::ChatCompletions]);
+        assert_eq!(
+            p.default_checked_endpoints,
+            vec![NativeEndpoint::ChatCompletions]
+        );
+        assert_eq!(p.auth_scheme, AuthScheme::Bearer);
+        assert_eq!(p.model_enum_strategy, ModelEnumStrategy::StaticPlusSync);
+        assert_eq!(
+            p.endpoint_test_strategy,
+            EndpointTestStrategy::ProbeFirstModel
+        );
+        assert_eq!(p.icon_key, "github_models");
+        assert_eq!(p.provider.as_str(), "github_models");
+        assert_eq!(
+            serde_json::to_string(&p.provider).unwrap(),
+            "\"github_models\"".to_string()
+        );
+        // 凭据为 GitHub PAT（models:read），signup 直达 PAT 设置页。
+        assert_eq!(
+            p.key_signup_url.as_deref(),
+            Some("https://github.com/settings/tokens")
+        );
+        // 模型 id 为 GitHub 目录的 publisher/model 复合格式。
+        assert!(p
+            .model_suggestions
+            .iter()
+            .all(|m| m.id.contains('/') && m.source_url == SRC_GITHUB_MODELS));
+        assert_eq!(m_verified_at(&p), "2026-10-22");
+    }
+
+    /// 新 preset 全部模型建议的复核日期（本批 2026-10-22 核对）。
+    fn m_verified_at(p: &ChannelPreset) -> &str {
+        let dates: std::collections::HashSet<&str> = p
+            .model_suggestions
+            .iter()
+            .map(|m| m.verified_at.as_str())
+            .collect();
+        assert_eq!(dates.len(), 1, "{} 模型建议复核日期不一致", p.id);
+        dates.into_iter().next().unwrap()
+    }
+
+    /// 第二批免费层预设的批量契约：URL/鉴权/端点/策略/signup 逐项锁定。
+    #[test]
+    fn batch2_free_tier_openai_preset_contracts() {
+        let cases: &[(&str, &str, &str, &str)] = &[
+            (
+                "siliconflow",
+                "https://api.siliconflow.cn/v1",
+                "https://cloud.siliconflow.cn/account/ak",
+                SRC_SILICONFLOW,
+            ),
+            (
+                "huggingface",
+                "https://router.huggingface.co/v1",
+                "https://huggingface.co/settings/tokens",
+                SRC_HUGGINGFACE,
+            ),
+            (
+                "sambanova",
+                "https://api.sambanova.ai/v1",
+                "https://cloud.sambanova.ai/apis",
+                SRC_SAMBANOVA,
+            ),
+            (
+                "cohere",
+                "https://api.cohere.ai/compatibility/v1",
+                "https://dashboard.cohere.com/api-keys",
+                SRC_COHERE,
+            ),
+        ];
+        for (provider_str, base_url, signup_url, src) in cases {
+            let p = presets_for_protocol(ChannelProtocol::OpenAI)
+                .into_iter()
+                .find(|p| p.provider.as_str() == *provider_str)
+                .expect("openai preset");
+            assert_eq!(p.id, format!("openai:{provider_str}"));
+            assert_eq!(p.native_base_url, *base_url);
+            assert_eq!(p.legacy_base_url, *base_url);
+            assert_eq!(p.legacy_type, "openai");
+            assert_eq!(p.native_endpoints, vec![NativeEndpoint::ChatCompletions]);
+            assert_eq!(
+                p.default_checked_endpoints,
+                vec![NativeEndpoint::ChatCompletions]
+            );
+            assert_eq!(p.auth_scheme, AuthScheme::Bearer);
+            assert_eq!(p.model_enum_strategy, ModelEnumStrategy::StaticPlusSync);
+            assert_eq!(
+                p.endpoint_test_strategy,
+                EndpointTestStrategy::ProbeFirstModel
+            );
+            assert_eq!(p.icon_key, *provider_str);
+            assert_eq!(p.key_signup_url.as_deref(), Some(*signup_url));
+            assert!(!p.model_suggestions.is_empty());
+            assert!(p
+                .model_suggestions
+                .iter()
+                .all(|m| m.source_url == *src && m.verified_at == "2026-10-22"));
+            assert_eq!(
+                serde_json::to_string(&p.provider).unwrap(),
+                format!("\"{provider_str}\"")
+            );
+        }
+        // 地区分组：SiliconFlow 国内，其余国际。
+        let region = |s: &str| {
+            presets_for_protocol(ChannelProtocol::OpenAI)
+                .into_iter()
+                .find(|p| p.provider.as_str() == s)
+                .unwrap()
+                .region
+        };
+        assert_eq!(region("siliconflow"), RegionGroup::Domestic);
+        for s in ["huggingface", "sambanova", "cohere"] {
+            assert_eq!(region(s), RegionGroup::International, "{}", s);
+        }
     }
 
     #[test]
@@ -1170,21 +1530,36 @@ mod tests {
                 ChannelProvider::Mistral,
                 ChannelProvider::NvidiaNim,
                 ChannelProvider::OpenRouter,
+                ChannelProvider::GithubModels,
+                ChannelProvider::SambaNova,
+                ChannelProvider::HuggingFace,
+                ChannelProvider::Cohere,
                 ChannelProvider::DeepSeek,
                 ChannelProvider::Qwen,
                 ChannelProvider::Zhipu,
                 ChannelProvider::Doubao,
                 ChannelProvider::Moonshot,
                 ChannelProvider::StepFun,
+                ChannelProvider::ModelScope,
+                ChannelProvider::SiliconFlow,
                 ChannelProvider::Ollama,
             ]
         );
         // 免费层 API Key 提供商必须带「获取 Key」跳转链接，且其余预设不带。
+        // Google/智谱为「部分免费」（Flash/免费层系列），同样提供 signup 引导。
         for preset in all_channel_presets() {
             let has_signup = preset.key_signup_url.is_some();
             let is_free_tier = matches!(
                 preset.provider,
-                ChannelProvider::Groq
+                ChannelProvider::Google
+                    | ChannelProvider::Zhipu
+                    | ChannelProvider::ModelScope
+                    | ChannelProvider::GithubModels
+                    | ChannelProvider::SiliconFlow
+                    | ChannelProvider::HuggingFace
+                    | ChannelProvider::SambaNova
+                    | ChannelProvider::Cohere
+                    | ChannelProvider::Groq
                     | ChannelProvider::Cerebras
                     | ChannelProvider::Mistral
                     | ChannelProvider::NvidiaNim
@@ -1193,7 +1568,11 @@ mod tests {
             assert_eq!(has_signup, is_free_tier, "{}", preset.id);
             if is_free_tier {
                 assert!(
-                    preset.key_signup_url.as_deref().unwrap().starts_with("https://"),
+                    preset
+                        .key_signup_url
+                        .as_deref()
+                        .unwrap()
+                        .starts_with("https://"),
                     "{} signup url must be https",
                     preset.id
                 );

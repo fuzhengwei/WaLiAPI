@@ -11,7 +11,7 @@
 //! 渠道不会被再次自动加回（尊重用户意图）。种子失败不置位标记，下次启动
 //! 重试；标记丢失时靠 `channel_provider_exists` 幂等兜底，不会产生重复渠道。
 
-use crate::channel_presets::{ChannelProvider, all_channel_presets};
+use crate::channel_presets::{all_channel_presets, ChannelProvider};
 use crate::db::models::CreateChannelInput;
 use crate::db::repository::Repository;
 use crate::settings_store::SettingsStore;
@@ -100,8 +100,7 @@ pub async fn seed_builtin_free_channels(repo: &Repository, settings: &SettingsSt
             }
         }
     }
-    if let Err(error) =
-        settings.set_many(&[(SEED_FLAG.to_string(), serde_json::Value::Bool(true))])
+    if let Err(error) = settings.set_many(&[(SEED_FLAG.to_string(), serde_json::Value::Bool(true))])
     {
         tracing::warn!(
             "[内置渠道] 种子标记写入失败（下次启动重试时靠存在性检查兜底防重复）: {error}"
@@ -112,9 +111,9 @@ pub async fn seed_builtin_free_channels(repo: &Repository, settings: &SettingsSt
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::Value;
     use sqlx::sqlite::SqlitePoolOptions;
     use std::path::PathBuf;
-    use serde_json::Value;
     use std::sync::Arc;
     use std::sync::Mutex;
 
@@ -139,7 +138,10 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let pool = SqlitePoolOptions::new()
             .max_connections(2)
-            .connect(&format!("sqlite://{}?mode=rwc", dir.join("test.db").display()))
+            .connect(&format!(
+                "sqlite://{}?mode=rwc",
+                dir.join("test.db").display()
+            ))
             .await
             .unwrap();
         sqlx::migrate!("./migrations").run(&pool).await.unwrap();
@@ -148,12 +150,11 @@ mod tests {
     }
 
     async fn provider_count(repo: &Repository) -> i64 {
-        let row: (i64,) = sqlx::query_as(
-            "SELECT COUNT(*) FROM channels WHERE provider IN ('opencode', 'kilo')",
-        )
-        .fetch_one(repo.pool())
-        .await
-        .unwrap();
+        let row: (i64,) =
+            sqlx::query_as("SELECT COUNT(*) FROM channels WHERE provider IN ('opencode', 'kilo')")
+                .fetch_one(repo.pool())
+                .await
+                .unwrap();
         row.0
     }
 
@@ -172,7 +173,12 @@ mod tests {
         assert_eq!(opencode.0, "OpenCode 免费车道");
         assert_eq!(opencode.1, "public");
         assert_eq!(opencode.2, "https://opencode.ai/inference/v1");
-        assert!(serde_json::from_str::<Vec<String>>(&opencode.3).unwrap().len() >= 3);
+        assert!(
+            serde_json::from_str::<Vec<String>>(&opencode.3)
+                .unwrap()
+                .len()
+                >= 3
+        );
 
         let kilo: (String, String) =
             sqlx::query_as("SELECT name, api_key FROM channels WHERE provider = 'kilo'")
@@ -224,12 +230,11 @@ mod tests {
             .await
             .unwrap();
         seed_builtin_free_channels(&repo, &settings).await;
-        let opencode_count: (i64,) = sqlx::query_as(
-            "SELECT COUNT(*) FROM channels WHERE provider = 'opencode'",
-        )
-        .fetch_one(repo.pool())
-        .await
-        .unwrap();
+        let opencode_count: (i64,) =
+            sqlx::query_as("SELECT COUNT(*) FROM channels WHERE provider = 'opencode'")
+                .fetch_one(repo.pool())
+                .await
+                .unwrap();
         assert_eq!(opencode_count.0, 1);
         // Kilo 仍正常种子
         assert_eq!(provider_count(&repo).await, 2);

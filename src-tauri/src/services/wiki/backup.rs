@@ -11,8 +11,8 @@
 //! - 解压路径逐段白名单校验，拒绝路径穿越（`..` / 绝对路径 / 反斜杠）。
 
 use super::models::{WikiPage, WikiProject, WikiSource};
-use super::repository::WikiRepository;
 use super::project;
+use super::repository::WikiRepository;
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use std::io::Write as _;
@@ -133,10 +133,10 @@ pub async fn export_project(
 
     // 打包在 blocking 线程执行：zip 写入为同步 IO（含 Seek），避免阻塞 tokio 事件循环
     let root_for_blocking = root.clone();
-    let meta_json = serde_json::to_string_pretty(&meta)
-        .map_err(|e| format!("序列化 meta 失败: {e}"))?;
-    let db_json = serde_json::to_string_pretty(&snapshot)
-        .map_err(|e| format!("序列化 db 失败: {e}"))?;
+    let meta_json =
+        serde_json::to_string_pretty(&meta).map_err(|e| format!("序列化 meta 失败: {e}"))?;
+    let db_json =
+        serde_json::to_string_pretty(&snapshot).map_err(|e| format!("序列化 db 失败: {e}"))?;
     let out_path_clone = out_path.clone();
 
     let (file_count, size_bytes) = tokio::task::spawn_blocking(move || {
@@ -190,18 +190,14 @@ fn write_zip(
         let entry_name = format!("{}{}", FILES_PREFIX, rel);
         zip.start_file(&entry_name, options)
             .map_err(|e| format!("写入 {entry_name} 失败: {e}"))?;
-        let bytes = std::fs::read(abs)
-            .map_err(|e| format!("读取 {} 失败: {e}", abs.display()))?;
+        let bytes = std::fs::read(abs).map_err(|e| format!("读取 {} 失败: {e}", abs.display()))?;
         zip.write_all(&bytes)
             .map_err(|e| format!("写入 {entry_name} 失败: {e}"))?;
         file_count += 1;
     }
 
     let file = zip.finish().map_err(|e| format!("完成备份文件失败: {e}"))?;
-    let size_bytes = file
-        .metadata()
-        .map(|m| m.len())
-        .unwrap_or_default();
+    let size_bytes = file.metadata().map(|m| m.len()).unwrap_or_default();
     Ok((file_count, size_bytes))
 }
 
@@ -210,8 +206,8 @@ fn collect_files(root: &Path) -> Result<Vec<(String, PathBuf)>, String> {
     let mut out = Vec::new();
     let mut stack = vec![root.to_path_buf()];
     while let Some(dir) = stack.pop() {
-        let entries = std::fs::read_dir(&dir)
-            .map_err(|e| format!("读取目录失败 {}: {e}", dir.display()))?;
+        let entries =
+            std::fs::read_dir(&dir).map_err(|e| format!("读取目录失败 {}: {e}", dir.display()))?;
         for entry in entries {
             let entry = entry.map_err(|e| format!("读取目录项失败: {e}"))?;
             let path = entry.path();
@@ -282,8 +278,8 @@ pub async fn import_backup_from_bytes(
 /// 解析 zip：校验 meta/db 结构、路径安全，提取全部文件字节。
 fn parse_backup(bytes: &[u8]) -> Result<ParsedBackup, String> {
     let reader = std::io::Cursor::new(bytes);
-    let mut archive = zip::ZipArchive::new(reader)
-        .map_err(|e| format!("不是有效的 zip 备份文件: {e}"))?;
+    let mut archive =
+        zip::ZipArchive::new(reader).map_err(|e| format!("不是有效的 zip 备份文件: {e}"))?;
 
     // 1) meta.json
     let meta: MetaInfo = {
@@ -337,7 +333,11 @@ fn parse_backup(bytes: &[u8]) -> Result<ParsedBackup, String> {
         return Err("备份中没有项目文件（files/ 为空）".to_string());
     }
 
-    Ok(ParsedBackup { meta, snapshot, files })
+    Ok(ParsedBackup {
+        meta,
+        snapshot,
+        files,
+    })
 }
 
 /// 校验 zip 内相对路径：拒绝空、`\`、绝对路径、`..` / `.` / 空段（`//`）。
@@ -520,7 +520,10 @@ async fn restore_db(
 // ── 内部工具 ────────────────────────────────────────────────────────────────
 
 /// 读取某项目的图谱边（供导出快照）。
-async fn load_graph_edges(pool: &sqlx::SqlitePool, project_id: &str) -> Result<Vec<GraphEdgeRow>, String> {
+async fn load_graph_edges(
+    pool: &sqlx::SqlitePool,
+    project_id: &str,
+) -> Result<Vec<GraphEdgeRow>, String> {
     let rows = sqlx::query_as::<_, (String, String, String, f64)>(
         "SELECT source_page, target_page, edge_type, weight FROM wiki_graph_edges WHERE project_id = ? ORDER BY source_page",
     )
@@ -530,12 +533,14 @@ async fn load_graph_edges(pool: &sqlx::SqlitePool, project_id: &str) -> Result<V
     .map_err(|e| format!("DB error: {e}"))?;
     Ok(rows
         .into_iter()
-        .map(|(source_page, target_page, edge_type, weight)| GraphEdgeRow {
-            source_page,
-            target_page,
-            edge_type,
-            weight,
-        })
+        .map(
+            |(source_page, target_page, edge_type, weight)| GraphEdgeRow {
+                source_page,
+                target_page,
+                edge_type,
+                weight,
+            },
+        )
         .collect())
 }
 
@@ -573,10 +578,23 @@ mod tests {
 
     #[test]
     fn safe_zip_relative_rejects_traversal_and_absolute() {
-        for bad in ["", "..", "../x", "a/../../b", "\\evil", "/abs", "a/./b", "wiki//x"] {
+        for bad in [
+            "",
+            "..",
+            "../x",
+            "a/../../b",
+            "\\evil",
+            "/abs",
+            "a/./b",
+            "wiki//x",
+        ] {
             assert!(safe_zip_relative(bad).is_err(), "must reject: {bad:?}");
         }
-        for good in ["wiki/index.md", "raw/assets/abc123/page-1.jpg", "schema/CLAUDE.md"] {
+        for good in [
+            "wiki/index.md",
+            "raw/assets/abc123/page-1.jpg",
+            "schema/CLAUDE.md",
+        ] {
             assert_eq!(safe_zip_relative(good).unwrap(), good);
         }
     }
@@ -608,7 +626,8 @@ mod tests {
         let pool = test_pool().await;
 
         // 数据目录指向独立临时目录，避免污染真实 wiki 数据
-        let data_root = std::env::temp_dir().join(format!("waliapi-wiki-backup-{}", Uuid::new_v4()));
+        let data_root =
+            std::env::temp_dir().join(format!("waliapi-wiki-backup-{}", Uuid::new_v4()));
         std::fs::create_dir_all(&data_root).unwrap();
         std::env::set_var("WALIAPI_DATA_DIR", &data_root);
 
@@ -616,7 +635,9 @@ mod tests {
         let repo = WikiRepository::new(pool.clone());
         let project_id = Uuid::new_v4().to_string();
         let schema = "# Test Schema".to_string();
-        let dir = project::init_project_dir(&project_id, &schema).await.unwrap();
+        let dir = project::init_project_dir(&project_id, &schema)
+            .await
+            .unwrap();
         let wiki_dir = dir.to_string_lossy().to_string();
         repo.create_project_with_id(
             &project_id,
@@ -746,13 +767,12 @@ mod tests {
         assert_eq!(new_sources[0].file_size, 14);
         assert!(new_sources[0].file_path.is_none(), "旧绝对路径必须置空");
 
-        let edge_count: i64 = sqlx::query_scalar(
-            "SELECT COUNT(*) FROM wiki_graph_edges WHERE project_id = ?",
-        )
-        .bind(&imported.project_id)
-        .fetch_one(&pool)
-        .await
-        .unwrap();
+        let edge_count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM wiki_graph_edges WHERE project_id = ?")
+                .bind(&imported.project_id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
         assert_eq!(edge_count, 1);
 
         // 9) 校验磁盘：页面内容里旧 project_id 图片 URL 已替换为新 ID，token 原样保留
@@ -762,8 +782,14 @@ mod tests {
             .unwrap();
         let old_marker = format!("/api/wiki/projects/{project_id}/assets/{token}/");
         let new_marker = format!("/api/wiki/projects/{}/assets/{token}/", imported.project_id);
-        assert!(!new_content.contains(&old_marker), "旧 project_id 必须被替换");
-        assert!(new_content.contains(&new_marker), "新 project_id 必须写入图片 URL");
+        assert!(
+            !new_content.contains(&old_marker),
+            "旧 project_id 必须被替换"
+        );
+        assert!(
+            new_content.contains(&new_marker),
+            "新 project_id 必须写入图片 URL"
+        );
 
         // 10) 图片资产文件原样恢复
         let asset_bytes =
@@ -773,9 +799,11 @@ mod tests {
         assert_eq!(asset_bytes, b"fake-jpeg-bytes");
 
         // 11) 原项目不受影响
-        let orig_content = tokio::fs::read_to_string(project::project_wiki_dir(&project_id).join("wiki/entities/备份页面.md"))
-            .await
-            .unwrap();
+        let orig_content = tokio::fs::read_to_string(
+            project::project_wiki_dir(&project_id).join("wiki/entities/备份页面.md"),
+        )
+        .await
+        .unwrap();
         assert!(orig_content.contains(&old_marker), "原项目内容不得被改写");
 
         // 清理
@@ -788,11 +816,14 @@ mod tests {
         let _data_guard = lock_data_dir();
         let pool = test_pool().await;
 
-        let err = import_backup_from_bytes(&pool, b"not-a-zip").await.unwrap_err();
+        let err = import_backup_from_bytes(&pool, b"not-a-zip")
+            .await
+            .unwrap_err();
         assert!(err.contains("zip"), "错误应说明非 zip: {err}");
 
         // 伪造 zip：只含 files/，缺 meta.json
-        let data_root = std::env::temp_dir().join(format!("waliapi-wiki-backup-{}", Uuid::new_v4()));
+        let data_root =
+            std::env::temp_dir().join(format!("waliapi-wiki-backup-{}", Uuid::new_v4()));
         std::fs::create_dir_all(&data_root).unwrap();
         std::env::set_var("WALIAPI_DATA_DIR", &data_root);
         let fake = data_root.join("fake.zip");
@@ -811,4 +842,3 @@ mod tests {
         let _ = std::fs::remove_dir_all(&data_root);
     }
 }
-
