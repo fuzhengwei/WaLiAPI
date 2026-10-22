@@ -598,6 +598,12 @@ export interface WikiImportResult {
     file_count: number;
 }
 
+export interface WikiIndexRebuildResult {
+    mode: "program" | "llm";
+    page_count: number;
+    log_rebuilt: boolean;
+}
+
 export interface UpdateWikiProjectInput {
     name?: string;
     description?: string;
@@ -714,6 +720,9 @@ export const wikiApi = {
     importBackupBytes: (base64: string) => invoke<WikiImportResult>("import_wiki_backup_bytes", { base64 }),
     pickExportDir: () => invoke<string | null>("pick_wiki_export_dir"),
     pickImportFile: () => invoke<string | null>("pick_wiki_import_file"),
+    // ── 目录/日志重建：program=程序化（零 LLM）| llm=语义归组（耗 token）──
+    rebuildIndex: (projectId: string, mode: "program" | "llm") =>
+        invoke<WikiIndexRebuildResult>("rebuild_wiki_index", { projectId, mode }),
 };
 
 // Service status
