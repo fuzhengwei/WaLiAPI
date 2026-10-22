@@ -9,6 +9,7 @@
 //! | openai | `GET {base}/models` | `data[].id` | Bearer |
 //! | anthropic | `GET {base}/models`（Base 自带 /v1） | `data[].id`（兼容网关也可能返回 OpenAI 格式） | x-api-key + anthropic-version |
 //! | ollama | `GET {base}/api/tags` | `models[].name` | 可选 Bearer |
+//! | github_models | `GET {host}/catalog/models`（GitHub REST API） | 顶层数组 `[].id` | Bearer（GitHub PAT） |
 
 use crate::core::channel_identity::ChannelIdentity;
 use crate::endpoint_executor::{auth_headers, auth_scheme_for, final_url};
@@ -49,9 +50,22 @@ pub async fn fetch_upstream_models(
             .unwrap_or(&Value::Object(Default::default())),
         &input.legacy_executor_override,
     );
-    let base_url = normalize_base(&identity);
+    let mut base_url = normalize_base(&identity);
     if base_url.trim().is_empty() {
         return Err("Base URL 不能为空，无法同步模型".to_string());
+    }
+
+    // GitHub Models 特殊处理：推理基址（`https://models.github.ai/inference`）没有
+    // `/models` 列表接口（实测返回 200 + 纯文本 `OK`，JSON 解析必失败）。模型目录
+    // 在 GitHub REST API 的 `GET /catalog/models`（需带 `Accept: application/vnd.github+json`
+    // 与 GitHub PAT），响应是**顶层数组**而非 `{"data": [...]}`。
+    let is_github_models =
+        identity.provider == "github_models" || base_url.contains("models.github.ai");
+    if is_github_models {
+        base_url = base_url
+            .trim_end_matches('/')
+            .trim_end_matches("/inference")
+            .to_string();
     }
 
     // 协议分派：openai/anthropic 都用 OpenAI 兼容 `/models`（`data[].id`），
@@ -63,6 +77,7 @@ pub async fn fetch_upstream_models(
         // main 分支约定：anthropic Base 自带 /v1，端点只补 /models。
         "anthropic" => ("/models", parse_openai_list),
         "ollama" => ("api/tags", parse_ollama_tags),
+        _ if is_github_models => ("catalog/models", parse_github_catalog),
         _ if identity.provider == "kilo" => ("models", parse_kilo_free_list),
         _ if identity.provider == "opencode" => ("models", parse_opencode_free_list),
         _ => ("models", parse_openai_list),
@@ -74,6 +89,13 @@ pub async fn fetch_upstream_models(
     let mut headers = auth_headers(scheme, api_key);
     if identity.protocol == "anthropic" {
         headers.push(("anthropic-version".to_string(), "2023-06-01".to_string()));
+    }
+    // GitHub Models 目录接口走 GitHub REST API 约定的 Accept 头。
+    if is_github_models {
+        headers.push((
+            "accept".to_string(),
+            "application/vnd.github+json".to_string(),
+        ));
     }
     // OpenCode 免费车道的列表接口同样要过 v2 客户端指纹门禁（凭据固定为
     // "Bearer public"，与本车道推理请求一致）。
@@ -113,10 +135,21 @@ pub async fn fetch_upstream_models(
             concise_error(&body)
         ));
     }
-    let body: Value = resp
-        .json()
+    // 先读文本再解析：失败时能把响应片段带回错误信息，便于定位
+    // （如 GitHub 边缘返回 200 + 纯文本 `OK` 这类非 JSON 响应）。
+    let body_text = resp
+        .text()
         .await
-        .map_err(|e| format!("上游返回无法解析的 JSON（{url}）：{e}（不会覆盖已有模型列表）"))?;
+        .map_err(|e| format!("读取上游响应失败（{url}）：{e}（不会覆盖已有模型列表）"))?;
+    let body: Value = serde_json::from_str(&body_text).map_err(|e| {
+        if is_retired_github_models_ok(&body_text, &base_url) {
+            return "GitHub Models 服务已被 GitHub 官方下线（2026-07-30），models.github.ai 现对所有请求返回纯文本 OK，无法再同步模型或调用。请移除该渠道并迁移到其他提供商。".to_string();
+        }
+        format!(
+            "上游返回无法解析的 JSON（{url}）：{e}；响应片段：{}（不会覆盖已有模型列表）",
+            concise_error(&body_text)
+        )
+    })?;
 
     let models = parse(&body);
     if models.is_empty() {
@@ -190,6 +223,25 @@ fn parse_ollama_tags(body: &Value) -> Vec<String> {
         .unwrap_or_default()
 }
 
+/// GitHub Models 目录 `GET /catalog/models`：响应是**顶层数组**
+/// （如 `[{"id": "openai/gpt-4.1", ...}]`），不是 OpenAI 的 `{"data": [...]}`。
+/// 兼容网关返回 `{"data": [...]}` 包装的情况。
+fn parse_github_catalog(body: &Value) -> Vec<String> {
+    let ids = |arr: &[Value]| -> Vec<String> {
+        arr.iter()
+            .filter_map(|m| m.get("id").and_then(Value::as_str).map(String::from))
+            .collect()
+    };
+    if let Some(arr) = body.as_array() {
+        ids(arr)
+    } else {
+        body.get("data")
+            .and_then(Value::as_array)
+            .map(|arr| ids(arr))
+            .unwrap_or_default()
+    }
+}
+
 /// reqwest 要求 URL 带 scheme；用户在表单里通常只填 host（如 `127.0.0.1:11434`），
 /// 缺省补 `http://`（本地 Ollama 最常见，也是默认行为）。
 fn ensure_scheme(url: &str) -> String {
@@ -198,6 +250,14 @@ fn ensure_scheme(url: &str) -> String {
     } else {
         format!("http://{url}")
     }
+}
+
+/// GitHub Models 下线检测：该服务已于 2026-07-30 被 GitHub 官方全面下线，
+/// 此后 models.github.ai 对任意路径/方法/凭据统一返回 200 + 纯文本 `OK`。
+/// 命中该特征（响应体恰为 `OK` 且目标主机是 models.github.ai）时给出下线提示，
+/// 而非让用户误以为是 Key 或配置问题。
+fn is_retired_github_models_ok(body_text: &str, base_url: &str) -> bool {
+    body_text.trim() == "OK" && base_url.contains("models.github.ai")
 }
 
 /// 从错误响应体提取一段可读信息（避免把原始 body 直接透给前端）。
@@ -390,6 +450,81 @@ mod tests {
             r.models,
             vec!["deepseek-v4.1-flash-free", "glm-5.3-flash-free"]
         );
+    }
+
+    #[tokio::test]
+    async fn github_models_uses_catalog_endpoint_and_top_level_array() {
+        // GitHub Models 预设 base 是推理基址（…/inference），该基址下没有 /models
+        // 列表接口（实测 200 + 纯文本 `OK`）。同步必须改走 GitHub REST 的
+        // /catalog/models，且响应是顶层数组而非 {"data": [...]}。
+        let m = start_mock(json!([
+            {"id": "openai/gpt-4.1"},
+            {"id": "openai/gpt-5-mini"}
+        ]))
+        .await;
+        let mut input = draft("openai", &format!("{}/inference", m.addr));
+        input.provider = Some("github_models".to_string());
+        let r = fetch_upstream_models(&input, "ghp_test", 5).await.unwrap();
+        assert_eq!(r.models, vec!["openai/gpt-4.1", "openai/gpt-5-mini"]);
+        assert_eq!(r.protocol, "openai");
+        assert_eq!(r.base_url, m.addr);
+        let reqs = m.received.lock().await.clone();
+        assert!(
+            reqs[0].0.contains("GET /catalog/models"),
+            "request line: {}",
+            reqs[0].0
+        );
+        assert!(reqs[0].1.contains("Bearer ghp_test"));
+    }
+
+    #[tokio::test]
+    async fn github_models_catalog_wrapped_in_data_also_accepted() {
+        // 兼容性：若网关把目录包成 {"data": [...]}，同样能解析。
+        let m = start_mock(json!({"data": [{"id": "openai/gpt-4.1"}]})).await;
+        let mut input = draft("openai", &m.addr);
+        input.provider = Some("github_models".to_string());
+        let r = fetch_upstream_models(&input, "ghp_test", 5).await.unwrap();
+        assert_eq!(r.models, vec!["openai/gpt-4.1"]);
+    }
+
+    #[tokio::test]
+    async fn non_json_body_error_includes_snippet() {
+        // 200 但返回纯文本（如 GitHub 边缘的 `OK`）：报错必须带响应片段，便于排障。
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap().to_string();
+        tokio::spawn(async move {
+            if let Ok((mut socket, _)) = listener.accept().await {
+                let mut buf = [0u8; 4096];
+                let _ = socket.read(&mut buf).await;
+                let _ = socket
+                    .write_all(b"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 2\r\nConnection: close\r\n\r\nOK")
+                    .await;
+                let _ = socket.flush().await;
+            }
+        });
+        let input = draft("openai", &addr);
+        let err = fetch_upstream_models(&input, "k", 5).await.unwrap_err();
+        assert!(err.contains("无法解析的 JSON"), "err: {err}");
+        assert!(err.contains("OK"), "err should carry body snippet: {err}");
+    }
+
+    #[test]
+    fn retired_github_models_ok_detection() {
+        // 200 + 纯文本 OK 且主机为 models.github.ai → 服务已下线特征。
+        assert!(is_retired_github_models_ok(
+            "OK\n",
+            "https://models.github.ai/catalog"
+        ));
+        assert!(is_retired_github_models_ok(
+            " OK ",
+            "https://models.github.ai"
+        ));
+        // 其他主机 / 其他响应体不命中。
+        assert!(!is_retired_github_models_ok("OK", "http://127.0.0.1:1234"));
+        assert!(!is_retired_github_models_ok(
+            "{\"data\":[]}",
+            "https://models.github.ai/catalog"
+        ));
     }
 
     #[tokio::test]

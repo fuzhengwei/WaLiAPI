@@ -256,8 +256,9 @@ pub struct ProtocolPresetGroup {
 }
 
 /// 当前 registry revision（YYYY-MM-DD）。2026-08-06 建立基线，2026-10-22 加入
-/// OpenCode 免费车道与 Kilo 免费池两个 preset，并补齐免费层标注
-/// （Google/智谱 signup）与 ModelScope 魔搭、GitHub Models 两个免费层 preset。
+/// OpenCode 免费车道与 Kilo 免费池两个 preset，补齐免费层标注
+/// （Google/智谱 signup）与 ModelScope 魔搭免费层 preset；同日移除
+/// GitHub Models preset（该服务已于 2026-07-30 被 GitHub 全面下线）。
 pub const PRESET_REVISION: &str = "2026-10-22";
 
 /// 2026-08-06 基线时入库的模型建议复核日（与 registry revision 解耦，
@@ -289,7 +290,6 @@ const SRC_MISTRAL: &str = "https://docs.mistral.ai/getting-started/models";
 const SRC_NVIDIA: &str = "https://build.nvidia.com/explore/reasoning";
 const SRC_OPENROUTER: &str = "https://openrouter.ai/docs/models";
 const SRC_MODELSCOPE: &str = "https://modelscope.cn/headlines/article/795";
-const SRC_GITHUB_MODELS: &str = "https://docs.github.com/en/github-models";
 const SRC_SILICONFLOW: &str = "https://siliconflow.cn/pricing";
 const SRC_HUGGINGFACE: &str = "https://huggingface.co/docs/inference-providers/index";
 const SRC_SAMBANOVA: &str = "https://docs.sambanova.ai/docs/en/models";
@@ -807,32 +807,11 @@ fn openai_presets() -> Vec<ChannelPreset> {
             EndpointTestStrategy::ProbeFirstModel,
         )
         .signup("https://openrouter.ai/keys"),
-        // GitHub Models：GitHub 官方免费推理层。凭据是 GitHub PAT（需勾选
-        // models:read 权限），Bearer 方式即可，无需 OAuth 登录流程。个人账户
-        // 免费层限速、上下文受限；模型 id 为 publisher/model 复合格式，
-        // 清单以 docs.github.com 的模型目录为准，可经「同步上游模型」覆盖。
-        preset(
-            ChannelProtocol::OpenAI,
-            ChannelProvider::GithubModels,
-            "GitHub Models（免费层）",
-            RegionGroup::International,
-            "GitHub 官方推理网关：GitHub PAT（需 models:read 权限）即可调用多厂商模型，个人账户免费层限速、上下文受限。模型 id 为 publisher/model 格式。",
-            "github_models",
-            "https://models.github.ai/inference",
-            "https://models.github.ai/inference",
-            "openai",
-            vec![NativeEndpoint::ChatCompletions],
-            vec![NativeEndpoint::ChatCompletions],
-            AuthScheme::Bearer,
-            vec![
-                model("openai/gpt-4.1", "2026-10-22", SRC_GITHUB_MODELS),
-                model("openai/gpt-4o", "2026-10-22", SRC_GITHUB_MODELS),
-                model("openai/gpt-4o-mini", "2026-10-22", SRC_GITHUB_MODELS),
-            ],
-            ModelEnumStrategy::StaticPlusSync,
-            EndpointTestStrategy::ProbeFirstModel,
-        )
-        .signup("https://github.com/settings/tokens"),
+        // GitHub Models 已于 2026-07-30 被 GitHub 官方全面下线（playground /
+        // 模型目录 / 推理 API / BYOK 全部关闭，见 GitHub changelog）。下线后
+        // models.github.ai 对任意路径/方法/凭据统一返回 200 + 纯文本 `OK`，
+        // 任何 Key 都无法使用，预设随之移除（ChannelProvider::GithubModels
+        // 枚举保留，兼容已存储渠道的反序列化）。
         // SambaNova Cloud 免费层：无绑卡状态即 Free Tier（20 RPM / 20 RPD /
         // 200K tokens/天，超额 429）。模型清单可无凭据经 GET /models 拉取，
         // 可经「同步上游模型」覆盖；DeepSeek-V3.2 与 MiniMax-M3 为 Preview，
@@ -1362,48 +1341,6 @@ mod tests {
         assert_eq!(m_verified_at(&p), "2026-10-22");
     }
 
-    /// GitHub Models 免费层预设契约：URL/鉴权/端点/策略/文案逐项锁定。
-    #[test]
-    fn github_models_openai_preset_contract() {
-        let p = presets_for_protocol(ChannelProtocol::OpenAI)
-            .into_iter()
-            .find(|p| p.provider == ChannelProvider::GithubModels)
-            .expect("openai github_models preset");
-        assert_eq!(p.id, "openai:github_models");
-        assert_eq!(p.region, RegionGroup::International);
-        assert_eq!(p.native_base_url, "https://models.github.ai/inference");
-        assert_eq!(p.legacy_base_url, "https://models.github.ai/inference");
-        assert_eq!(p.legacy_type, "openai");
-        assert_eq!(p.native_endpoints, vec![NativeEndpoint::ChatCompletions]);
-        assert_eq!(
-            p.default_checked_endpoints,
-            vec![NativeEndpoint::ChatCompletions]
-        );
-        assert_eq!(p.auth_scheme, AuthScheme::Bearer);
-        assert_eq!(p.model_enum_strategy, ModelEnumStrategy::StaticPlusSync);
-        assert_eq!(
-            p.endpoint_test_strategy,
-            EndpointTestStrategy::ProbeFirstModel
-        );
-        assert_eq!(p.icon_key, "github_models");
-        assert_eq!(p.provider.as_str(), "github_models");
-        assert_eq!(
-            serde_json::to_string(&p.provider).unwrap(),
-            "\"github_models\"".to_string()
-        );
-        // 凭据为 GitHub PAT（models:read），signup 直达 PAT 设置页。
-        assert_eq!(
-            p.key_signup_url.as_deref(),
-            Some("https://github.com/settings/tokens")
-        );
-        // 模型 id 为 GitHub 目录的 publisher/model 复合格式。
-        assert!(p
-            .model_suggestions
-            .iter()
-            .all(|m| m.id.contains('/') && m.source_url == SRC_GITHUB_MODELS));
-        assert_eq!(m_verified_at(&p), "2026-10-22");
-    }
-
     /// 新 preset 全部模型建议的复核日期（本批 2026-10-22 核对）。
     fn m_verified_at(p: &ChannelPreset) -> &str {
         let dates: std::collections::HashSet<&str> = p
@@ -1530,7 +1467,6 @@ mod tests {
                 ChannelProvider::Mistral,
                 ChannelProvider::NvidiaNim,
                 ChannelProvider::OpenRouter,
-                ChannelProvider::GithubModels,
                 ChannelProvider::SambaNova,
                 ChannelProvider::HuggingFace,
                 ChannelProvider::Cohere,
@@ -1554,7 +1490,6 @@ mod tests {
                 ChannelProvider::Google
                     | ChannelProvider::Zhipu
                     | ChannelProvider::ModelScope
-                    | ChannelProvider::GithubModels
                     | ChannelProvider::SiliconFlow
                     | ChannelProvider::HuggingFace
                     | ChannelProvider::SambaNova
