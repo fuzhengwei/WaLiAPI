@@ -9,7 +9,7 @@
 **OpenAI、Claude、DeepSeek、Gemini などの上流モデルを、ひとつのローカルゲートウェイに統合。**<br>
 **ひとつのキー、ひとつのプロトコル、完全な監査ログで、Claude Code・Codex CLI・Gemini CLI・WaLiCode などの AI コーディングツールに接続。**
 
-[![Version](https://img.shields.io/badge/version-0.4.4-blue.svg)](./src-tauri/tauri.conf.json)
+[![Version](https://img.shields.io/badge/version-0.4.5-blue.svg)](./src-tauri/tauri.conf.json)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](./LICENSE)
 [![Platform](https://img.shields.io/badge/platform-macOS%20%7C%20Windows%20%7C%20Linux-lightgrey.svg)](#はじめに)
 [![Built with Tauri](https://img.shields.io/badge/built%20with-Tauri%202-orange.svg)](https://tauri.app)
@@ -20,11 +20,13 @@
 
 </div>
 
+> 🎁 **無料チャネルをすぐに使える**：初回起動時にキー不要の **OpenCode 無料レーン** と **Kilo 無料プール** の 2 チャネルを自動登録。設定ゼロでそのまま呼び出せます。さらに **Groq / Cerebras / Mistral / NVIDIA NIM / OpenRouter** の 5 つの無料枠チャネルプリセットも用意されており、登録してキーを取得するだけで使えます。詳しくは[無料チャネル](#-無料チャネルをすぐに使える)へ。
+
 ---
 
 ## 🧭 30 秒でわかる WaLiAPI
 
-次の図は WaLiAPI の全体的な動作フローです。左側がリクエストを送る AI アプリ、中央が WaLiAPI ゲートウェイの処理チェーン、右側が設定済みの上流モデルチャネルです。
+次の図は WaLiAPI の全体的な動作フローです。左側がリクエストを送る AI アプリ、中央が WaLiAPI ゲートウェイの処理チェーン（内蔵の RAG ナレッジベースと LLM-Wiki を含む）、右側が 3 種類の上流チャネル——**API チャネル**（キー接続）、**無料チャネル**（キー不要 / 無料枠）、**アカウントチャネル**（OAuth ログインの Auth アカウント）です。
 
 ```mermaid
 flowchart LR
@@ -46,25 +48,62 @@ flowchart LR
         E["④ プロトコル変換 · 上流アダプタ<br/>OpenAI · Claude · Gemini · DeepSeek · カスタム"]
 
         B --> C --> D --> E
+
+        subgraph Knowledge["📚 内蔵ナレッジサービス（同じルーティングと監査を利用）"]
+            direction LR
+            R["RAG ナレッジベース<br/>解析 → チャンク → ベクトル化<br/>HNSW + FTS5 ハイブリッド検索"]
+            W["LLM-Wiki<br/>Markdown ページ · ナレッジグラフ<br/>MCP ツールとして公開"]
+        end
     end
 
-    subgraph Providers["☁️ 上流モデルプロバイダ"]
+    subgraph Channels["☁️ 上流チャネル（3 種類）"]
         direction TB
-        F1["OpenAI / Claude"]
-        F2["DeepSeek / Gemini"]
-        F3["智谱 / 通義 / Moonshot / 豆包"]
-        F4["StepFun / Ollama / カスタム"]
+        F1["🔗 API チャネル（キー接続）<br/>OpenAI · Claude · DeepSeek · Gemini<br/>智谱 · 通義 · Moonshot · 豆包 · StepFun"]
+        F2["🎁 無料チャネル<br/>OpenCode レーン / Kilo プール（キー不要 · 初回起動時に登録）<br/>Groq · Cerebras · Mistral · NVIDIA NIM · OpenRouter"]
+        F3["👤 アカウントチャネル（OAuth ログイン）<br/>Codex · Kimi · Antigravity<br/>Qoder · WorkBuddy · Grok"]
     end
 
     Clients -- "統一キー<br/>sk-waliapi-*" --> B
-    E -- "HTTPS" --> Providers
+    E -- "HTTPS 転送" --> Channels
+    Clients -. "MCP /mcp · REST /api/kb<br/>RAG 検索 · Wiki Q&A" .-> Knowledge
+    Knowledge -. "Embedding / 回答モデル<br/>ゲートウェイルーティングを利用" .-> D
 
     style Clients fill:#f0f7ff,stroke:#4a90d9,color:#1a3a5c
     style Gateway fill:#f6f0ff,stroke:#7c5cd6,color:#3a2a5c
-    style Providers fill:#f0fdf4,stroke:#34a853,color:#1a4a2c
+    style Knowledge fill:#fffbea,stroke:#d9a514,color:#5c4a1a
+    style Channels fill:#f0fdf4,stroke:#34a853,color:#1a4a2c
 ```
 
-**ひとことで**: すべての下流 AI アプリは WaLiAPI に向ければ OK —— プロトコル変換・セキュリティ監査・負荷分散・監査ログを担い、設定した上流チャネルへ転送します。チャネルのクォータ枯渇や障害時は自動で次の候補へフェイルオーバーし、AI ツール側は一切感知しません。
+**ひとことで**: すべての下流 AI アプリは WaLiAPI に向ければ OK —— プロトコル変換・セキュリティ監査・負荷分散・監査ログを担い、設定した API チャネル・無料チャネル・アカウントチャネルへ転送します。チャネルのクォータ枯渇や障害時は自動で次の候補へフェイルオーバーし、AI ツール側は一切感知しません。内蔵の RAG ナレッジベースと LLM-Wiki により、エージェントは MCP / REST でプライベートナレッジを直接検索でき、そのモデル呼び出しも同じチャネルルーティングと監査を通ります。
+
+## 🎁 無料チャネルをすぐに使える
+
+費用ゼロで始められます。WaLiAPI には 2 種類の無料チャネルがあります。
+
+**1. キー不要の内蔵チャネル（設定ゼロ）**
+
+初回起動時に「チャネル管理」へ自動登録されます。登録もキーも不要：
+
+| チャネル | 説明 |
+|:---|:---|
+| **OpenCode 無料レーン** | 公開プール型クレデンシャル。ゲートウェイが上流 v2 フィンガープリントゲート対策（セッション鋳造・ツール宣言）を自動整形 |
+| **Kilo 無料プール** | 完全キー不要でそのまま呼び出し |
+
+シードチャネルは 1 度だけ追加され、削除しても再登録されません。通常のチャネルと同じく編集・有効化・スケジューリングできます。
+
+**2. 無料枠チャネルプリセット（登録してキー取得）**
+
+「新規チャネル」で以下のプリセットを選び、画面の「API Key を取得」リンクから登録するだけ。モデル一覧は「上流モデル同期」で更新できます：
+
+| プリセット | 無料枠 |
+|:---|:---|
+| **Groq** | 登録でキー取得。高速 LPU 推理、レート・日次制限あり |
+| **Cerebras** | 登録でクレジット進呈。ウェハレベルの高速推論 |
+| **Mistral** | La Plateforme 無料実験枠。日次 / 月次制限あり |
+| **NVIDIA NIM** | 登録で 1000 クレジット。DeepSeek / Kimi / GLM / MiniMax などを集約 |
+| **OpenRouter** | `:free` 接尾辞モデルは無料。`openrouter/free` で現在使える無料プールへ自動ルーティング |
+
+> 💡 無料枠にはそれぞれレート・クォータ制限があり、超過時は上流が 429 を返します。ゲートウェイは自動で次の利用可能チャネルへフェイルオーバーします。また「Auth アカウント」で OAuth ログインしたアカウントチャネル（Antigravity・Codex・Kimi・Qoder など）でも、アカウント自身のクォータを利用できます。
 
 ## 🌟 WaLiAPI が選ばれる理由
 
@@ -82,6 +121,7 @@ flowchart LR
 ## 📑 目次
 
 - [はじめに](#はじめに)
+- [無料チャネルをすぐに使える](#-無料チャネルをすぐに使える)
 - [仕組み](#仕組み)
 - [主な機能](#主な機能)
 - [マルチプロトコル接続](#マルチプロトコル接続)
@@ -381,6 +421,13 @@ WaLiAPI は**ローカル / イントラネット優先**で設計されてい�
 ## 📌 バージョン履歴
 
 完全なリリース履歴（中国語）は[メイン README](README.md#-版本历史) を参照してください。最新リリース：
+
+### v0.4.5 (2026-10-22)
+
+- ✨ **無料チャネル対応**（@fuzhengwei）：初回起動時に OpenCode 無料レーンと Kilo 無料プールをキー不要のチャネルとして自動登録（設定ゼロ・1 度のみ・削除は尊重）。上流 v2 フィンガープリントゲートを通過させる専用 OpenCode レーン実行器を追加（公開クレデンシャル `public`、固定ヘッダ、セッション ID 鋳造とセッションプール、`read` / `shell` ツール宣言）。無料枠チャネルプリセット 5 種を追加 —— Groq・Cerebras・Mistral・NVIDIA NIM・OpenRouter —— キー入力欄の上に「API Key を取得」リンク（`key_signup_url`）を表示
+- ✨ **Wiki 再構築と UX**（PR #166、@freakojc）：プログラマティックなインデックス再構築（`services/wiki/rebuild.rs`）——LLM 意味グルーピングとログ整合性バックフィル。ページタブ UX 改善（スクロール位置・ドロップダウン統一・ドキュメント検索）
+- 🐛 **WorkBuddy レスポンス互換**（PR #168、@mw）：上流レスポンス形式の差異に対するレスポンス解析と SSE ストリーミング処理の互換性強化
+- 🔧 バージョンを 0.4.5 に更新（package.json / Cargo.toml / tauri.conf.json / Cargo.lock）
 
 ### v0.4.4 (2026-10-18)
 

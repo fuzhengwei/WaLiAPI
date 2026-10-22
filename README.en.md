@@ -9,7 +9,7 @@
 **Unify OpenAI, Claude, DeepSeek, Gemini and more behind one local gateway.**<br>
 **One key, one protocol, one complete audit log — for Claude Code, Codex CLI, Gemini CLI, WaLiCode and any AI coding tool.**
 
-[![Version](https://img.shields.io/badge/version-0.4.4-blue.svg)](./src-tauri/tauri.conf.json)
+[![Version](https://img.shields.io/badge/version-0.4.5-blue.svg)](./src-tauri/tauri.conf.json)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](./LICENSE)
 [![Platform](https://img.shields.io/badge/platform-macOS%20%7C%20Windows%20%7C%20Linux-lightgrey.svg)](#getting-started)
 [![Built with Tauri](https://img.shields.io/badge/built%20with-Tauri%202-orange.svg)](https://tauri.app)
@@ -20,11 +20,13 @@
 
 </div>
 
+> 🎁 **Free channels out of the box**: two key-free channels — **OpenCode Free Lane** and the **Kilo Free Pool** — are seeded on first start, zero configuration required. Five free-tier channel presets (**Groq / Cerebras / Mistral / NVIDIA NIM / OpenRouter**) are also ready to use after a quick sign-up. See [Free Channels](#-free-channels-out-of-the-box).
+
 ---
 
 ## 🧭 WaLiAPI in 30 Seconds
 
-The diagram below shows the complete workflow: AI applications on the left, the WaLiAPI processing pipeline in the middle, and your configured upstream model channels on the right.
+The diagram below shows the complete workflow: AI applications on the left, the WaLiAPI processing pipeline in the middle (including the built-in RAG knowledge base and LLM-Wiki engine), and three kinds of upstream channels on the right — **API channels** (API-key based), **free channels** (key-free / free tier) and **account channels** (OAuth-signed-in Auth accounts).
 
 ```mermaid
 flowchart LR
@@ -46,25 +48,62 @@ flowchart LR
         E["④ Protocol Conversion · Upstream Adaptors<br/>OpenAI · Claude · Gemini · DeepSeek · Custom"]
 
         B --> C --> D --> E
+
+        subgraph Knowledge["📚 Built-in Knowledge Services (same routing & audit)"]
+            direction LR
+            R["RAG Knowledge Base<br/>Parse → Chunk → Embed<br/>HNSW + FTS5 Hybrid Retrieval"]
+            W["LLM-Wiki<br/>Markdown Pages · Knowledge Graph<br/>Exposed via MCP Tools"]
+        end
     end
 
-    subgraph Providers["☁️ Upstream Providers"]
+    subgraph Channels["☁️ Upstream Channels (3 kinds)"]
         direction TB
-        F1["OpenAI / Claude"]
-        F2["DeepSeek / Gemini"]
-        F3["Zhipu / Qwen / Moonshot / Doubao"]
-        F4["StepFun / Ollama / Custom"]
+        F1["🔗 API Channels (key-based)<br/>OpenAI · Claude · DeepSeek · Gemini<br/>Zhipu · Qwen · Moonshot · Doubao · StepFun"]
+        F2["🎁 Free Channels<br/>OpenCode Lane / Kilo Pool (key-free, pre-seeded)<br/>Groq · Cerebras · Mistral · NVIDIA NIM · OpenRouter"]
+        F3["👤 Account Channels (OAuth sign-in)<br/>Codex · Kimi · Antigravity<br/>Qoder · WorkBuddy · Grok"]
     end
 
     Clients -- "Unified key<br/>sk-waliapi-*" --> B
-    E -- "HTTPS" --> Providers
+    E -- "HTTPS forward" --> Channels
+    Clients -. "MCP /mcp · REST /api/kb<br/>RAG retrieval · Wiki Q&A" .-> Knowledge
+    Knowledge -. "Embedding / answer models<br/>via gateway routing" .-> D
 
     style Clients fill:#f0f7ff,stroke:#4a90d9,color:#1a3a5c
     style Gateway fill:#f6f0ff,stroke:#7c5cd6,color:#3a2a5c
-    style Providers fill:#f0fdf4,stroke:#34a853,color:#1a4a2c
+    style Knowledge fill:#fffbea,stroke:#d9a514,color:#5c4a1a
+    style Channels fill:#f0fdf4,stroke:#34a853,color:#1a4a2c
 ```
 
-**In one sentence**: point every downstream AI app at WaLiAPI — it handles protocol translation, security auditing, load balancing and request logging, then forwards traffic to the upstream channels you configured. When a channel runs out of quota or fails, requests fail over to the next candidate automatically and your AI tools never notice.
+**In one sentence**: point every downstream AI app at WaLiAPI — it handles protocol translation, security auditing, load balancing and request logging, then forwards traffic to the API channels, free channels or account channels you configured. When a channel runs out of quota or fails, requests fail over to the next candidate automatically and your AI tools never notice. The built-in RAG knowledge base and LLM-Wiki engine let agents query private knowledge via MCP / REST, and their model calls reuse the same channel routing and audit trail.
+
+## 🎁 Free Channels Out of the Box
+
+Get running without spending a cent. WaLiAPI ships two kinds of free channels:
+
+**1. Key-free built-in channels (zero configuration)**
+
+Seeded automatically into **Channels** on first start — no registration, no API key:
+
+| Channel | Notes |
+|:---|:---|
+| **OpenCode Free Lane** | Pooled public credential; the gateway transparently shapes requests to pass the upstream v2 fingerprint gate (session minting, tool fingerprint declaration) |
+| **Kilo Free Pool** | Completely key-free |
+
+Seeds are added only once — deleting them is respected and they will not come back. You can edit, toggle and schedule them like any other channel.
+
+**2. Free-tier channel presets (sign up for a key)**
+
+Pick one of the following presets under **New Channel** and follow the on-page "Get API Key" link; model lists can be refreshed via "Sync Upstream Models":
+
+| Preset | Free tier |
+|:---|:---|
+| **Groq** | Fast LPU inference; rate & daily limits apply |
+| **Cerebras** | Free credits on sign-up, wafer-scale speed |
+| **Mistral** | La Plateforme free experiment tier, daily / monthly caps |
+| **NVIDIA NIM** | 1000 credits on sign-up; aggregates DeepSeek / Kimi / GLM / MiniMax and more |
+| **OpenRouter** | Models with a `:free` suffix are free; `openrouter/free` auto-routes the current free pool |
+
+> 💡 Free tiers have their own rate / quota limits and return 429 when exceeded — the gateway then fails over to the next available channel automatically. Account channels signed in under **Auth Accounts** (Antigravity, Codex, Kimi, Qoder, …) can also use their built-in account quota.
 
 ## 🌟 Why WaLiAPI
 
@@ -82,6 +121,7 @@ flowchart LR
 ## 📑 Table of Contents
 
 - [Getting Started](#getting-started)
+- [Free Channels Out of the Box](#-free-channels-out-of-the-box)
 - [How It Works](#how-it-works)
 - [Core Features](#core-features)
 - [Multi-Protocol Access](#multi-protocol-access)
@@ -419,6 +459,13 @@ WaLiAPI is designed **local / intranet first**. Read this section before deployi
 ## 📌 Version History
 
 The full release history (in Chinese) is maintained in the [main README](README.md#-版本历史). Latest release:
+
+### v0.4.5 (2026-10-22)
+
+- ✨ **Free channels integrated** (@fuzhengwei): the OpenCode Free Lane and Kilo Free Pool are pre-seeded as key-free channels on first start (zero configuration, seeded once, deletions respected); a dedicated OpenCode lane executor shapes requests to pass the upstream v2 fingerprint gate (public credential `public`, fixed headers, session-id minting with a rotating session pool, `read` / `shell` tool fingerprint declaration); five free-tier channel presets added — Groq, Cerebras, Mistral, NVIDIA NIM and OpenRouter — each with a `key_signup_url` "Get API Key" link rendered above the key input
+- ✨ **Wiki rebuild & UX** (PR #166, @freakojc): programmatic index rebuild (`services/wiki/rebuild.rs`) with LLM semantic grouping and log consistency backfill; page-tab UX improvements (scroll position, unified dropdown styling, document search)
+- 🐛 **WorkBuddy response compatibility** (PR #168, @mw): hardened response parsing and SSE streaming for upstream response shape differences
+- 🔧 Version bumped to 0.4.5 (package.json / Cargo.toml / tauri.conf.json / Cargo.lock)
 
 ### v0.4.4 (2026-10-18)
 

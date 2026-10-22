@@ -4,7 +4,7 @@
 
 ## 项目概览
 
-**WaLiAPI** 是一款本地运行的 LLM API 网关（当前版本 0.3.5，MIT 协议）。核心能力：
+**WaLiAPI** 是一款本地运行的 LLM API 网关（当前版本 0.4.5，MIT 协议）。核心能力：
 
 - **多协议网关**：下游可用 OpenAI Chat Completions、OpenAI Responses、Anthropic Messages 三种协议接入，出口统一转换后转发到上游供应商（OpenAI / Claude / DeepSeek / Gemini / 智谱 / 通义 / Moonshot / 豆包 / Ollama / 自定义）。
 - **渠道调度**：优先级 + 权重负载均衡、多 API Key 负载、模型映射、自动故障切换。

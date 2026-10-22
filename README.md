@@ -9,7 +9,7 @@
 **把 OpenAI、Claude、DeepSeek、Gemini 等上游模型供应商统一为一个本地网关，**<br>
 **用一套密钥、一套协议、一份完整审计日志，接入 Claude Code、Codex CLI、Gemini CLI、WaLiCode 等 AI 编程工具。**
 
-[![Version](https://img.shields.io/badge/version-0.4.4-blue.svg)](./src-tauri/tauri.conf.json)
+[![Version](https://img.shields.io/badge/version-0.4.5-blue.svg)](./src-tauri/tauri.conf.json)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](./LICENSE)
 [![Platform](https://img.shields.io/badge/platform-macOS%20%7C%20Windows%20%7C%20Linux-lightgrey.svg)](#-快速开始)
 [![Built with Tauri](https://img.shields.io/badge/built%20with-Tauri%202-orange.svg)](https://tauri.app)
@@ -20,11 +20,13 @@
 
 </div>
 
+> 🎁 **免费渠道开箱即用**：启动即内置 **OpenCode 免费车道** 与 **Kilo 免费池** 两条免 Key 渠道，零配置直接调用；另提供 **Groq / Cerebras / Mistral / NVIDIA NIM / OpenRouter** 五个免费层渠道预设，注册领取 API Key 即用。详见 [免费渠道](#-免费渠道开箱即用)。
+
 ---
 
 ## 🧭 30 秒看懂 WaLiAPI
 
-下面这张图描述了 WaLiAPI 的完整工作流：左侧是发出请求的 AI 应用，中间是 WaLiAPI 网关的处理链路，右侧是你配置的上游模型渠道。
+下面这张图描述了 WaLiAPI 的完整工作流：左侧是发出请求的 AI 应用，中间是 WaLiAPI 网关的处理链路（含内置的 RAG 知识库与 LLM-Wiki 知识引擎），右侧是你配置的三类上游渠道——**API 渠道**（Key 接入）、**免费渠道**（免 Key / 免费层）与**账号渠道**（OAuth 登录的 Auth 账号）。
 
 ```mermaid
 flowchart LR
@@ -46,25 +48,62 @@ flowchart LR
         E["④ 协议转换 · 上游适配<br/>OpenAI · Claude · Gemini · DeepSeek · 自定义"]
 
         B --> C --> D --> E
+
+        subgraph Knowledge["📚 内置知识服务（复用同一调度与审计）"]
+            direction LR
+            R["RAG 知识库<br/>解析 → 分块 → 向量化<br/>HNSW + FTS5 混合检索问答"]
+            W["LLM-Wiki<br/>Markdown 页面 · 知识图谱<br/>MCP 工具对外暴露"]
+        end
     end
 
-    subgraph Providers["☁️ 上游模型供应商"]
+    subgraph Channels["☁️ 上游渠道（三类）"]
         direction TB
-        F1["OpenAI / Claude"]
-        F2["DeepSeek / Gemini"]
-        F3["智谱 / 通义 / Moonshot / 豆包"]
-        F4["StepFun / Ollama / 自定义"]
+        F1["🔗 API 渠道（Key 接入）<br/>OpenAI · Claude · DeepSeek · Gemini<br/>智谱 · 通义 · Moonshot · 豆包 · StepFun"]
+        F2["🎁 免费渠道<br/>OpenCode 车道 / Kilo 池（免 Key · 启动即内置）<br/>Groq · Cerebras · Mistral · NVIDIA NIM · OpenRouter 免费层"]
+        F3["👤 账号渠道（OAuth 登录）<br/>Codex · Kimi · Antigravity<br/>Qoder · WorkBuddy · Grok"]
     end
 
     Clients -- "统一密钥<br/>sk-waliapi-*" --> B
-    E -- "HTTPS" --> Providers
+    E -- "HTTPS 转发" --> Channels
+    Clients -. "MCP /mcp · REST /api/kb<br/>RAG 检索 · Wiki 问答" .-> Knowledge
+    Knowledge -. "Embedding / 问答模型<br/>走网关调度" .-> D
 
     style Clients fill:#f0f7ff,stroke:#4a90d9,color:#1a3a5c
     style Gateway fill:#f6f0ff,stroke:#7c5cd6,color:#3a2a5c
-    style Providers fill:#f0fdf4,stroke:#34a853,color:#1a4a2c
+    style Knowledge fill:#fffbea,stroke:#d9a514,color:#5c4a1a
+    style Channels fill:#f0fdf4,stroke:#34a853,color:#1a4a2c
 ```
 
-**一句话总结**：所有下游 AI 应用都指向 WaLiAPI —— 它完成协议翻译、安全审计、负载均衡与日志审计，再把请求转发给你配置的上游渠道；某个渠道额度用尽或故障时自动切换到下一个，AI 工具全程无感。
+**一句话总结**：所有下游 AI 应用都指向 WaLiAPI —— 它完成协议翻译、安全审计、负载均衡与日志审计，再把请求转发给你配置的 API 渠道、免费渠道或账号渠道；某个渠道额度用尽或故障时自动切换到下一个，AI 工具全程无感。网关内置 RAG 知识库与 LLM-Wiki 知识引擎，Agent 可通过 MCP / REST 直接检索私有知识，知识服务的模型调用同样走渠道调度与审计。
+
+## 🎁 免费渠道开箱即用
+
+不花一分钱也能跑起来。WaLiAPI 提供两类免费渠道：
+
+**1. 免 Key 内置渠道（零配置）**
+
+首次启动时自动预建进「渠道管理」，无需注册、无需 Key，保存密钥后即可调用：
+
+| 渠道 | 说明 |
+|:---|:---|
+| **OpenCode 免费车道** | 公共池化凭据，网关自动完成上游 v2 指纹门禁整形（会话铸造、工具指纹声明），开箱即用 |
+| **Kilo 免费池** | 完全免 Key，直接调用 |
+
+种子渠道仅添加一次，删除后不会自动加回；你可以像普通渠道一样编辑、启停或参与调度。
+
+**2. 免费层渠道预设（注册领 Key）**
+
+「新建渠道」中选择以下预设，按界面上的「获取 API Key」链接注册即用，模型清单支持「同步上游模型」拉取：
+
+| 预设 | 免费方式 |
+|:---|:---|
+| **Groq** | 注册领取 API Key，超高速 LPU 推理，速率与每日额度有限 |
+| **Cerebras** | 注册即送额度，晶圆级芯片高速推理 |
+| **Mistral** | La Plateforme 免费实验层，按日 / 月限额 |
+| **NVIDIA NIM** | 注册送 1000 credits，聚合 DeepSeek / Kimi / GLM / MiniMax 等开源模型 |
+| **OpenRouter** | 带 `:free` 后缀的模型免费调用，`openrouter/free` 自动路由当前可用免费池 |
+
+> 💡 免费渠道额度与速率各有约束，超额时上游返回 429，网关会自动切换到下一个可用渠道。此外，通过「Auth 账号」OAuth 登录的账号渠道（如 Antigravity、Codex、Kimi、Qoder）也可使用账号自带额度，部分供应商提供免费或订阅内额度。
 
 ## 🌟 为什么选择 WaLiAPI
 
@@ -84,6 +123,7 @@ flowchart LR
 ## 📑 目录
 
 - [快速开始](#-快速开始)
+- [免费渠道开箱即用](#-免费渠道开箱即用)
 - [工作原理](#-工作原理)
 - [核心功能](#-核心功能)
 - [多协议接入](#-多协议接入)
@@ -720,6 +760,28 @@ WaLiAPI 定位为**本地 / 内网优先**的 LLM 网关。公网部署前请先
 
 ## 📌 版本历史
 
+### v0.4.5 (2026-10-22)
+
+#### 免费渠道对接（@fuzhengwei）
+
+- ✨ **内置免费渠道种子，开箱即用**：启动时自动预建 OpenCode 免费车道与 Kilo 免费池两条免 Key 免费渠道（`services/builtin_channels.rs`），零配置即可调用；每实例仅种子一次，删除后不会自动加回，幂等兜底不产生重复渠道
+- ✨ **OpenCode 免费车道专用执行器**：新增 `endpoint_executor/opencode_lane.rs`，就地把请求整形为上游 v2 客户端指纹门禁接受的形状（公开令牌 `public`、固定 UA / 客户端头、会话 id 降序编码铸造 + 会话池轮换、`read` / `shell` 工具指纹逐字声明与同名工具改名），绕开 403 FreeTierError
+- ✨ **新增 5 个免费层渠道预设**：Groq / Cerebras / Mistral / NVIDIA NIM / OpenRouter，预设新增 `key_signup_url`「获取 API Key」跳转链接（前端在 Key 配置上方渲染注册提示），配套基线测试守护
+
+#### Wiki 重建与体验（PR #166，@freakojc）
+
+- ✨ **Wiki index/log 累积修复**：程序化重建（`services/wiki/rebuild.rs`）——程序化重建索引 + LLM 语义归组 + log 一致性回溯
+- 🎨 **Wiki 页面 tab 体验修复与增强**：页面滚动位置保持、下拉样式统一、搜索文档能力增强
+
+#### WorkBuddy 兼容（PR #168，@mw）
+
+- 🐛 **WorkBuddy 响应数据兼容性处理**：后端响应解析与 SSE 流式处理兼容加固
+
+#### 其他
+
+- 📝 **README 完善**：顶部新增「免费渠道开箱即用」提示；「30 秒看懂」架构图补充内置知识服务（RAG / LLM-Wiki）与三类上游渠道（API 渠道 / 免费渠道 / 账号渠道）分流；贡献者数据同步
+- 🔧 **版本号统一升级至 0.4.5**（package.json / Cargo.toml / tauri.conf.json / Cargo.lock）
+
 ### v0.4.4 (2026-10-18)
 
 #### Wiki 备份与全链路修复（PR #163 #164，@freakojc）
@@ -740,7 +802,8 @@ WaLiAPI 定位为**本地 / 内网优先**的 LLM 网关。公网部署前请先
 - 📝 **README 贡献者数据同步**：新增贡献者 ymsy2021（PR #165），更新小傅哥（362 commits）、Jason（24 commits，PR #163 #164）提交数与代码变更统计
 - 🔧 **版本号统一升级至 0.4.4**（package.json / Cargo.toml / tauri.conf.json / Cargo.lock）
 
-### v0.4.3 (2026-10-17)
+<details>
+<summary><b>v0.4.3 (2026-10-17)</b></summary>
 
 #### 软件对接 Link：MCP 能力域升级（@fuzhengwei）
 
@@ -758,6 +821,8 @@ WaLiAPI 定位为**本地 / 内网优先**的 LLM 网关。公网部署前请先
 #### 其他
 
 - 🔧 **版本号统一升级至 0.4.3**（package.json / Cargo.toml / tauri.conf.json / Cargo.lock）
+
+</details>
 
 <details>
 <summary><b>v0.4.2 (2026-10-16)</b></summary>
@@ -1610,15 +1675,15 @@ WaLiAPI 定位为**本地 / 内网优先**的 LLM 网关。公网部署前请先
 
 | | 贡献者 | GitHub | 提交 | 代码变更 | 主要贡献 |
 |:---:|:---|:---|:---:|:---|:---|
-| 🏆 | **小傅哥** | [@fuzhengwei](https://github.com/fuzhengwei) | 362 | `+83,987 / -9,054` | 项目创建者 · 核心架构 · 多渠道网关 · 协议转换 · 安全审计 · 知识库引擎 · Wiki 知识引擎 · MCP Server · Codex 账号切换 · API Key 独立启停与负载均衡增强 · WorkBuddy 对接与 Windows 升级启动修复（v0.4.1） · Qoder Auth 渠道与协议编解码 · 可观测性增强与仪表盘路由地图/Token 热力图 · API 日志客户端识别 · README 多语言化与 30 秒架构图（v0.4.2） · MCP 能力域升级为软件对接 Link 与 OpenAPI 一键导入、CLI-Hub 集成、Qoder 流式修复（v0.4.3） · 推理档位下拉组件统一（v0.4.4） |
+| 🏆 | **小傅哥** | [@fuzhengwei](https://github.com/fuzhengwei) | 369 | `+85,693 / -9,114` | 项目创建者 · 核心架构 · 多渠道网关 · 协议转换 · 安全审计 · 知识库引擎 · Wiki 知识引擎 · MCP Server · Codex 账号切换 · API Key 独立启停与负载均衡增强 · WorkBuddy 对接与 Windows 升级启动修复（v0.4.1） · Qoder Auth 渠道与协议编解码 · 可观测性增强与仪表盘路由地图/Token 热力图 · API 日志客户端识别 · README 多语言化与 30 秒架构图（v0.4.2） · MCP 能力域升级为软件对接 Link 与 OpenAPI 一键导入、CLI-Hub 集成、Qoder 流式修复（v0.4.3） · 推理档位下拉组件统一（v0.4.4） · 免费渠道对接：OpenCode 车道 / Kilo 池免 Key 内置种子、免费车道执行器、Groq / Cerebras / Mistral / NVIDIA NIM / OpenRouter 免费层预设（v0.4.5） |
 | ⚡ | **xian** | [@zsxink](https://github.com/zsxink) | 140 | `+97,192 / -24,477` | Anthropic Messages 协议兼容 · 渠道协议重构（T01-T14）· codec 加固 · SSRF 防护 · SSE 帧重组 · models 接口 · Kimi Code Auth · protocol 模块结构化重构 · Auth 多格式导入 |
 | 🛠 | **chyuan** | [@chyuan-cuihongyuan](https://github.com/chyuan-cuihongyuan) | 56 | `+11,881 / -1,729` | 统一上游重试判定决策函数与真值表测试 · 渠道健康探测与候选排序 · 语义缓存 · 流式内容持久化与断线续传 · X-Request-Id / OTLP 可观测性 · 知识库增量索引、查询改写与混合检索 · 配额强化 · 401/403 下游脱敏 · StepFun 渠道预设接入（PR #127） |
 | 🚀 | **GululuCopa** | [@GululuCopa](https://github.com/GululuCopa) | 24 | `+13,087 / -475` | Grok OAuth 登录（PR #122）· Antigravity OAuth Gemini 登录（PR #121）与 v0.3.6 修复（PR #128）· Grok 与 Antigravity namespace 工具兼容修复 · 网关客户端适配（流式出站无总超时、Grok 工具白名单与加密推理约束对齐、采样字段兼容、OpenCode/OpenClaw/Hermes 配置生成修正，PR #135）· codec 响应格式与防护修复（response_format 映射、safeguards fail-open、Gemini JSON Schema / Gemini 3 工具签名兼容、function_call fc_ 前缀修复，PR #136） |
 | 🐳 | **Fla1337** | [@Fla1337](https://github.com/Fla1337) | 15 | `+4,978 / -1,143` | Web 管理面板 · Docker / headless 部署 · waliapi-web 二进制 · 多阶段镜像构建 · Web 管理面板用户设置 |
-| 🔧 | **mw** | [@maowei0427](https://github.com/maowei0427) | 10 | `+1,228 / -244` | 日志响应内容记录 · Trace ID 追踪 · 详情页体验优化 · 知识库 embedding 批次配置 |
+| 🔧 | **mw** | [@maowei0427](https://github.com/maowei0427) | 11 | `+1,296 / -246` | 日志响应内容记录 · Trace ID 追踪 · 详情页体验优化 · 知识库 embedding 批次配置 · WorkBuddy 响应数据兼容性处理（PR #168，v0.4.5） |
 | 🔧 | **Nelson** | [@Zhengmingming1](https://github.com/Zhengmingming1) | 30 | `+22,688 / -3,833` | 知识库扫描版 PDF VLM OCR（方案A）· 中文 PDF 与检索修复 · 知识库访问授权与连接检查 · RAG 检索回归修复（管理搜索模式/权重、失败重导、索引落后回退、向量校验）· Token 配额标签澄清 · 修复 Claude 渠道协议适配 · pdfium macOS 打包路径修复 · Embeddings 配置补齐与 RAG 链路诊断（内部 Embedding 统一网关路由、分阶段诊断、API Key 健康检测，PR #140）· RAG 健康检测按 API Key 选择回答模型（PR #152）· 通用 RAG 质量优化、PDF 解析补全与 SQLite 并发写入修复（PR #153）· 知识库 Embedding 批次索引重复恢复（PR #158） |
 | 🐞 | **xerina** | [@jiangnuonnuo](https://github.com/jiangnuonnuo) | 9 | `+1,801 / -666` | Wiki Unicode 文本切片 panic 进程崩溃修复 · 新增字符边界安全切片工具（utils/text.rs）· RAG/Wiki 设置保存后状态未即时更新修复（PR #60）· Codex 账号重置卡与手动重置额度、重置操作流水记录（PR #149）|
-| 🐛 | **Jason** | [@freakojc](https://github.com/freakojc) | 24 | `+9,851 / -895` | 新增「简要」日志级别，请求消息列表只留最新 3 条（PR #119）· 日志统计覆盖索引优化 · 探测日志降噪与恢复状态就地更新 · 流式日志 499 误记修复 + Token 用量恢复 · 仪表盘 cached_tokens 聚合覆盖索引消除 2 秒加载 · 流式 pre-commit 阶段多 Key failover（PR #150）· 用量统计持久化与审计日志解耦、多条件组合清理、服务可用率健康口径、Token 趋势堆叠柱状图（PR #154）· 清理弹窗渠道日志 tab 与成功率公式修正、首页与弹窗 UI 优化（PR #155）· Wiki PDF 摄入全链路修复、API Key 知识访问授权、RAG/Wiki 体验优化与摄入进度修复（PR #159，v0.4.2）· Wiki 项目导出/导入 zip 备份恢复（PR #163）· ask_wiki 全链路修复（中文标点切片 panic、图片 URL 嵌套、审计档位归因等，PR #164，v0.4.4） |
+| 🐛 | **Jason** | [@freakojc](https://github.com/freakojc) | 26 | `+10,633 / -1,008` | 新增「简要」日志级别，请求消息列表只留最新 3 条（PR #119）· 日志统计覆盖索引优化 · 探测日志降噪与恢复状态就地更新 · 流式日志 499 误记修复 + Token 用量恢复 · 仪表盘 cached_tokens 聚合覆盖索引消除 2 秒加载 · 流式 pre-commit 阶段多 Key failover（PR #150）· 用量统计持久化与审计日志解耦、多条件组合清理、服务可用率健康口径、Token 趋势堆叠柱状图（PR #154）· 清理弹窗渠道日志 tab 与成功率公式修正、首页与弹窗 UI 优化（PR #155）· Wiki PDF 摄入全链路修复、API Key 知识访问授权、RAG/Wiki 体验优化与摄入进度修复（PR #159，v0.4.2）· Wiki 项目导出/导入 zip 备份恢复（PR #163）· ask_wiki 全链路修复（中文标点切片 panic、图片 URL 嵌套、审计档位归因等，PR #164，v0.4.4）· Wiki 程序化重建（索引 + LLM 语义归组 + log 一致性回溯）与页面 tab 体验增强（PR #166，v0.4.5） |
 | 🔧 | **yuanqixun** | [@yuanqixun](https://github.com/yuanqixun) | 9 | `+2,745 / -665` | 审计日志存储与加载优化 · Codex 设备码登录 · Codex 剩余额度展示 · 手动刷新 Codex 额度 · 大响应 SSE 帧兼容修复 |
 | 🩹 | **wuchubuzai2018** | [@wuchubuzai2018](https://github.com/wuchubuzai2018) | 2 | `+129 / -9` | 低版本 WebKit 左侧菜单不显示修复（Tailwind v4 断点兼容，附 ADR）· Codex 订阅页表格操作按钮悬浮文案优化（PR #144）|
 | 🐛 | **cyd** | [@cydmacro](https://github.com/cydmacro) | 2 | `+105 / -9` | Codex 工具调用参数一次性下发，修复部分客户端截断 · Codex Responses 请求 strip `prompt_cache_options` 兼容修复（PR #59）|

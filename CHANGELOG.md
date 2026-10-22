@@ -1,5 +1,27 @@
 # Changelog
 
+## v0.4.5 (2026-10-22)
+
+### 免费渠道对接（@fuzhengwei）
+
+- ✨ **内置免费渠道种子，开箱即用**：启动时自动预建 OpenCode 免费车道与 Kilo 免费池两条免 Key 免费渠道（新增 `services/builtin_channels.rs`，字段单一来源取自渠道预设），用户无需任何配置即可调用；每个安装实例仅种子一次，用户删除后不会自动加回（尊重用户意图），种子失败不置位标记、下次启动重试，`channel_provider_exists` 幂等兜底不产生重复渠道
+- ✨ **OpenCode 免费车道专用执行器**：新增 `endpoint_executor/opencode_lane.rs`（+827），把通用转发请求就地上游整形为 v2 客户端指纹门禁接受的形状——固定公开令牌 `public` + 固定 UA / 客户端头、会话 id 按 `ses_<12hex><14base62>` 降序编码铸造（8 槽会话池轮换避免额度集中耗尽）、`read` / `shell` 工具指纹逐字声明与同名工具改名，绕开 403 FreeTierError；非流式响应侧工具名已还原（流式改名工具暂保留别名）
+- ✨ **新增 5 个免费层渠道预设**：Groq（超高速 LPU 推理）、Cerebras（晶圆级芯片高速推理）、Mistral（La Plateforme 免费实验层）、NVIDIA NIM（注册送 credits，聚合 DeepSeek / Kimi / GLM / MiniMax 等开源模型）、OpenRouter（`:free` 后缀模型免费 + `openrouter/free` 自动路由免费池）；预设新增 `key_signup_url` 字段，前端在 Key 配置上方渲染「前往获取 API Key」跳转提示；免费层须带注册链接、其余预设不带，配套基线测试守护；静态模型建议取自 dsh-our-free-model 提供商注册表（2026-10-22 核对），可经「同步上游模型」拉取覆盖
+
+### Wiki 重建与体验（PR #166，@freakojc）
+
+- ✨ **Wiki index/log 累积修复**：新增程序化重建（`services/wiki/rebuild.rs`，+454）——程序化重建索引 + LLM 语义归组 + log 一致性回溯，修复索引与日志累积不一致问题；`wiki-prompt.txt` 提示词同步调整
+- 🎨 **Wiki 页面 tab 体验修复与增强**：页面滚动位置保持、下拉样式统一、搜索文档能力增强（KnowledgeBasePage / Select 组件配套优化）
+
+### WorkBuddy 兼容（PR #168，@mw）
+
+- 🐛 **WorkBuddy 响应数据兼容性处理**：`workbuddy_backend.rs` 响应解析与 `endpoint_executor/sse.rs` 流式处理兼容加固，避免上游响应形态差异导致解析失败
+
+### 其他
+
+- 📝 **README 完善**：顶部新增「免费渠道开箱即用」提示；「30 秒看懂」架构图完善——补充内置知识服务（RAG / LLM-Wiki）与三类上游渠道（API 渠道 / 免费渠道 / 账号渠道 Auth）分流；贡献者数据同步
+- 🔧 **版本号统一升级至 0.4.5**（package.json / Cargo.toml / tauri.conf.json / Cargo.lock）
+
 ## v0.4.4 (2026-10-18)
 
 ### Wiki 备份与全链路修复（PR #163 #164，@freakojc）
