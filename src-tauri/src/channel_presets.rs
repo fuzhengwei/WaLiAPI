@@ -53,6 +53,21 @@ pub enum ChannelProvider {
     /// Kilo 免费池（api.kilo.ai 公共网关免费池，完全免 Key）。
     #[serde(rename = "kilo")]
     Kilo,
+    /// Groq 免费层（超高速 LPU 推理，注册领 Key）。
+    #[serde(rename = "groq")]
+    Groq,
+    /// Cerebras 免费层（注册即用的高速推理）。
+    #[serde(rename = "cerebras")]
+    Cerebras,
+    /// Mistral 免费实验层（La Plateforme 免费额度）。
+    #[serde(rename = "mistral")]
+    Mistral,
+    /// NVIDIA NIM 免费层（注册送 credits，聚合多厂商开源模型）。
+    #[serde(rename = "nvidia_nim")]
+    NvidiaNim,
+    /// OpenRouter（聚合网关，:free 后缀模型免费调用）。
+    #[serde(rename = "openrouter")]
+    OpenRouter,
     Anthropic,
     Ollama,
     Custom,
@@ -72,6 +87,11 @@ impl ChannelProvider {
             ChannelProvider::StepFun => "stepfun",
             ChannelProvider::Opencode => "opencode",
             ChannelProvider::Kilo => "kilo",
+            ChannelProvider::Groq => "groq",
+            ChannelProvider::Cerebras => "cerebras",
+            ChannelProvider::Mistral => "mistral",
+            ChannelProvider::NvidiaNim => "nvidia_nim",
+            ChannelProvider::OpenRouter => "openrouter",
             ChannelProvider::Anthropic => "anthropic",
             ChannelProvider::Ollama => "ollama",
             ChannelProvider::Custom => "custom",
@@ -190,6 +210,18 @@ pub struct ChannelPreset {
     pub endpoint_test_strategy: EndpointTestStrategy,
     /// preset revision；保存渠道时记录供追溯，模板更新不覆盖已保存渠道
     pub preset_revision: String,
+    /// 免费层提供商的「获取 API Key」页面；前端在 Key 配置上方渲染跳转提示，
+    /// 方便用户直接前往注册领 Key。非免费层为 None（序列化时省略）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub key_signup_url: Option<String>,
+}
+
+impl ChannelPreset {
+    /// 附上「获取 API Key」跳转链接（链式，注册表内免费层提供商用）。
+    fn signup(mut self, url: &str) -> Self {
+        self.key_signup_url = Some(url.to_string());
+        self
+    }
 }
 
 /// 每个协议返回一组：`presets[0]` 恒为 custom option（置顶、默认选中）。
@@ -225,6 +257,12 @@ const SRC_OPENCODE: &str =
     "https://github.com/Ebony-Vinyl/dsh-our-free-model#免费车道opencode-的免密网关";
 /// Kilo 免费池模型清单的核对出处（Kilo 网关模型列表，isFree 切片）。
 const SRC_KILO: &str = "https://kilo.ai";
+/// 免费层 API Key 提供商的模型清单核对出处（官方模型目录）。
+const SRC_GROQ: &str = "https://console.groq.com/docs/models";
+const SRC_CEREBRAS: &str = "https://inference-docs.cerebras.ai/models";
+const SRC_MISTRAL: &str = "https://docs.mistral.ai/getting-started/models";
+const SRC_NVIDIA: &str = "https://build.nvidia.com/explore/reasoning";
+const SRC_OPENROUTER: &str = "https://openrouter.ai/docs/models";
 
 /// 构建一个 preset 的便捷函数。
 #[allow(clippy::too_many_arguments)]
@@ -264,6 +302,7 @@ fn preset(
         model_enum_strategy,
         endpoint_test_strategy,
         preset_revision: PRESET_REVISION.to_string(),
+        key_signup_url: None,
     }
 }
 
@@ -567,6 +606,123 @@ fn openai_presets() -> Vec<ChannelPreset> {
             ModelEnumStrategy::StaticPlusSync,
             EndpointTestStrategy::ProbeFirstModel,
         ),
+        // 免费层 API Key 提供商：注册后在官方控制台领取 Key，免费额度各有
+        // 限额与速率约束（超额 429）。端点均为 OpenAI Chat Completions 兼容，
+        // 模型清单可经「同步上游模型」从 GET /models 拉取覆盖；静态建议取自
+        // dsh-our-free-model 提供商注册表（2026-10-22 核对）。key_signup_url
+        // 供前端在 Key 配置上方渲染「前往获取 API Key」跳转提示。
+        preset(
+            ChannelProtocol::OpenAI,
+            ChannelProvider::Groq,
+            "Groq（免费层）",
+            RegionGroup::International,
+            "Groq 超高速 LPU 推理免费层：注册后领取 API Key 即用，速率与每日额度有限，超额返回 429。模型清单跟随上游。",
+            "groq",
+            "https://api.groq.com/openai/v1",
+            "https://api.groq.com/openai/v1",
+            "openai",
+            vec![NativeEndpoint::ChatCompletions],
+            vec![NativeEndpoint::ChatCompletions],
+            AuthScheme::Bearer,
+            vec![
+                model("llama-3.3-70b-versatile", "2026-10-22", SRC_GROQ),
+                model("meta-llama/llama-4-maverick-17b-128e-instruct", "2026-10-22", SRC_GROQ),
+                model("qwen/qwen3-32b", "2026-10-22", SRC_GROQ),
+                model("openai/gpt-oss-120b", "2026-10-22", SRC_GROQ),
+            ],
+            ModelEnumStrategy::StaticPlusSync,
+            EndpointTestStrategy::ProbeFirstModel,
+        )
+        .signup("https://console.groq.com/keys"),
+        preset(
+            ChannelProtocol::OpenAI,
+            ChannelProvider::Cerebras,
+            "Cerebras（免费层）",
+            RegionGroup::International,
+            "Cerebras 晶圆级芯片高速推理免费层：注册即送额度，速率有限，超额返回 429。",
+            "cerebras",
+            "https://api.cerebras.ai/v1",
+            "https://api.cerebras.ai/v1",
+            "openai",
+            vec![NativeEndpoint::ChatCompletions],
+            vec![NativeEndpoint::ChatCompletions],
+            AuthScheme::Bearer,
+            vec![
+                model("gpt-oss-120b", "2026-10-22", SRC_CEREBRAS),
+                model("zai-glm-4.7", "2026-10-22", SRC_CEREBRAS),
+                model("llama-3.3-70b", "2026-10-22", SRC_CEREBRAS),
+                model("llama-4-scout-17b-16e-instruct", "2026-10-22", SRC_CEREBRAS),
+            ],
+            ModelEnumStrategy::StaticPlusSync,
+            EndpointTestStrategy::ProbeFirstModel,
+        )
+        .signup("https://cloud.cerebras.ai"),
+        preset(
+            ChannelProtocol::OpenAI,
+            ChannelProvider::Mistral,
+            "Mistral（免费层）",
+            RegionGroup::International,
+            "Mistral La Plateforme 免费实验层：注册领取 API Key，免费额度按日/月限额，速率受限。",
+            "mistral",
+            "https://api.mistral.ai/v1",
+            "https://api.mistral.ai/v1",
+            "openai",
+            vec![NativeEndpoint::ChatCompletions],
+            vec![NativeEndpoint::ChatCompletions],
+            AuthScheme::Bearer,
+            vec![
+                // 固定版本号 id（-latest 浮动别名被预设规约禁止，见基线测试）；
+                // pinned 与 latest 的对应关系经 Mistral 官方模型目录核对。
+                model("mistral-large-2411", "2026-10-22", SRC_MISTRAL),
+                model("mistral-medium-2505", "2026-10-22", SRC_MISTRAL),
+                model("codestral-2508", "2026-10-22", SRC_MISTRAL),
+                model("devstral-small-2507", "2026-10-22", SRC_MISTRAL),
+            ],
+            ModelEnumStrategy::StaticPlusSync,
+            EndpointTestStrategy::ProbeFirstModel,
+        )
+        .signup("https://console.mistral.ai/api-keys"),
+        preset(
+            ChannelProtocol::OpenAI,
+            ChannelProvider::NvidiaNim,
+            "NVIDIA NIM（免费层）",
+            RegionGroup::International,
+            "NVIDIA NIM 聚合推理：注册送 1000 credits，可在 build.nvidia.com 调用多厂商开源模型（DeepSeek/Kimi/GLM/MiniMax 等）。",
+            "nvidia_nim",
+            "https://integrate.api.nvidia.com/v1",
+            "https://integrate.api.nvidia.com/v1",
+            "openai",
+            vec![NativeEndpoint::ChatCompletions],
+            vec![NativeEndpoint::ChatCompletions],
+            AuthScheme::Bearer,
+            vec![
+                model("deepseek-ai/deepseek-v4-pro", "2026-10-22", SRC_NVIDIA),
+                model("z-ai/glm-5.2", "2026-10-22", SRC_NVIDIA),
+                model("moonshotai/kimi-k2.6", "2026-10-22", SRC_NVIDIA),
+                model("minimaxai/minimax-m2.7", "2026-10-22", SRC_NVIDIA),
+            ],
+            ModelEnumStrategy::StaticPlusSync,
+            EndpointTestStrategy::ProbeFirstModel,
+        )
+        .signup("https://build.nvidia.com/settings/api-keys"),
+        preset(
+            ChannelProtocol::OpenAI,
+            ChannelProvider::OpenRouter,
+            "OpenRouter（免费模型）",
+            RegionGroup::International,
+            "OpenRouter 聚合网关：带 :free 后缀的模型免费调用（有每日请求上限）；openrouter/free 自动路由当前可用的免费池。同步上游模型后可浏览全部 :free 清单。",
+            "openrouter",
+            "https://openrouter.ai/api/v1",
+            "https://openrouter.ai/api/v1",
+            "openai",
+            vec![NativeEndpoint::ChatCompletions],
+            vec![NativeEndpoint::ChatCompletions],
+            AuthScheme::Bearer,
+            vec![model("openrouter/free", "2026-10-22", SRC_OPENROUTER)],
+            ModelEnumStrategy::StaticPlusSync,
+            EndpointTestStrategy::ProbeFirstModel,
+        )
+        .signup("https://openrouter.ai/keys"),
         preset(
             ChannelProtocol::OpenAI,
             ChannelProvider::Ollama,
@@ -1009,6 +1165,11 @@ mod tests {
                 ChannelProvider::Google,
                 ChannelProvider::Opencode,
                 ChannelProvider::Kilo,
+                ChannelProvider::Groq,
+                ChannelProvider::Cerebras,
+                ChannelProvider::Mistral,
+                ChannelProvider::NvidiaNim,
+                ChannelProvider::OpenRouter,
                 ChannelProvider::DeepSeek,
                 ChannelProvider::Qwen,
                 ChannelProvider::Zhipu,
@@ -1018,6 +1179,26 @@ mod tests {
                 ChannelProvider::Ollama,
             ]
         );
+        // 免费层 API Key 提供商必须带「获取 Key」跳转链接，且其余预设不带。
+        for preset in all_channel_presets() {
+            let has_signup = preset.key_signup_url.is_some();
+            let is_free_tier = matches!(
+                preset.provider,
+                ChannelProvider::Groq
+                    | ChannelProvider::Cerebras
+                    | ChannelProvider::Mistral
+                    | ChannelProvider::NvidiaNim
+                    | ChannelProvider::OpenRouter
+            );
+            assert_eq!(has_signup, is_free_tier, "{}", preset.id);
+            if is_free_tier {
+                assert!(
+                    preset.key_signup_url.as_deref().unwrap().starts_with("https://"),
+                    "{} signup url must be https",
+                    preset.id
+                );
+            }
+        }
         assert_eq!(
             providers(ChannelProtocol::Anthropic),
             vec![

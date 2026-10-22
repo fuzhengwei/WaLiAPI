@@ -11,7 +11,8 @@ import type {
 import {
   PROTOCOL_LABELS, ENDPOINT_LABELS, ENDPOINT_PATHS,
 } from "../lib/constants";
-import { X, Plus, Check, RefreshCw, KeyRound, Undo, Loader2, Trash2, Power, Copy, Terminal, ChevronDown } from "lucide-react";
+import { X, Plus, Check, RefreshCw, KeyRound, Undo, Loader2, Trash2, Power, Copy, Terminal, ChevronDown, ExternalLink } from "lucide-react";
+import { openUrl } from "@tauri-apps/plugin-opener";
 import { parseCurlToChannel } from "../lib/curl";
 import { Select } from "./Select";
 import { MappingSection } from "./MappingSection";
@@ -1084,6 +1085,26 @@ export function ChannelForm({ editing, duplicate = false, onClose, onSaved }: {
               )}
             </div>
 
+            {/* 免费层渠道：Key 配置上方提供「获取 API Key」跳转（key_signup_url
+                由后端 preset 下发，点击经系统浏览器打开官方控制台）。 */}
+            {currentPreset?.key_signup_url && (
+              <div className="mt-4 flex items-center justify-between gap-3 rounded-xl border border-primary/25 bg-primary/8 px-3.5 py-2.5">
+                <span className="text-xs text-muted-foreground">
+                  免费层渠道：注册后在官方控制台领取 API Key，粘贴到下方即可使用（免费额度有限，超额会被上游限流）。
+                </span>
+                <button
+                  type="button"
+                  onClick={() => {
+                    const url = currentPreset.key_signup_url;
+                    if (url) void openUrl(url);
+                  }}
+                  className="flex shrink-0 items-center gap-1 rounded-lg border border-primary/30 bg-primary/12 px-2.5 py-1.5 text-xs font-medium text-primary transition-all hover:bg-primary/20"
+                  title="在系统浏览器中打开官方 Key 管理页"
+                >
+                  前往获取 API Key <ExternalLink size={12} />
+                </button>
+              </div>
+            )}
             {/* API Keys（负载均衡）：主 Key（#1）+ 额外 Keys 统一管理 */}
             <div className="mt-4">
               <div className="mb-2 flex items-center justify-between">

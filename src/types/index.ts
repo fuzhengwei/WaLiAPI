@@ -656,6 +656,11 @@ export type ChannelProvider =
   | "stepfun"
   | "opencode"
   | "kilo"
+  | "groq"
+  | "cerebras"
+  | "mistral"
+  | "nvidia_nim"
+  | "openrouter"
   | "anthropic"
   | "ollama"
   | "custom";
@@ -709,6 +714,8 @@ export interface ChannelPreset {
   model_enum_strategy: ChannelModelEnumStrategy;
   endpoint_test_strategy: ChannelEndpointTestStrategy;
   preset_revision: string;
+  /** 免费层提供商的「获取 API Key」页面；前端在 Key 配置上方渲染跳转提示。 */
+  key_signup_url?: string;
 }
 
 /** 每个协议一组；`presets[0]` 恒为固定 custom option。 */
