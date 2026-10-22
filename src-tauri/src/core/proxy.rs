@@ -25,7 +25,9 @@ async fn select_key_for_channel(channel: &Channel, repo: &Arc<Repository>) -> Op
         // DB 读取失败：保守降级为「无额外 Key」，主 Key 开关仍然生效。
         Err(_) => Vec::new(),
     };
-    let primary_ok = !channel.api_key.is_empty() && channel.primary_key_enabled();
+    // 凭证可选的渠道（Kilo 免费池/Ollama 本地）空主 Key 也是有效槽位。
+    let primary_ok = (!channel.api_key.is_empty() || channel.credential_optional())
+        && channel.primary_key_enabled();
     if extra_keys.is_empty() && !primary_ok {
         return None;
     }

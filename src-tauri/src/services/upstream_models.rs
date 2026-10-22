@@ -70,6 +70,11 @@ pub async fn fetch_upstream_models(
     if identity.protocol == "anthropic" {
         headers.push(("anthropic-version".to_string(), "2023-06-01".to_string()));
     }
+    // OpenCode 免费车道的列表接口同样要过 v2 客户端指纹门禁（凭据固定为
+    // "Bearer public"，与本车道推理请求一致）。
+    if identity.protocol == "openai" && identity.provider == "opencode" {
+        headers = crate::endpoint_executor::opencode_lane::listing_headers();
+    }
 
     // 出站代理：草稿渠道的 config.proxy（global/direct/custom）与全局设置一致解析。
     // 未填写 proxy 时也必须回退到全局代理；否则模型同步会意外直连，

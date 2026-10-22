@@ -251,6 +251,16 @@ pub fn run() {
                     tracing::warn!("[模板] 种子写入失败（运行时回退编译期默认）: {error}");
                 }
                 crate::audit_log::apply_settings(&state.settings);
+                // 内置免费渠道种子（OpenCode 免费车道 / Kilo 免费池）：每实例
+                // 仅一次，预建后用户零配置即可用；用户删除后不会自动加回。
+                {
+                    let repo = crate::db::repository::Repository::new(state.db.pool.clone());
+                    crate::services::builtin_channels::seed_builtin_free_channels(
+                        &repo,
+                        &state.settings,
+                    )
+                    .await;
+                }
                 // 全局出站代理（VPN 固定端口）：启动时从设置加载。
                 {
                     let enabled = state.settings.get_bool("network.proxy.enabled", false);

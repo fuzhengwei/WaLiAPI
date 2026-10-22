@@ -91,6 +91,13 @@ impl Channel {
         self.api_key_enabled.unwrap_or(1) != 0
     }
 
+    /// 该渠道的鉴权方案允许空凭据（可选 Bearer/匿名语义：Kilo 免费池、
+    /// Ollama 本地）。与 `endpoint_executor::auth_scheme_for` 的
+    /// OptionalBearer 判定保持一致——空 Key 也构成有效凭证槽位。
+    pub fn credential_optional(&self) -> bool {
+        self.provider.as_deref() == Some("kilo") || self.protocol.as_deref() == Some("ollama")
+    }
+
     /// 返回规范化但尚未应用禁用列表的原始模型映射，供管理面与导出使用。
     pub fn normalized_model_mapping(&self) -> serde_json::Value {
         let mut mapping: serde_json::Value =
@@ -991,6 +998,47 @@ pub struct NewLogAttempt {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn credential_optional_matches_auth_scheme_for() {
+        // 与 endpoint_executor::auth_scheme_for 的 OptionalBearer 判定一致：
+        // kilo 按 provider、ollama 按 protocol。
+        fn channel(protocol: &str, provider: &str) -> Channel {
+            Channel {
+                id: "c1".into(),
+                name: "t".into(),
+                channel_type: "openai".into(),
+                base_url: "https://x".into(),
+                api_key: String::new(),
+                models: "[]".into(),
+                status: 1,
+                priority: 0,
+                weight: 1,
+                config: "{}".into(),
+                model_mapping: "{}".into(),
+                model_mapping_disabled: "[]".into(),
+                timeout_secs: 300,
+                protocol: Some(protocol.into()),
+                provider: Some(provider.into()),
+                native_base_url: None,
+                native_endpoints: None,
+                preset_revision: None,
+                identity_revision: 1,
+                legacy_executor_override: None,
+                created_at: "2020-01-01T00:00:00.000Z".into(),
+                updated_at: "2020-01-01T00:00:00.000Z".into(),
+                last_test_at: None,
+                last_test_ok: None,
+                last_probe_at: None,
+                last_probe_ok: None,
+                probe_latency_ms: None,
+                api_key_enabled: None,
+            }
+        }
+        assert!(channel("openai", "kilo").credential_optional());
+        assert!(channel("ollama", "custom").credential_optional());
+        assert!(!channel("openai", "openai").credential_optional());
+    }
 
     #[test]
     fn old_codex_snapshot_without_protocol_deserializes() {

@@ -1,3 +1,4 @@
+pub mod builtin_channels;
 pub mod channel_test;
 pub mod knowledge;
 pub mod mcp;

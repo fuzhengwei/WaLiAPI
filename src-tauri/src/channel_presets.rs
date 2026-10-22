@@ -47,6 +47,12 @@ pub enum ChannelProvider {
     Moonshot,
     #[serde(rename = "stepfun")]
     StepFun,
+    /// OpenCode 免费车道（opencode.ai 公开免密网关，v2 客户端指纹门禁）。
+    #[serde(rename = "opencode")]
+    Opencode,
+    /// Kilo 免费池（api.kilo.ai 公共网关免费池，完全免 Key）。
+    #[serde(rename = "kilo")]
+    Kilo,
     Anthropic,
     Ollama,
     Custom,
@@ -64,6 +70,8 @@ impl ChannelProvider {
             ChannelProvider::DoubaoCodingPlan => "doubao_coding_plan",
             ChannelProvider::Moonshot => "moonshot",
             ChannelProvider::StepFun => "stepfun",
+            ChannelProvider::Opencode => "opencode",
+            ChannelProvider::Kilo => "kilo",
             ChannelProvider::Anthropic => "anthropic",
             ChannelProvider::Ollama => "ollama",
             ChannelProvider::Custom => "custom",
@@ -191,8 +199,13 @@ pub struct ProtocolPresetGroup {
     pub presets: Vec<ChannelPreset>,
 }
 
-/// 当前 registry revision（YYYY-MM-DD，2026-08-06 基线）。
-pub const PRESET_REVISION: &str = "2026-08-06";
+/// 当前 registry revision（YYYY-MM-DD）。2026-08-06 建立基线，2026-10-22 加入
+/// OpenCode 免费车道与 Kilo 免费池两个 preset。
+pub const PRESET_REVISION: &str = "2026-10-22";
+
+/// 2026-08-06 基线时入库的模型建议复核日（与 registry revision 解耦，
+/// 避免后加 preset 时把老模型的复核日期一起顺延）。
+const MODEL_BASELINE_0806: &str = "2026-08-06";
 
 const SRC_OPENAI: &str = "https://platform.openai.com/docs/api-reference/chat";
 const SRC_GEMINI_MODELS: &str = "https://ai.google.dev/gemini-api/docs/models";
@@ -207,6 +220,11 @@ const SRC_DOUBAO: &str = "https://www.volcengine.com/docs/82379/";
 const SRC_MOONSHOT: &str = "https://platform.moonshot.ai/docs/api/chat";
 const SRC_STEPFUN: &str = "https://platform.stepfun.com/docs/zh/api-reference/models/list.md";
 const SRC_ANTHROPIC: &str = "https://docs.anthropic.com/en/api/messages";
+/// OpenCode 免费车道模型清单的核对出处（dsh-our-free-model 免费车道文档）。
+const SRC_OPENCODE: &str =
+    "https://github.com/Ebony-Vinyl/dsh-our-free-model#免费车道opencode-的免密网关";
+/// Kilo 免费池模型清单的核对出处（Kilo 网关模型列表，isFree 切片）。
+const SRC_KILO: &str = "https://kilo.ai";
 
 /// 构建一个 preset 的便捷函数。
 #[allow(clippy::too_many_arguments)]
@@ -321,11 +339,11 @@ fn openai_presets() -> Vec<ChannelPreset> {
             vec![NativeEndpoint::ChatCompletions, NativeEndpoint::Responses],
             AuthScheme::Bearer,
             vec![
-                model("gpt-5.2", PRESET_REVISION, SRC_OPENAI),
-                model("gpt-5-mini", PRESET_REVISION, SRC_OPENAI),
-                model("gpt-5-nano", PRESET_REVISION, SRC_OPENAI),
-                model("gpt-4.1", PRESET_REVISION, SRC_OPENAI),
-                model("gpt-4.1-mini", PRESET_REVISION, SRC_OPENAI),
+                model("gpt-5.2", MODEL_BASELINE_0806, SRC_OPENAI),
+                model("gpt-5-mini", MODEL_BASELINE_0806, SRC_OPENAI),
+                model("gpt-5-nano", MODEL_BASELINE_0806, SRC_OPENAI),
+                model("gpt-4.1", MODEL_BASELINE_0806, SRC_OPENAI),
+                model("gpt-4.1-mini", MODEL_BASELINE_0806, SRC_OPENAI),
             ],
             ModelEnumStrategy::StaticPlusSync,
             EndpointTestStrategy::ProbeFirstModel,
@@ -344,9 +362,9 @@ fn openai_presets() -> Vec<ChannelPreset> {
             vec![NativeEndpoint::ChatCompletions],
             AuthScheme::Bearer,
             vec![
-                model("gemini-3.6-flash", PRESET_REVISION, SRC_GEMINI_MODELS),
-                model("gemini-3.5-flash", PRESET_REVISION, SRC_GEMINI_MODELS),
-                model("gemini-3.5-flash-lite", PRESET_REVISION, SRC_GEMINI_MODELS),
+                model("gemini-3.6-flash", MODEL_BASELINE_0806, SRC_GEMINI_MODELS),
+                model("gemini-3.5-flash", MODEL_BASELINE_0806, SRC_GEMINI_MODELS),
+                model("gemini-3.5-flash-lite", MODEL_BASELINE_0806, SRC_GEMINI_MODELS),
             ],
             ModelEnumStrategy::StaticPlusSync,
             EndpointTestStrategy::ProbeFirstModel,
@@ -367,12 +385,12 @@ fn openai_presets() -> Vec<ChannelPreset> {
             vec![
                 model(
                     "deepseek-v4-pro",
-                    PRESET_REVISION,
+                    MODEL_BASELINE_0806,
                     SRC_DEEPSEEK_FUNCTION_CALLING,
                 ),
                 model(
                     "deepseek-v4-flash",
-                    PRESET_REVISION,
+                    MODEL_BASELINE_0806,
                     SRC_DEEPSEEK_FUNCTION_CALLING,
                 ),
             ],
@@ -393,9 +411,9 @@ fn openai_presets() -> Vec<ChannelPreset> {
             vec![NativeEndpoint::ChatCompletions, NativeEndpoint::Responses],
             AuthScheme::Bearer,
             vec![
-                model("qwen3.7-plus", PRESET_REVISION, SRC_QWEN_RESPONSES),
-                model("qwen3.7-max", PRESET_REVISION, SRC_QWEN_RESPONSES),
-                model("qwen3-coder-next", PRESET_REVISION, SRC_QWEN_RESPONSES),
+                model("qwen3.7-plus", MODEL_BASELINE_0806, SRC_QWEN_RESPONSES),
+                model("qwen3.7-max", MODEL_BASELINE_0806, SRC_QWEN_RESPONSES),
+                model("qwen3-coder-next", MODEL_BASELINE_0806, SRC_QWEN_RESPONSES),
             ],
             ModelEnumStrategy::StaticPlusSync,
             EndpointTestStrategy::ProbeFirstModel,
@@ -414,9 +432,9 @@ fn openai_presets() -> Vec<ChannelPreset> {
             vec![NativeEndpoint::ChatCompletions],
             AuthScheme::Bearer,
             vec![
-                model("glm-4.7", PRESET_REVISION, SRC_ZHIPU),
-                model("glm-4.7-flash", PRESET_REVISION, SRC_ZHIPU),
-                model("glm-4.6v", PRESET_REVISION, SRC_ZHIPU),
+                model("glm-4.7", MODEL_BASELINE_0806, SRC_ZHIPU),
+                model("glm-4.7-flash", MODEL_BASELINE_0806, SRC_ZHIPU),
+                model("glm-4.6v", MODEL_BASELINE_0806, SRC_ZHIPU),
             ],
             ModelEnumStrategy::StaticPlusSync,
             EndpointTestStrategy::ProbeFirstModel,
@@ -435,9 +453,9 @@ fn openai_presets() -> Vec<ChannelPreset> {
             vec![NativeEndpoint::ChatCompletions],
             AuthScheme::Bearer,
             vec![
-                model("doubao-seed-2-0-pro-260215", PRESET_REVISION, SRC_DOUBAO),
-                model("doubao-seed-2-0-lite-260215", PRESET_REVISION, SRC_DOUBAO),
-                model("doubao-seed-1-6", PRESET_REVISION, SRC_DOUBAO),
+                model("doubao-seed-2-0-pro-260215", MODEL_BASELINE_0806, SRC_DOUBAO),
+                model("doubao-seed-2-0-lite-260215", MODEL_BASELINE_0806, SRC_DOUBAO),
+                model("doubao-seed-1-6", MODEL_BASELINE_0806, SRC_DOUBAO),
             ],
             ModelEnumStrategy::StaticPlusSync,
             EndpointTestStrategy::ProbeFirstModel,
@@ -456,9 +474,9 @@ fn openai_presets() -> Vec<ChannelPreset> {
             vec![NativeEndpoint::ChatCompletions],
             AuthScheme::Bearer,
             vec![
-                model("kimi-k2.5", PRESET_REVISION, SRC_MOONSHOT),
-                model("kimi-k2-thinking", PRESET_REVISION, SRC_MOONSHOT),
-                model("kimi-k2-turbo-preview", PRESET_REVISION, SRC_MOONSHOT),
+                model("kimi-k2.5", MODEL_BASELINE_0806, SRC_MOONSHOT),
+                model("kimi-k2-thinking", MODEL_BASELINE_0806, SRC_MOONSHOT),
+                model("kimi-k2-turbo-preview", MODEL_BASELINE_0806, SRC_MOONSHOT),
             ],
             ModelEnumStrategy::StaticPlusSync,
             EndpointTestStrategy::ProbeFirstModel,
@@ -497,6 +515,58 @@ fn openai_presets() -> Vec<ChannelPreset> {
         // - 2026-07-08 已下线型号（step-1-8k/32k、step-1v-8k/32k、step-2-mini、
         //   step-1o-vision-32k、step-2-16k、step-3、step-1x-medium）。
         // 上述均不预填，用户可经「同步上游模型」拉取 GET /v1/models 覆盖。
+        // OpenCode 免费车道：公开免密网关（凭据即字符串 "public"）。上游有
+        // v2 客户端指纹门禁（固定 UA + 会话头 + 逐字工具指纹），由
+        // endpoint_executor::opencode_lane 在转发层适配；本预设只声明
+        // Chat Completions —— 上游 /responses 与 /messages 仅个别贡献者模型
+        // 支持，预设级声明会让其它模型被原生路由击中 404。
+        // 模型清单跟随上游刷新（插件与上游均不保存静态快照），静态建议取自
+        // dsh-our-free-model 2026-10-22 源码/文档核对，可经「同步上游模型」覆盖。
+        preset(
+            ChannelProtocol::OpenAI,
+            ChannelProvider::Opencode,
+            "OpenCode 免费车道",
+            RegionGroup::International,
+            "OpenCode 公开免密网关：无需账号与 Key，模型清单跟随上游，地区受限模型会被上游拒绝。免费额度按会话统计，上游可能限流。",
+            "opencode",
+            "https://opencode.ai/inference/v1",
+            "https://opencode.ai/inference/v1",
+            "openai",
+            vec![NativeEndpoint::ChatCompletions],
+            vec![NativeEndpoint::ChatCompletions],
+            AuthScheme::Bearer,
+            vec![
+                // 2026-10-22 对上游 GET /models 实测在列的免费模型（其后缀 -free）。
+                model("deepseek-v4.1-flash-free", "2026-10-22", SRC_OPENCODE),
+                model("glm-5.3-flash-free", "2026-10-22", SRC_OPENCODE),
+                model("mimo-v2.6-flash-free", "2026-10-22", SRC_OPENCODE),
+                model("nemotron-3.5-lightning-free", "2026-10-22", SRC_OPENCODE),
+            ],
+            ModelEnumStrategy::StaticPlusSync,
+            EndpointTestStrategy::ProbeFirstModel,
+        ),
+        // Kilo 免费池：api.kilo.ai 公共网关的免费切片，完全免 Key 免登录
+        // （AuthScheme::OptionalBearer + 空 Key = 不发 Authorization 头，
+        // 运行时经 endpoint_executor::auth_scheme_for 的 provider 判定）。
+        // 仅 Chat Completions 一种线协议。上游模型卡声明 prompt 可能被记录
+        // 用于改进服务——描述里如实提示，勿传敏感内容。
+        preset(
+            ChannelProtocol::OpenAI,
+            ChannelProvider::Kilo,
+            "Kilo 免费池",
+            RegionGroup::International,
+            "Kilo AI 公共网关免费池：无需任何账号或 Key。上游声明 prompt 可能被记录用于改进服务，请勿发送敏感内容；免费池模型清单实时变化。",
+            "kilo",
+            "https://api.kilo.ai/api/gateway",
+            "https://api.kilo.ai/api/gateway",
+            "openai",
+            vec![NativeEndpoint::ChatCompletions],
+            vec![NativeEndpoint::ChatCompletions],
+            AuthScheme::OptionalBearer,
+            vec![model("kilo-auto/free", "2026-10-22", SRC_KILO)],
+            ModelEnumStrategy::StaticPlusSync,
+            EndpointTestStrategy::ProbeFirstModel,
+        ),
         preset(
             ChannelProtocol::OpenAI,
             ChannelProvider::Ollama,
@@ -533,9 +603,9 @@ fn anthropic_presets() -> Vec<ChannelPreset> {
             vec![NativeEndpoint::Messages],
             AuthScheme::XApiKey,
             vec![
-                model("claude-opus-4-6", PRESET_REVISION, SRC_ANTHROPIC),
-                model("claude-sonnet-4-6", PRESET_REVISION, SRC_ANTHROPIC),
-                model("claude-haiku-4-5-20251001", PRESET_REVISION, SRC_ANTHROPIC),
+                model("claude-opus-4-6", MODEL_BASELINE_0806, SRC_ANTHROPIC),
+                model("claude-sonnet-4-6", MODEL_BASELINE_0806, SRC_ANTHROPIC),
+                model("claude-haiku-4-5-20251001", MODEL_BASELINE_0806, SRC_ANTHROPIC),
             ],
             ModelEnumStrategy::StaticOnly,
             EndpointTestStrategy::ProbeFirstModel,
@@ -554,8 +624,8 @@ fn anthropic_presets() -> Vec<ChannelPreset> {
             vec![NativeEndpoint::Messages],
             AuthScheme::XApiKey,
             vec![
-                model("deepseek-v4-pro", PRESET_REVISION, SRC_DEEPSEEK_ANTHROPIC),
-                model("deepseek-v4-flash", PRESET_REVISION, SRC_DEEPSEEK_ANTHROPIC),
+                model("deepseek-v4-pro", MODEL_BASELINE_0806, SRC_DEEPSEEK_ANTHROPIC),
+                model("deepseek-v4-flash", MODEL_BASELINE_0806, SRC_DEEPSEEK_ANTHROPIC),
             ],
             ModelEnumStrategy::StaticOnly,
             EndpointTestStrategy::ProbeFirstModel,
@@ -574,8 +644,8 @@ fn anthropic_presets() -> Vec<ChannelPreset> {
             vec![NativeEndpoint::Messages],
             AuthScheme::XApiKey,
             vec![
-                model("qwen3.7-plus", PRESET_REVISION, SRC_QWEN_ANTHROPIC),
-                model("qwen3-coder-next", PRESET_REVISION, SRC_QWEN_ANTHROPIC),
+                model("qwen3.7-plus", MODEL_BASELINE_0806, SRC_QWEN_ANTHROPIC),
+                model("qwen3-coder-next", MODEL_BASELINE_0806, SRC_QWEN_ANTHROPIC),
             ],
             ModelEnumStrategy::StaticOnly,
             EndpointTestStrategy::ProbeFirstModel,
@@ -594,8 +664,8 @@ fn anthropic_presets() -> Vec<ChannelPreset> {
             vec![NativeEndpoint::Messages],
             AuthScheme::XApiKey,
             vec![
-                model("glm-4.7", PRESET_REVISION, SRC_ZHIPU),
-                model("glm-4.7-flash", PRESET_REVISION, SRC_ZHIPU),
+                model("glm-4.7", MODEL_BASELINE_0806, SRC_ZHIPU),
+                model("glm-4.7-flash", MODEL_BASELINE_0806, SRC_ZHIPU),
             ],
             ModelEnumStrategy::StaticOnly,
             EndpointTestStrategy::ProbeFirstModel,
@@ -848,6 +918,62 @@ mod tests {
         }
     }
 
+    /// OpenCode 免费车道预设契约：URL/鉴权/端点/策略/文案逐项锁定。
+    #[test]
+    fn opencode_openai_preset_contract() {
+        let p = presets_for_protocol(ChannelProtocol::OpenAI)
+            .into_iter()
+            .find(|p| p.provider == ChannelProvider::Opencode)
+            .expect("openai opencode preset");
+        assert_eq!(p.id, "openai:opencode");
+        assert_eq!(p.region, RegionGroup::International);
+        assert_eq!(p.native_base_url, "https://opencode.ai/inference/v1");
+        assert_eq!(p.legacy_base_url, "https://opencode.ai/inference/v1");
+        assert_eq!(p.legacy_type, "openai");
+        assert_eq!(p.native_endpoints, vec![NativeEndpoint::ChatCompletions]);
+        assert_eq!(
+            p.default_checked_endpoints,
+            vec![NativeEndpoint::ChatCompletions]
+        );
+        assert_eq!(p.auth_scheme, AuthScheme::Bearer);
+        assert_eq!(p.model_enum_strategy, ModelEnumStrategy::StaticPlusSync);
+        assert_eq!(p.endpoint_test_strategy, EndpointTestStrategy::ProbeFirstModel);
+        assert_eq!(p.icon_key, "opencode");
+        assert_eq!(p.provider.as_str(), "opencode");
+        assert_eq!(
+            serde_json::to_string(&p.provider).unwrap(),
+            "\"opencode\"".to_string()
+        );
+        assert!(!p.model_suggestions.is_empty());
+        assert!(p.model_suggestions.iter().all(|m| m.id.ends_with("-free")));
+    }
+
+    /// Kilo 免费池预设契约：免 Key（OptionalBearer）、仅 Chat Completions。
+    #[test]
+    fn kilo_openai_preset_contract() {
+        let p = presets_for_protocol(ChannelProtocol::OpenAI)
+            .into_iter()
+            .find(|p| p.provider == ChannelProvider::Kilo)
+            .expect("openai kilo preset");
+        assert_eq!(p.id, "openai:kilo");
+        assert_eq!(p.region, RegionGroup::International);
+        assert_eq!(p.native_base_url, "https://api.kilo.ai/api/gateway");
+        assert_eq!(p.legacy_base_url, "https://api.kilo.ai/api/gateway");
+        assert_eq!(p.legacy_type, "openai");
+        assert_eq!(p.native_endpoints, vec![NativeEndpoint::ChatCompletions]);
+        assert_eq!(p.auth_scheme, AuthScheme::OptionalBearer);
+        assert_eq!(p.model_enum_strategy, ModelEnumStrategy::StaticPlusSync);
+        assert_eq!(p.icon_key, "kilo");
+        assert_eq!(p.provider.as_str(), "kilo");
+        assert_eq!(
+            serde_json::to_string(&p.provider).unwrap(),
+            "\"kilo\"".to_string()
+        );
+        // 免费池以自动路由模型为主：不预置具体的上游私有型号。
+        assert_eq!(p.model_suggestions.len(), 1);
+        assert_eq!(p.model_suggestions[0].id, "kilo-auto/free");
+    }
+
     #[test]
     fn ordering_custom_then_international_domestic_local() {
         for protocol in [
@@ -881,6 +1007,8 @@ mod tests {
                 ChannelProvider::Custom,
                 ChannelProvider::OpenAI,
                 ChannelProvider::Google,
+                ChannelProvider::Opencode,
+                ChannelProvider::Kilo,
                 ChannelProvider::DeepSeek,
                 ChannelProvider::Qwen,
                 ChannelProvider::Zhipu,

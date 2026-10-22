@@ -161,6 +161,22 @@ impl Repository {
         Self { pool }
     }
 
+    /// 是否已存在指定 protocol+provider 的渠道（内置渠道种子的幂等保护）。
+    pub async fn channel_provider_exists(
+        &self,
+        protocol: &str,
+        provider: &str,
+    ) -> Result<bool, sqlx::Error> {
+        let row: (i64,) = sqlx::query_as(
+            "SELECT COUNT(*) FROM channels WHERE protocol = ? AND provider = ?",
+        )
+        .bind(protocol)
+        .bind(provider)
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(row.0 > 0)
+    }
+
     pub fn pool(&self) -> &SqlitePool {
         &self.pool
     }

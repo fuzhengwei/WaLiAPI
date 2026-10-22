@@ -29,6 +29,7 @@
 pub mod driver;
 pub mod estimate_usage;
 pub mod grok_arguments;
+pub mod opencode_lane;
 pub mod prompt_classify;
 pub mod sse;
 
@@ -618,6 +619,11 @@ pub fn auth_scheme_for(identity: &ChannelIdentity) -> AuthScheme {
     if identity.legacy_executor_override.as_deref() == Some("gemini_native") {
         return AuthScheme::QueryKey;
     }
+    // Kilo 免费池完全免 Key：空 Key 时不得发送 Authorization 头（发空 Bearer
+    // 会被上游拒绝），复用 Ollama 的 OptionalBearer 语义。
+    if identity.protocol == "openai" && identity.provider == "kilo" {
+        return AuthScheme::OptionalBearer;
+    }
     match identity.protocol.as_str() {
         "anthropic" => AuthScheme::XApiKey,
         "ollama" => AuthScheme::OptionalBearer,
@@ -1114,16 +1120,24 @@ fn convert_gemini_to_chat(gemini_json: &Value, model: &str) -> Value {
 // ---------------------------------------------------------------------------
 
 /// Build and send the upstream request for an attempt, returning the raw
-/// `reqwest::Response`.  The caller classifies the status.
+/// `reqwest::Response` plus the OpenCode lane's tool-rename map (empty when
+/// the lane does not apply).  The caller classifies the status.
 async fn send_request(
     attempt: &PreparedAttempt,
     channel: &Channel,
     identity: &ChannelIdentity,
     safe_headers: &[(String, String)],
     query: Option<&str>,
-) -> Result<reqwest::Response, AttemptFailure> {
+) -> Result<(reqwest::Response, opencode_lane::AliasMap), AttemptFailure> {
     let is_gemini = identity.legacy_executor_override.as_deref() == Some("gemini_native");
     let stream = is_stream_body(&attempt.encoded_body);
+    // OpenCode 免费车道：上游 v2 门禁要求请求必须流式（实测非流式一律 403
+    // FreeTierError），即使下游要的是非流式。这里统一以 stream:true 上行，
+    // 响应侧由 dispatch_executor 把 SSE 聚合回非流式 chat.completion。
+    let is_opencode = identity.protocol == "openai"
+        && identity.provider == "opencode"
+        && attempt.upstream_endpoint == "chat_completions";
+    let upstream_stream = stream || is_opencode;
     // 渠道级出站代理：从渠道 config JSON 的 proxy 键解析
     //（global/direct/custom）。未填写 proxy 时跟随全局设置；显式
     // direct 仍保持直连。
@@ -1132,7 +1146,7 @@ async fn send_request(
     )
     .map(|p| p.resolve())
     .unwrap_or_else(crate::adaptor::global_proxy_url);
-    let c = client(channel.timeout_secs, stream, proxy_url.as_deref());
+    let c = client(channel.timeout_secs, upstream_stream, proxy_url.as_deref());
 
     if is_gemini {
         let url = gemini_url(
@@ -1142,13 +1156,14 @@ async fn send_request(
             stream,
         );
         let body = convert_chat_to_gemini(&attempt.encoded_body);
-        return c
+        let response = c
             .post(url)
             .header("content-type", "application/json")
             .json(&body)
             .send()
             .await
-            .map_err(transport_failure);
+            .map_err(transport_failure)?;
+        return Ok((response, opencode_lane::AliasMap::new()));
     }
 
     let url = final_url(
@@ -1158,8 +1173,25 @@ async fn send_request(
     );
     let scheme = auth_scheme_for(identity);
     let mut req = c.post(url).header("content-type", "application/json");
-    for (k, v) in auth_headers(scheme, &channel.api_key) {
-        req = req.header(k, v);
+    // OpenCode 免费车道：请求体过 v2 指纹门禁（强制 stream:true / 工具指纹
+    // 注入 / tool_choice 清洗 / 工具改名），请求头换用门禁要求的完整集合
+    //（含池化凭据 `Bearer public`），并返回改名映射供响应侧还原。
+    let mut opencode_aliases = opencode_lane::AliasMap::new();
+    let mut opencode_body: Option<Value> = None;
+    if is_opencode {
+        let mut body = attempt.encoded_body.clone();
+        if !stream {
+            body["stream"] = Value::Bool(true);
+        }
+        opencode_aliases = opencode_lane::apply_fingerprint(&mut body);
+        opencode_body = Some(body);
+        for (k, v) in opencode_lane::gateway_headers(&attempt.channel_id, upstream_stream) {
+            req = req.header(k, v);
+        }
+    } else {
+        for (k, v) in auth_headers(scheme, &channel.api_key) {
+            req = req.header(k, v);
+        }
     }
     // Anthropic Messages requires the version header; a client-provided value
     // (from safe_headers) overrides the default.
@@ -1191,10 +1223,9 @@ async fn send_request(
             }
         }
     }
-    req.json(&attempt.encoded_body)
-        .send()
-        .await
-        .map_err(transport_failure)
+    let payload = opencode_body.as_ref().unwrap_or(&attempt.encoded_body);
+    let response = req.json(payload).send().await.map_err(transport_failure)?;
+    Ok((response, opencode_aliases))
 }
 
 // ---------------------------------------------------------------------------
@@ -1210,8 +1241,8 @@ pub async fn dispatch_executor(
     safe_headers: &[(String, String)],
     query: Option<&str>,
 ) -> AttemptResult {
-    let resp = match send_request(attempt, channel, identity, safe_headers, query).await {
-        Ok(r) => r,
+    let (resp, opencode_aliases) = match send_request(attempt, channel, identity, safe_headers, query).await {
+        Ok((r, aliases)) => (r, aliases),
         Err(f) => return AttemptResult::Failure(f),
     };
     let status = resp.status().as_u16();
@@ -1251,9 +1282,28 @@ pub async fn dispatch_executor(
         }
         Err(_) => bytes::Bytes::new(),
     };
-    let body: Value = match serde_json::from_slice(&bytes) {
+    let mut body: Value = match serde_json::from_slice(&bytes) {
         Ok(v) => v,
         Err(e) => {
+            // OpenCode 免费车道：非流式请求被强制以上游流式完成（见
+            // send_request），这里把 SSE 聚合回单个 chat.completion 再解码。
+            let opencode_forced_stream = identity.protocol == "openai"
+                && identity.provider == "opencode"
+                && attempt.upstream_endpoint == "chat_completions"
+                && !is_stream_body(&attempt.encoded_body);
+            if opencode_forced_stream {
+                match opencode_lane::aggregate_stream_body(&bytes) {
+                    Some(v) => v,
+                    None => {
+                        return AttemptResult::Failure(undecodable_body(
+                            status,
+                            bytes.len(),
+                            content_type.as_deref(),
+                            e,
+                        ));
+                    }
+                }
+            } else {
             // A 2xx that fails to parse is either non-JSON content (HTML/plain
             // text) or an undecoded compressed body (gzip etc.) — the distinction
             // only shows up in the bytes and headers, so log them before failing.
@@ -1305,11 +1355,16 @@ pub async fn dispatch_executor(
                     e,
                 ));
             }
+            }
         }
     };
     if let Some(mut failure) = semantic_failure(&attempt.upstream_protocol, &body) {
         failure.retry_after = retry_after;
         return AttemptResult::Failure(failure);
+    }
+    // OpenCode 免费车道：还原请求侧被改名的工具（调用方同名 read/shell 冲突时）。
+    if !opencode_aliases.is_empty() {
+        opencode_lane::restore_response_body(&mut body, &opencode_aliases);
     }
     // Legacy Gemini override: the upstream `generateContent` response must be
     // converted back to OpenAI Chat (this is the ONLY executor that converts
@@ -1476,8 +1531,8 @@ pub async fn dispatch_stream_executor(
     safe_headers: &[(String, String)],
     query: Option<&str>,
 ) -> StreamAttemptResult {
-    let resp = match send_request(attempt, channel, identity, safe_headers, query).await {
-        Ok(r) => r,
+    let (resp, opencode_aliases) = match send_request(attempt, channel, identity, safe_headers, query).await {
+        Ok((r, aliases)) => (r, aliases),
         Err(f) => return StreamAttemptResult::Failure(f),
     };
     let status = resp.status().as_u16();
@@ -1501,6 +1556,13 @@ pub async fn dispatch_stream_executor(
         .bytes_stream()
         .map(|r| r.map_err(std::io::Error::other))
         .boxed();
+    // OpenCode 免费车道：请求侧改名的工具在流式响应里按 SSE record 逐个还原
+    // （同 Grok 参数规范化的字节流包装机制）。
+    let body = if opencode_aliases.is_empty() {
+        body
+    } else {
+        opencode_lane::rewrite_stream(body, opencode_aliases)
+    };
     StreamAttemptResult::Connected(UpstreamStream {
         content_type,
         headers,
