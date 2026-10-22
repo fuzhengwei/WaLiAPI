@@ -2,6 +2,8 @@ import { useEffect, useState } from "react";
 import { check, type Update } from "@tauri-apps/plugin-updater";
 import { relaunch } from "@tauri-apps/plugin-process";
 import { getVersion } from "@tauri-apps/api/app";
+import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
 import {
   X,
   Download,
@@ -167,8 +169,57 @@ export function UpdateChecker({
               borderColor="border-sky-400/30"
             />
             {stage.update.body && (
-              <div className="max-h-32 overflow-y-auto rounded-xl border border-white/10 bg-black/30 p-3.5 text-[13px] leading-relaxed text-white/75 whitespace-pre-wrap">
-                {stage.update.body}
+              <div className="max-h-56 overflow-y-auto rounded-xl border border-white/10 bg-black/30 p-3.5 text-[13px] leading-relaxed text-white/75">
+                <ReactMarkdown
+                  remarkPlugins={[remarkGfm]}
+                  components={{
+                    // release notes 多为标题 / 列表 / 代码，按弹窗场景收窄样式
+                    h1: ({ children }) => (
+                      <h1 className="mb-2 text-[15px] font-semibold text-white">{children}</h1>
+                    ),
+                    h2: ({ children }) => (
+                      <h2 className="mb-1.5 mt-3 text-[14px] font-semibold text-white">{children}</h2>
+                    ),
+                    h3: ({ children }) => (
+                      <h3 className="mb-1 mt-2 text-[13px] font-semibold text-white/90">{children}</h3>
+                    ),
+                    p: ({ children }) => <p className="my-1.5 first:mt-0 last:mb-0">{children}</p>,
+                    ul: ({ children }) => (
+                      <ul className="my-1.5 list-disc space-y-0.5 pl-4 first:mt-0 last:mb-0">{children}</ul>
+                    ),
+                    ol: ({ children }) => (
+                      <ol className="my-1.5 list-decimal space-y-0.5 pl-4 first:mt-0 last:mb-0">{children}</ol>
+                    ),
+                    li: ({ children }) => <li className="leading-relaxed">{children}</li>,
+                    a: ({ children, href }) => (
+                      <a
+                        href={href}
+                        target="_blank"
+                        rel="noreferrer"
+                        className="text-sky-300 underline decoration-sky-300/40 underline-offset-2 hover:text-sky-200"
+                      >
+                        {children}
+                      </a>
+                    ),
+                    code: ({ children, className }) =>
+                      // 无语言标注的行内代码（块级代码保持默认渲染）
+                      !className ? (
+                        <code className="rounded bg-white/10 px-1 py-0.5 font-mono text-[12px] text-sky-200">
+                          {children}
+                        </code>
+                      ) : (
+                        <code className="block my-1.5 overflow-x-auto rounded bg-black/40 p-2 font-mono text-[12px] text-sky-200">
+                          {children}
+                        </code>
+                      ),
+                    strong: ({ children }) => (
+                      <strong className="font-semibold text-white">{children}</strong>
+                    ),
+                    hr: () => <hr className="my-2 border-white/10" />,
+                  }}
+                >
+                  {stage.update.body}
+                </ReactMarkdown>
               </div>
             )}
             <div className="flex justify-end gap-2 pt-1">
