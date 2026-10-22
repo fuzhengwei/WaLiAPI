@@ -20,7 +20,7 @@
 
 </div>
 
-> 🎁 **Free channels out of the box**: two key-free channels — **OpenCode Free Lane** and the **Kilo Free Pool** — are seeded on first start, zero configuration required. Five free-tier channel presets (**Groq / Cerebras / Mistral / NVIDIA NIM / OpenRouter**) are also ready to use after a quick sign-up. See [Free Channels](#-free-channels-out-of-the-box).
+> 🎁 **Free channels out of the box**: two key-free channels — **OpenCode Free Lane** and the **Kilo Free Pool** — are seeded on first start, zero configuration required. **Eleven free-tier channel presets** are also ready to use after a quick sign-up: Groq, Cerebras, Mistral, NVIDIA NIM, OpenRouter, GitHub Models, Hugging Face, SambaNova, Cohere (international) plus ModelScope and SiliconFlow (China). Google Gemini and Zhipu GLM also offer free tiers. See [Free Channels](#-free-channels-out-of-the-box).
 
 ---
 
@@ -59,7 +59,7 @@ flowchart LR
     subgraph Channels["☁️ Upstream Channels (3 kinds)"]
         direction TB
         F1["🔗 API Channels (key-based)<br/>OpenAI · Claude · DeepSeek · Gemini<br/>Zhipu · Qwen · Moonshot · Doubao · StepFun"]
-        F2["🎁 Free Channels<br/>OpenCode Lane / Kilo Pool (key-free, pre-seeded)<br/>Groq · Cerebras · Mistral · NVIDIA NIM · OpenRouter"]
+        F2["🎁 Free Channels<br/>OpenCode Lane / Kilo Pool (key-free, pre-seeded)<br/>11 free tiers: Groq · Cerebras · Mistral · NIM · OpenRouter<br/>ModelScope · SiliconFlow · GitHub Models · HF · SambaNova · Cohere"]
         F3["👤 Account Channels (OAuth sign-in)<br/>Codex · Kimi · Antigravity<br/>Qoder · WorkBuddy · Grok"]
     end
 
@@ -93,15 +93,23 @@ Seeds are added only once — deleting them is respected and they will not come 
 
 **2. Free-tier channel presets (sign up for a key)**
 
-Pick one of the following presets under **New Channel** and follow the on-page "Get API Key" link; model lists can be refreshed via "Sync Upstream Models":
+Pick one of the following presets under **New Channel** and follow the on-page "Get API Key" link; model lists can be refreshed via "Sync Upstream Models" (automatically filtered to free-usable models):
 
-| Preset | Free tier |
-|:---|:---|
-| **Groq** | Fast LPU inference; rate & daily limits apply |
-| **Cerebras** | Free credits on sign-up, wafer-scale speed |
-| **Mistral** | La Plateforme free experiment tier, daily / monthly caps |
-| **NVIDIA NIM** | 1000 credits on sign-up; aggregates DeepSeek / Kimi / GLM / MiniMax and more |
-| **OpenRouter** | Models with a `:free` suffix are free; `openrouter/free` auto-routes the current free pool |
+| Group | Preset | Free tier |
+|:---|:---|:---|
+| China | **ModelScope** | 2,000 free calls per day after sign-up + identity verification (≤500 calls/model/day, dynamic rate limit) |
+| China | **SiliconFlow** | Free credits on verified sign-up; several small models permanently free (fixed rate limit, 429 when exceeded) |
+| Intl | **Groq** | Fast LPU inference; rate & daily limits apply |
+| Intl | **Cerebras** | Free credits on sign-up, wafer-scale speed |
+| Intl | **Mistral** | La Plateforme free experiment tier, daily / monthly caps |
+| Intl | **NVIDIA NIM** | 1000 credits on sign-up; aggregates DeepSeek / Kimi / GLM / MiniMax and more |
+| Intl | **OpenRouter** | Models with a `:free` suffix are free; `openrouter/free` auto-routes the current free pool |
+| Intl | **GitHub Models** | Call multi-vendor models with a GitHub PAT (`models:read`); free tier rate-limited for personal accounts |
+| Intl | **Hugging Face** | Monthly free inference quota, auto-routed to partner providers |
+| Intl | **SambaNova** | E-mail sign-up only (no credit card); free tier 20 RPM · 20 RPD |
+| Intl | **Cohere** | Trial key: 1,000 calls per month (20 RPM), evaluation only |
+
+Existing presets also carry free tiers: **Google Gemini** (AI Studio free tier — Flash models get 1M tokens/day at 15 RPM) and **Zhipu GLM** (`glm-4.7-flash` and other Flash models are free); both preset descriptions note the free tier and sign-up link.
 
 > 💡 Free tiers have their own rate / quota limits and return 429 when exceeded — the gateway then fails over to the next available channel automatically. Account channels signed in under **Auth Accounts** (Antigravity, Codex, Kimi, Qoder, …) can also use their built-in account quota.
 
@@ -462,7 +470,10 @@ The full release history (in Chinese) is maintained in the [main README](README.
 
 ### v0.4.5 (2026-10-22)
 
-- ✨ **Free channels integrated** (@fuzhengwei): the OpenCode Free Lane and Kilo Free Pool are pre-seeded as key-free channels on first start (zero configuration, seeded once, deletions respected); a dedicated OpenCode lane executor shapes requests to pass the upstream v2 fingerprint gate (public credential `public`, fixed headers, session-id minting with a rotating session pool, `read` / `shell` tool fingerprint declaration); five free-tier channel presets added — Groq, Cerebras, Mistral, NVIDIA NIM and OpenRouter — each with a `key_signup_url` "Get API Key" link rendered above the key input
+- ✨ **Free channels integrated** (@fuzhengwei): the OpenCode Free Lane and Kilo Free Pool are pre-seeded as key-free channels on first start (zero configuration, seeded once, deletions respected); a dedicated OpenCode lane executor shapes requests to pass the upstream v2 fingerprint gate (public credential `public`, fixed headers, session-id minting with a rotating session pool, `read` / `shell` tool fingerprint declaration); **eleven free-tier channel presets** added — Groq, Cerebras, Mistral, NVIDIA NIM, OpenRouter, GitHub Models, Hugging Face, SambaNova and Cohere (international) plus ModelScope and SiliconFlow (China) — each with a `key_signup_url` "Get API Key" link rendered above the key input
+- ✨ **Free-model sync filtering**: "Sync Upstream Models" now keeps only free-usable models — Kilo syncs only models with `isFree == true`, OpenCode only `-free`-suffixed models (paid models always fail with 401 on a key-free call), each with regression tests
+- ✨ **Free-tier annotations**: Google Gemini (AI Studio free tier — 1M tokens/day for Flash models) and Zhipu GLM (`glm-4.7-flash` etc.) preset descriptions now note their free tiers with sign-up links
+- 📝 **Free-channel integration plan doc**: new `docs/free-channel-integration-plan.md`; full `cargo fmt` (no functional changes)
 - ✨ **Wiki rebuild & UX** (PR #166, @freakojc): programmatic index rebuild (`services/wiki/rebuild.rs`) with LLM semantic grouping and log consistency backfill; page-tab UX improvements (scroll position, unified dropdown styling, document search)
 - 🐛 **WorkBuddy response compatibility** (PR #168, @mw): hardened response parsing and SSE streaming for upstream response shape differences
 - 🔧 Version bumped to 0.4.5 (package.json / Cargo.toml / tauri.conf.json / Cargo.lock)

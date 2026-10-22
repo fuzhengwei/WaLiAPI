@@ -20,7 +20,7 @@
 
 </div>
 
-> 🎁 **免费渠道开箱即用**：启动即内置 **OpenCode 免费车道** 与 **Kilo 免费池** 两条免 Key 渠道，零配置直接调用；另提供 **Groq / Cerebras / Mistral / NVIDIA NIM / OpenRouter** 五个免费层渠道预设，注册领取 API Key 即用。详见 [免费渠道](#-免费渠道开箱即用)。
+> 🎁 **免费渠道开箱即用**：启动即内置 **OpenCode 免费车道** 与 **Kilo 免费池** 两条免 Key 渠道，零配置直接调用；另提供 **11 个免费层渠道预设**——国际（Groq / Cerebras / Mistral / NVIDIA NIM / OpenRouter / GitHub Models / Hugging Face / SambaNova / Cohere）与国内（ModelScope 魔搭 / SiliconFlow 硅基流动）——注册领取 API Key 即用，Google Gemini 与智谱 GLM 也提供免费层。详见 [免费渠道](#-免费渠道开箱即用)。
 
 ---
 
@@ -59,7 +59,7 @@ flowchart LR
     subgraph Channels["☁️ 上游渠道（三类）"]
         direction TB
         F1["🔗 API 渠道（Key 接入）<br/>OpenAI · Claude · DeepSeek · Gemini<br/>智谱 · 通义 · Moonshot · 豆包 · StepFun"]
-        F2["🎁 免费渠道<br/>OpenCode 车道 / Kilo 池（免 Key · 启动即内置）<br/>Groq · Cerebras · Mistral · NVIDIA NIM · OpenRouter 免费层"]
+        F2["🎁 免费渠道<br/>OpenCode 车道 / Kilo 池（免 Key · 启动即内置）<br/>11 家免费层：Groq · Cerebras · Mistral · NIM · OpenRouter<br/>ModelScope · 硅基流动 · GitHub Models · HF · SambaNova · Cohere"]
         F3["👤 账号渠道（OAuth 登录）<br/>Codex · Kimi · Antigravity<br/>Qoder · WorkBuddy · Grok"]
     end
 
@@ -93,15 +93,23 @@ flowchart LR
 
 **2. 免费层渠道预设（注册领 Key）**
 
-「新建渠道」中选择以下预设，按界面上的「获取 API Key」链接注册即用，模型清单支持「同步上游模型」拉取：
+「新建渠道」中选择以下预设，按界面上的「获取 API Key」链接注册即用，模型清单支持「同步上游模型」拉取（自动过滤免费可用模型）：
 
-| 预设 | 免费方式 |
-|:---|:---|
-| **Groq** | 注册领取 API Key，超高速 LPU 推理，速率与每日额度有限 |
-| **Cerebras** | 注册即送额度，晶圆级芯片高速推理 |
-| **Mistral** | La Plateforme 免费实验层，按日 / 月限额 |
-| **NVIDIA NIM** | 注册送 1000 credits，聚合 DeepSeek / Kimi / GLM / MiniMax 等开源模型 |
-| **OpenRouter** | 带 `:free` 后缀的模型免费调用，`openrouter/free` 自动路由当前可用免费池 |
+| 分组 | 预设 | 免费方式 |
+|:---|:---|:---|
+| 国内 | **ModelScope 魔搭** | 注册并实名后每日 2000 次免费调用（单模型 ≤500 次/天，动态限速，需中国手机号） |
+| 国内 | **SiliconFlow 硅基流动** | 实名注册送体验额度，部分小模型永久免费（固定限速，超额 429） |
+| 国际 | **Groq** | 注册领取 API Key，超高速 LPU 推理，速率与每日额度有限 |
+| 国际 | **Cerebras** | 注册即送额度，晶圆级芯片高速推理 |
+| 国际 | **Mistral** | La Plateforme 免费实验层，按日 / 月限额 |
+| 国际 | **NVIDIA NIM** | 注册送 1000 credits，聚合 DeepSeek / Kimi / GLM / MiniMax 等开源模型 |
+| 国际 | **OpenRouter** | 带 `:free` 后缀的模型免费调用，`openrouter/free` 自动路由当前可用免费池 |
+| 国际 | **GitHub Models** | GitHub PAT（`models:read` 权限）即可调用多厂商模型，个人账户免费层限速 |
+| 国际 | **Hugging Face** | 免费账户每月赠送推理额度，自动路由到合作 Provider |
+| 国际 | **SambaNova** | 邮箱注册即用（免信用卡），免费层 20 次/分钟 · 20 次/天 |
+| 国际 | **Cohere** | Trial Key 每月 1000 次调用（20 RPM），仅评估用途 |
+
+此外，**已有渠道也带免费层**：Google Gemini（AI Studio 免费层，Flash 系列每日 100 万 token，15 RPM）与智谱 GLM（`glm-4.7-flash` 等 Flash 系列免费）的预设描述中已标注免费层说明与注册入口。
 
 > 💡 免费渠道额度与速率各有约束，超额时上游返回 429，网关会自动切换到下一个可用渠道。此外，通过「Auth 账号」OAuth 登录的账号渠道（如 Antigravity、Codex、Kimi、Qoder）也可使用账号自带额度，部分供应商提供免费或订阅内额度。
 
@@ -766,7 +774,10 @@ WaLiAPI 定位为**本地 / 内网优先**的 LLM 网关。公网部署前请先
 
 - ✨ **内置免费渠道种子，开箱即用**：启动时自动预建 OpenCode 免费车道与 Kilo 免费池两条免 Key 免费渠道（`services/builtin_channels.rs`），零配置即可调用；每实例仅种子一次，删除后不会自动加回，幂等兜底不产生重复渠道
 - ✨ **OpenCode 免费车道专用执行器**：新增 `endpoint_executor/opencode_lane.rs`，就地把请求整形为上游 v2 客户端指纹门禁接受的形状（公开令牌 `public`、固定 UA / 客户端头、会话 id 降序编码铸造 + 会话池轮换、`read` / `shell` 工具指纹逐字声明与同名工具改名），绕开 403 FreeTierError
-- ✨ **新增 5 个免费层渠道预设**：Groq / Cerebras / Mistral / NVIDIA NIM / OpenRouter，预设新增 `key_signup_url`「获取 API Key」跳转链接（前端在 Key 配置上方渲染注册提示），配套基线测试守护
+- ✨ **新增 11 个免费层渠道预设**：Groq / Cerebras / Mistral / NVIDIA NIM / OpenRouter / GitHub Models / Hugging Face / SambaNova / Cohere（国际）与 ModelScope 魔搭 / SiliconFlow 硅基流动（国内），预设新增 `key_signup_url`「获取 API Key」跳转链接（前端在 Key 配置上方渲染注册提示），配套基线测试守护
+- ✨ **免费模型同步过滤**：Kilo 同步只保留 `isFree == true` 模型、OpenCode 同步只保留 `-free` 后缀模型（付费模型免 Key 调用必 401，同步进来只会误导），各自新增回归测试
+- ✨ **免费层标注补齐**：Google Gemini（AI Studio Flash 免费层每日 100 万 token）与智谱 GLM（`glm-4.7-flash` 等免费）预设描述补充免费层说明并补注册链接
+- 📝 **免费渠道对接方案文档**：新增 `docs/free-channel-integration-plan.md`；全量 `cargo fmt`（无功能变化）
 
 #### Wiki 重建与体验（PR #166，@freakojc）
 
@@ -1675,7 +1686,7 @@ WaLiAPI 定位为**本地 / 内网优先**的 LLM 网关。公网部署前请先
 
 | | 贡献者 | GitHub | 提交 | 代码变更 | 主要贡献 |
 |:---:|:---|:---|:---:|:---|:---|
-| 🏆 | **小傅哥** | [@fuzhengwei](https://github.com/fuzhengwei) | 369 | `+85,693 / -9,114` | 项目创建者 · 核心架构 · 多渠道网关 · 协议转换 · 安全审计 · 知识库引擎 · Wiki 知识引擎 · MCP Server · Codex 账号切换 · API Key 独立启停与负载均衡增强 · WorkBuddy 对接与 Windows 升级启动修复（v0.4.1） · Qoder Auth 渠道与协议编解码 · 可观测性增强与仪表盘路由地图/Token 热力图 · API 日志客户端识别 · README 多语言化与 30 秒架构图（v0.4.2） · MCP 能力域升级为软件对接 Link 与 OpenAPI 一键导入、CLI-Hub 集成、Qoder 流式修复（v0.4.3） · 推理档位下拉组件统一（v0.4.4） · 免费渠道对接：OpenCode 车道 / Kilo 池免 Key 内置种子、免费车道执行器、Groq / Cerebras / Mistral / NVIDIA NIM / OpenRouter 免费层预设（v0.4.5） |
+| 🏆 | **小傅哥** | [@fuzhengwei](https://github.com/fuzhengwei) | 373 | `+86,896 / -9,369` | 项目创建者 · 核心架构 · 多渠道网关 · 协议转换 · 安全审计 · 知识库引擎 · Wiki 知识引擎 · MCP Server · Codex 账号切换 · API Key 独立启停与负载均衡增强 · WorkBuddy 对接与 Windows 升级启动修复（v0.4.1） · Qoder Auth 渠道与协议编解码 · 可观测性增强与仪表盘路由地图/Token 热力图 · API 日志客户端识别 · README 多语言化与 30 秒架构图（v0.4.2） · MCP 能力域升级为软件对接 Link 与 OpenAPI 一键导入、CLI-Hub 集成、Qoder 流式修复（v0.4.3） · 推理档位下拉组件统一（v0.4.4） · 免费渠道对接：OpenCode 车道 / Kilo 池免 Key 内置种子、免费车道执行器、11 家免费层预设（Groq / Cerebras / Mistral / NIM / OpenRouter / GitHub Models / Hugging Face / SambaNova / Cohere / ModelScope / 硅基流动）、免费模型同步过滤与 Google / 智谱免费层标注（v0.4.5） |
 | ⚡ | **xian** | [@zsxink](https://github.com/zsxink) | 140 | `+97,192 / -24,477` | Anthropic Messages 协议兼容 · 渠道协议重构（T01-T14）· codec 加固 · SSRF 防护 · SSE 帧重组 · models 接口 · Kimi Code Auth · protocol 模块结构化重构 · Auth 多格式导入 |
 | 🛠 | **chyuan** | [@chyuan-cuihongyuan](https://github.com/chyuan-cuihongyuan) | 56 | `+11,881 / -1,729` | 统一上游重试判定决策函数与真值表测试 · 渠道健康探测与候选排序 · 语义缓存 · 流式内容持久化与断线续传 · X-Request-Id / OTLP 可观测性 · 知识库增量索引、查询改写与混合检索 · 配额强化 · 401/403 下游脱敏 · StepFun 渠道预设接入（PR #127） |
 | 🚀 | **GululuCopa** | [@GululuCopa](https://github.com/GululuCopa) | 24 | `+13,087 / -475` | Grok OAuth 登录（PR #122）· Antigravity OAuth Gemini 登录（PR #121）与 v0.3.6 修复（PR #128）· Grok 与 Antigravity namespace 工具兼容修复 · 网关客户端适配（流式出站无总超时、Grok 工具白名单与加密推理约束对齐、采样字段兼容、OpenCode/OpenClaw/Hermes 配置生成修正，PR #135）· codec 响应格式与防护修复（response_format 映射、safeguards fail-open、Gemini JSON Schema / Gemini 3 工具签名兼容、function_call fc_ 前缀修复，PR #136） |

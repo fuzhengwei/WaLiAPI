@@ -20,7 +20,7 @@
 
 </div>
 
-> 🎁 **無料チャネルをすぐに使える**：初回起動時にキー不要の **OpenCode 無料レーン** と **Kilo 無料プール** の 2 チャネルを自動登録。設定ゼロでそのまま呼び出せます。さらに **Groq / Cerebras / Mistral / NVIDIA NIM / OpenRouter** の 5 つの無料枠チャネルプリセットも用意されており、登録してキーを取得するだけで使えます。詳しくは[無料チャネル](#-無料チャネルをすぐに使える)へ。
+> 🎁 **無料チャネルをすぐに使える**：初回起動時にキー不要の **OpenCode 無料レーン** と **Kilo 無料プール** の 2 チャネルを自動登録。設定ゼロでそのまま呼び出せます。さらに **11 の無料枠チャネルプリセット**（国際：Groq / Cerebras / Mistral / NVIDIA NIM / OpenRouter / GitHub Models / Hugging Face / SambaNova / Cohere、中国国内：ModelScope 魔搭 / SiliconFlow 硅基流动）も用意されており、登録してキーを取得するだけで使えます。Google Gemini と智谱 GLM も無料枠を提供しています。詳しくは[無料チャネル](#-無料チャネルをすぐに使える)へ。
 
 ---
 
@@ -59,7 +59,7 @@ flowchart LR
     subgraph Channels["☁️ 上流チャネル（3 種類）"]
         direction TB
         F1["🔗 API チャネル（キー接続）<br/>OpenAI · Claude · DeepSeek · Gemini<br/>智谱 · 通義 · Moonshot · 豆包 · StepFun"]
-        F2["🎁 無料チャネル<br/>OpenCode レーン / Kilo プール（キー不要 · 初回起動時に登録）<br/>Groq · Cerebras · Mistral · NVIDIA NIM · OpenRouter"]
+        F2["🎁 無料チャネル<br/>OpenCode レーン / Kilo プール（キー不要 · 初回起動時に登録）<br/>11 無料枠：Groq · Cerebras · Mistral · NIM · OpenRouter<br/>ModelScope · 硅基流动 · GitHub Models · HF · SambaNova · Cohere"]
         F3["👤 アカウントチャネル（OAuth ログイン）<br/>Codex · Kimi · Antigravity<br/>Qoder · WorkBuddy · Grok"]
     end
 
@@ -93,15 +93,23 @@ flowchart LR
 
 **2. 無料枠チャネルプリセット（登録してキー取得）**
 
-「新規チャネル」で以下のプリセットを選び、画面の「API Key を取得」リンクから登録するだけ。モデル一覧は「上流モデル同期」で更新できます：
+「新規チャネル」で以下のプリセットを選び、画面の「API Key を取得」リンクから登録するだけ。モデル一覧は「上流モデル同期」で更新できます（無料で使えるモデルのみに自動フィルタリング）：
 
-| プリセット | 無料枠 |
-|:---|:---|
-| **Groq** | 登録でキー取得。高速 LPU 推理、レート・日次制限あり |
-| **Cerebras** | 登録でクレジット進呈。ウェハレベルの高速推論 |
-| **Mistral** | La Plateforme 無料実験枠。日次 / 月次制限あり |
-| **NVIDIA NIM** | 登録で 1000 クレジット。DeepSeek / Kimi / GLM / MiniMax などを集約 |
-| **OpenRouter** | `:free` 接尾辞モデルは無料。`openrouter/free` で現在使える無料プールへ自動ルーティング |
+| 分類 | プリセット | 無料枠 |
+|:---|:---|:---|
+| 中国 | **ModelScope 魔搭** | 登録 + 実名認証で毎日 2000 回無料（1 モデル ≤500 回/日、動的レート制限、中国電話番号が必要） |
+| 中国 | **SiliconFlow 硅基流动** | 実名登録で体験クレジット進呈。一部の小型モデルは永久無料（固定レート制限、超過時 429） |
+| 国際 | **Groq** | 登録でキー取得。高速 LPU 推理、レート・日次制限あり |
+| 国際 | **Cerebras** | 登録でクレジット進呈。ウェハレベルの高速推論 |
+| 国際 | **Mistral** | La Plateforme 無料実験枠。日次 / 月次制限あり |
+| 国際 | **NVIDIA NIM** | 登録で 1000 クレジット。DeepSeek / Kimi / GLM / MiniMax などを集約 |
+| 国際 | **OpenRouter** | `:free` 接尾辞モデルは無料。`openrouter/free` で現在使える無料プールへ自動ルーティング |
+| 国際 | **GitHub Models** | GitHub PAT（`models:read`）でマルチベンダーモデルを呼び出し可能。個人アカウントの無料枠はレート制限あり |
+| 国際 | **Hugging Face** | 無料アカウントに毎月推論クレジット進呈。提携 Provider へ自動ルーティング |
+| 国際 | **SambaNova** | メール登録のみ（クレジットカード不要）。無料枠は 20 RPM · 20 RPD |
+| 国際 | **Cohere** | Trial キーで毎月 1000 回呼び出し（20 RPM）、評価用のみ |
+
+既存プリセットにも無料枠があります：**Google Gemini**（AI Studio 無料枠 — Flash 系モデルは毎日 100 万トークン、15 RPM）と**智谱 GLM**（`glm-4.7-flash` など Flash 系が無料）。両プリセットの説明に無料枠の注記と登録リンクを追記済みです。
 
 > 💡 無料枠にはそれぞれレート・クォータ制限があり、超過時は上流が 429 を返します。ゲートウェイは自動で次の利用可能チャネルへフェイルオーバーします。また「Auth アカウント」で OAuth ログインしたアカウントチャネル（Antigravity・Codex・Kimi・Qoder など）でも、アカウント自身のクォータを利用できます。
 
@@ -424,7 +432,10 @@ WaLiAPI は**ローカル / イントラネット優先**で設計されてい�
 
 ### v0.4.5 (2026-10-22)
 
-- ✨ **無料チャネル対応**（@fuzhengwei）：初回起動時に OpenCode 無料レーンと Kilo 無料プールをキー不要のチャネルとして自動登録（設定ゼロ・1 度のみ・削除は尊重）。上流 v2 フィンガープリントゲートを通過させる専用 OpenCode レーン実行器を追加（公開クレデンシャル `public`、固定ヘッダ、セッション ID 鋳造とセッションプール、`read` / `shell` ツール宣言）。無料枠チャネルプリセット 5 種を追加 —— Groq・Cerebras・Mistral・NVIDIA NIM・OpenRouter —— キー入力欄の上に「API Key を取得」リンク（`key_signup_url`）を表示
+- ✨ **無料チャネル対応**（@fuzhengwei）：初回起動時に OpenCode 無料レーンと Kilo 無料プールをキー不要のチャネルとして自動登録（設定ゼロ・1 度のみ・削除は尊重）。上流 v2 フィンガープリントゲートを通過させる専用 OpenCode レーン実行器を追加（公開クレデンシャル `public`、固定ヘッダ、セッション ID 鋳造とセッションプール、`read` / `shell` ツール宣言）。**無料枠チャネルプリセット 11 種を追加** —— Groq・Cerebras・Mistral・NVIDIA NIM・OpenRouter・GitHub Models・Hugging Face・SambaNova・Cohere（国際）と ModelScope・SiliconFlow（中国）—— キー入力欄の上に「API Key を取得」リンク（`key_signup_url`）を表示
+- ✨ **無料モデル同期フィルタリング**：「上流モデル同期」は無料で使えるモデルのみを保持 —— Kilo は `isFree == true` のみ、OpenCode は `-free` 接尾辞のみ（キーなしで呼べる有料モデルはないため 401 必至）、それぞれ回帰テスト付き
+- ✨ **無料枠注記の補完**：Google Gemini（AI Studio 無料枠 — Flash 系は毎日 100 万トークン）と智谱 GLM（`glm-4.7-flash` など無料）のプリセット説明に無料枠の注記と登録リンクを追記
+- 📝 **無料チャネル統合方針ドキュメント**：`docs/free-channel-integration-plan.md` を新規追加。全体 `cargo fmt`（機能変更なし）
 - ✨ **Wiki 再構築と UX**（PR #166、@freakojc）：プログラマティックなインデックス再構築（`services/wiki/rebuild.rs`）——LLM 意味グルーピングとログ整合性バックフィル。ページタブ UX 改善（スクロール位置・ドロップダウン統一・ドキュメント検索）
 - 🐛 **WorkBuddy レスポンス互換**（PR #168、@mw）：上流レスポンス形式の差異に対するレスポンス解析と SSE ストリーミング処理の互換性強化
 - 🔧 バージョンを 0.4.5 に更新（package.json / Cargo.toml / tauri.conf.json / Cargo.lock）
