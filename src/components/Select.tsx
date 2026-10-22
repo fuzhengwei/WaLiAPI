@@ -217,10 +217,10 @@ export function Select({
         disabled={disabled}
         onClick={() => setOpen(o => !o)}
         onKeyDown={onKeyDown}
-        className={`flex w-full items-center justify-between gap-2 border border-border bg-background/70 text-left transition-colors disabled:cursor-not-allowed disabled:opacity-50 ${sizeCls} ${
+        className={`flex w-full items-center justify-between gap-2 border border-slate-200 bg-white text-left transition-all disabled:cursor-not-allowed disabled:opacity-50 ${sizeCls} ${
           open
-            ? "border-primary ring-2 ring-primary/20"
-            : "hover:border-primary/40 focus:border-primary focus:outline-none focus:ring-2 focus:ring-primary/20"
+            ? "border-blue-400 ring-2 ring-blue-100"
+            : "hover:border-blue-400 hover:shadow-sm focus:border-blue-400 focus:outline-none focus:ring-2 focus:ring-blue-100"
         }`}
       >
         <span className={`min-w-0 flex-1 truncate ${current ? "" : "text-muted-foreground"}`}>
@@ -242,7 +242,7 @@ export function Select({
           id={listboxId}
           role="listbox"
           style={wide ? popStyle : undefined}
-          className={`absolute z-50 max-h-80 overflow-y-auto rounded-xl border border-border bg-white p-1 shadow-[0_16px_40px_rgba(15,23,42,0.16)] ${
+          className={`absolute z-50 max-h-80 overflow-y-auto rounded-xl border border-slate-200 bg-white p-1 shadow-[0_16px_40px_rgba(15,23,42,0.16)] ${
             dropUp ? "bottom-[calc(100%+6px)]" : "top-[calc(100%+6px)]"
           } ${popupPosCls}`}
         >
@@ -305,16 +305,16 @@ export function Select({
                   title={opt.label}
                   className={`flex w-full items-center justify-between gap-2 rounded-lg px-3 py-2 text-left text-sm transition-colors disabled:cursor-not-allowed disabled:opacity-40 ${
                     isFocused
-                      ? "bg-muted/70 ring-1 ring-primary/30"
+                      ? "bg-slate-50 ring-1 ring-blue-200"
                       : isCurrent
-                        ? "bg-primary/10"
-                        : "hover:bg-muted/50"
+                        ? "bg-blue-50"
+                        : "hover:bg-slate-50"
                   }`}
                 >
-                  <span className={`min-w-0 flex-1 truncate ${isCurrent ? "font-semibold text-primary" : ""}`}>
+                  <span className={`min-w-0 flex-1 truncate ${isCurrent ? "font-semibold text-blue-600" : ""}`}>
                     {opt.label}
                   </span>
-                  <span className="shrink-0 font-bold text-primary">{isCurrent ? "✓" : ""}</span>
+                  <span className="shrink-0 font-bold text-blue-600">{isCurrent ? "✓" : ""}</span>
                 </button>
               );
             })}

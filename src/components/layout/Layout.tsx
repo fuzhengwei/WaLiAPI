@@ -14,7 +14,7 @@ export function Layout({
     <div className="flex h-screen overflow-hidden bg-transparent text-foreground">
       <Sidebar hasUpdate={hasUpdate} onCheckUpdate={onCheckUpdate} />
       <main className="flex-1 overflow-hidden">
-        <div className="h-full overflow-auto bg-[linear-gradient(180deg,rgba(255,255,255,0.02),transparent)]">
+        <div className="h-full overflow-auto bg-[linear-gradient(180deg,rgba(255,255,255,0.02),transparent)]" data-wali-scroll>
           {children}
         </div>
       </main>

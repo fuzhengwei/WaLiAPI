@@ -3,6 +3,7 @@ pub mod handlers;
 pub mod ingest;
 pub mod models;
 pub mod project;
+pub mod rebuild;
 pub mod repository;
 pub mod routes;
 

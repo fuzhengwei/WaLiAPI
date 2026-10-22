@@ -454,6 +454,7 @@ pub fn run() {
             commands::wiki::import_wiki_backup_bytes,
             commands::wiki::pick_wiki_export_dir,
             commands::wiki::pick_wiki_import_file,
+            commands::wiki::rebuild_wiki_index,
             // App Config (应用配置)
             commands::app_config::get_app_configs,
             commands::app_config::apply_app_config,

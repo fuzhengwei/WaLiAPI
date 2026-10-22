@@ -159,6 +159,26 @@ pub async fn write_page(project_id: &str, path: &str, content: &str) -> Result<(
         .map_err(|e| format!("Failed to write {}: {}", path, e))
 }
 
+/// 原子写：先写同目录临时文件，再 rename 覆盖目标（Windows `MoveFileExW` 支持覆盖已存在文件）。
+/// 避免 index.md / log.md 被并发或中断写成半个文件。
+pub async fn write_file_atomic(full_path: &std::path::Path, content: &str) -> Result<(), String> {
+    let file_name = full_path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("wiki-file");
+    let tmp_path = full_path.with_file_name(format!(
+        ".{}.tmp-{}",
+        file_name,
+        std::process::id()
+    ));
+    fs::write(&tmp_path, content)
+        .await
+        .map_err(|e| format!("Failed to write temp file: {}", e))?;
+    fs::rename(&tmp_path, full_path)
+        .await
+        .map_err(|e| format!("Failed to replace target file: {}", e))
+}
+
 /// Delete a wiki page from disk.
 pub async fn delete_page_file(project_id: &str, path: &str) -> Result<(), String> {
     let full_path = wiki_page_path(project_id, path)?;

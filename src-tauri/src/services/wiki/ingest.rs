@@ -212,6 +212,12 @@ async fn ingest_source_inner(
     for page in &pages {
         let page_path = &page.path;
 
+        // 系统页（wiki/index.md、wiki/log.md）由程序统一维护：跳过 LLM 生成的版本，
+        // 既不写盘也不入库，避免每次摄入后仅剩最后一份、覆盖累积内容。
+        if crate::services::wiki::rebuild::is_system_page(page_path) {
+            continue;
+        }
+
         let mut final_content = page.content.clone();
         if !final_content.contains("![") && !image_refs.is_empty() {
             final_content.push_str("\n\n## 原稿截图\n\n");
@@ -299,8 +305,8 @@ async fn ingest_source_inner(
     .bind(page_count).bind(source_count).bind(&now).bind(&now).bind(project_id)
     .execute(pool).await.map_err(|e| format!("DB error: {}", e))?;
 
-    // Append log
-    let _ = project::append_log(
+    // Append log（带 project 锁，防并发丢行）
+    let _ = crate::services::wiki::rebuild::append_log_locked(
         project_id,
         &format!(
             "ingest | {} → {} pages",
@@ -309,6 +315,13 @@ async fn ingest_source_inner(
         ),
     )
     .await;
+
+    // log 一致性检测 + 一次性回溯（老项目 log 缺失时从 wiki_sources 重建历史）
+    let _ = crate::services::wiki::rebuild::ensure_log_rebuilt(pool, project_id).await;
+
+    // 程序化重建 index.md：读 DB 全量 active 页面按 type 分组（含本次新增），
+    // 保证目录始终完整、累积所有源。零 LLM、毫秒级；并发摄入时由 project 锁串行化。
+    let _ = crate::services::wiki::rebuild::rebuild_index_programmatic(pool, project_id).await;
 
     // Update task
     let result_json = serde_json::json!({
