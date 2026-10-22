@@ -56,10 +56,14 @@ pub async fn fetch_upstream_models(
 
     // 协议分派：openai/anthropic 都用 OpenAI 兼容 `/models`（`data[].id`），
     // ollama 用 `/api/tags`（`models[].name`）。
+    // Kilo 免费池特殊：上游 /models 会返回全部模型（免费+付费），但付费模型
+    // 免 Key 调用会 401 "You need to sign in to use this model."，因此只保留
+    // `isFree == true` 的模型（实测 401 个中约 18 个免费）。
     let (path, parse): (&str, fn(&Value) -> Vec<String>) = match identity.protocol.as_str() {
         // main 分支约定：anthropic Base 自带 /v1，端点只补 /models。
         "anthropic" => ("/models", parse_openai_list),
         "ollama" => ("api/tags", parse_ollama_tags),
+        _ if identity.provider == "kilo" => ("models", parse_kilo_free_list),
         _ => ("models", parse_openai_list),
     };
     let url = ensure_scheme(&final_url(&base_url, path, None));
@@ -137,6 +141,20 @@ fn parse_openai_list(body: &Value) -> Vec<String> {
         .and_then(Value::as_array)
         .map(|arr| {
             arr.iter()
+                .filter_map(|m| m.get("id").and_then(Value::as_str).map(String::from))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Kilo 免费池 `/models`：只保留 `isFree == true` 的模型。
+/// 付费模型免 Key 调用必 401（`PAID_MODEL_AUTH_REQUIRED`），同步进来只会误导。
+fn parse_kilo_free_list(body: &Value) -> Vec<String> {
+    body.get("data")
+        .and_then(Value::as_array)
+        .map(|arr| {
+            arr.iter()
+                .filter(|m| m.get("isFree").and_then(Value::as_bool) == Some(true))
                 .filter_map(|m| m.get("id").and_then(Value::as_str).map(String::from))
                 .collect()
         })
@@ -314,6 +332,26 @@ mod tests {
         let r = fetch_upstream_models(&input, "", 5).await.unwrap();
         assert_eq!(r.models, vec!["qwen3:32b", "llama3.3:70b"]);
         assert_eq!(r.protocol, "ollama");
+    }
+
+    #[tokio::test]
+    async fn kilo_sync_keeps_only_free_models() {
+        // Kilo 上游 /models 混有付费模型；付费模型免 Key 必 401，同步必须过滤。
+        let m = start_mock(json!({"data": [
+            {"id": "kilo-auto/free", "isFree": true},
+            {"id": "minimax/minimax-m3.1-flash:free", "isFree": true},
+            {"id": "deepseek/deepseek-v4.1-flash", "isFree": false},
+            {"id": "anthropic/claude-opus-5.5", "isFree": false},
+            {"id": "no-flag-model"}
+        ]}))
+        .await;
+        let mut input = draft("openai", &m.addr);
+        input.provider = Some("kilo".to_string());
+        let r = fetch_upstream_models(&input, "", 5).await.unwrap();
+        assert_eq!(
+            r.models,
+            vec!["kilo-auto/free", "minimax/minimax-m3.1-flash:free"]
+        );
     }
 
     #[tokio::test]
