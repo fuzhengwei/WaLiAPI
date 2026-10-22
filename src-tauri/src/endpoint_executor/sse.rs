@@ -382,7 +382,13 @@ fn accumulate_from_sse_event(
                         if let Some(id) = tc.get("id").and_then(|i| i.as_str()) {
                             entry["id"] = serde_json::json!(id);
                         }
-                        if let Some(t) = tc.pointer("/function/name").and_then(|n| n.as_str()) {
+                        // 跳过空 name：部分上游（如 WorkBuddy）每帧重发
+                        // "name":""，空串不得覆盖首帧已取得的真实函数名。
+                        if let Some(t) = tc
+                            .pointer("/function/name")
+                            .and_then(|n| n.as_str())
+                            .filter(|n| !n.is_empty())
+                        {
                             entry["function"]["name"] = serde_json::json!(t);
                         }
                         if let Some(args) =
@@ -820,6 +826,43 @@ mod tests {
                 .pointer("/function/arguments")
                 .and_then(|a| a.as_str()),
             Some("text(tools.exec_command({}))")
+        );
+    }
+
+    /// WorkBuddy 类上游每帧都会重发 `"function":{"name":"",...}`，空 name
+    /// 不得覆盖首帧取得的真实函数名（审计日志工具名为空的回归测试）。
+    #[test]
+    fn empty_tool_call_name_delta_does_not_clobber_first_frame() {
+        let mut content = String::new();
+        let mut reasoning = String::new();
+        let mut role = None;
+        let mut finish_reason = None;
+        let mut tool_calls = std::collections::BTreeMap::new();
+        accumulate_from_sse_event(
+            "data: {\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_1\",\"type\":\"function\",\"function\":{\"name\":\"read_file\",\"arguments\":\"\"}}]}}]}",
+            &mut content,
+            &mut reasoning,
+            &mut role,
+            &mut finish_reason,
+            &mut tool_calls,
+        );
+        // 后续帧仅携带参数增量与空 name（WorkBuddy 的不规范行为）
+        accumulate_from_sse_event(
+            "data: {\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"name\":\"\",\"arguments\":\"{\\\"path\\\":\"}}]}}]}",
+            &mut content,
+            &mut reasoning,
+            &mut role,
+            &mut finish_reason,
+            &mut tool_calls,
+        );
+        let tc = tool_calls.get(&0).expect("tool_call entry exists");
+        assert_eq!(
+            tc.pointer("/function/name").and_then(|n| n.as_str()),
+            Some("read_file")
+        );
+        assert_eq!(
+            tc.pointer("/function/arguments").and_then(|a| a.as_str()),
+            Some("{\"path\":")
         );
     }
 }

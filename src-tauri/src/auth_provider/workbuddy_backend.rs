@@ -438,7 +438,12 @@ fn aggregate_chat_stream(payload: &str) -> Result<Value, ProviderError> {
                 if let Some(value) = call.get("type").and_then(Value::as_str) {
                     entry["type"] = Value::String(value.to_owned());
                 }
-                if let Some(value) = call.pointer("/function/name").and_then(Value::as_str) {
+                // 跳过空 name：上游每帧重发 "name":""，空串不得覆盖首帧真名。
+                if let Some(value) = call
+                    .pointer("/function/name")
+                    .and_then(Value::as_str)
+                    .filter(|value| !value.is_empty())
+                {
                     entry["function"]["name"] = Value::String(value.to_owned());
                 }
                 if let Some(value) = call.pointer("/function/arguments").and_then(Value::as_str) {
@@ -737,5 +742,23 @@ mod tests {
     #[test]
     fn aggregate_chat_stream_rejects_payload_without_chunks() {
         assert!(aggregate_chat_stream(": heartbeat\ndata: [DONE]\n").is_err());
+    }
+
+    /// 上游每帧重发空 name 时，聚合结果必须保留首帧的真实函数名（回归测试）。
+    #[test]
+    fn aggregate_chat_stream_keeps_tool_name_from_first_chunk() {
+        let payload = concat!(
+            "data: {\"id\":\"c1\",\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_1\",\"type\":\"function\",\"function\":{\"name\":\"get\",\"arguments\":\"{\\\"a\\\":\"}}]}}]}\n",
+            "data: {\"id\":\"c1\",\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"name\":\"\",\"arguments\":\"1}\"}}]}}]}\n",
+            "data: {\"id\":\"c1\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"tool_calls\"}]}\n",
+            "data: [DONE]\n",
+        );
+        let completion = aggregate_chat_stream(payload).unwrap();
+        let tool_calls = completion["choices"][0]["message"]["tool_calls"]
+            .as_array()
+            .unwrap();
+        assert_eq!(tool_calls.len(), 1);
+        assert_eq!(tool_calls[0]["function"]["name"], "get");
+        assert_eq!(tool_calls[0]["function"]["arguments"], "{\"a\":1}");
     }
 }
